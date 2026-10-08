@@ -146,8 +146,10 @@ func printOf(m api.Message) msgPrint {
 
 // persistedState is what this Store knows is on disk for one session file.
 type persistedState struct {
-	prints []msgPrint
-	size   int64
+	prints    []msgPrint
+	size      int64
+	userTurns int
+	preview   string
 	// modTime is the file's mtime (UnixNano) as this Store last wrote or
 	// read it; 0 when unknown. With size it tells this process's own file
 	// from one another cove process on the same session changed since.
@@ -156,6 +158,14 @@ type persistedState struct {
 	// appends since then; together they decide when the line is refreshed.
 	meta    fileMeta
 	appends int
+}
+
+func (st *persistedState) noteMessage(message api.Message) {
+	meta := listMsg{Role: message.Role, Content: message.Content, Synthetic: message.Synthetic}
+	st.userTurns += countGenuineUserTurns([]listMsg{meta})
+	if st.preview == "" {
+		st.preview = firstUserPreview([]listMsg{meta})
+	}
 }
 
 // metaRefreshEvery bounds how stale the first line's tokens and cost may get:
@@ -282,7 +292,7 @@ func (s *Store) save(r *Record, stamp, forceRewrite bool) error {
 	// and replacing it can fail on Windows while another one reads it, so a
 	// failed update is logged, not returned: the caller's save did succeed.
 	if err := s.updateIndex(func(idx *indexFile) {
-		e := entryFor(r, filepath.Base(path), info)
+		e := entryFromState(r, filepath.Base(path), info, st)
 		if !ours {
 			// Describes our history, not the file: make List rescan it.
 			e.Size, e.ModTime = expected, 0
@@ -375,6 +385,7 @@ func (s *Store) appendMessages(r *Record, key, path string, st *persistedState) 
 	}
 	for _, m := range fresh {
 		st.prints = append(st.prints, printOf(m))
+		st.noteMessage(m)
 	}
 	st.appends++
 	return int64(buf.Len()), nil
@@ -475,6 +486,7 @@ func (s *Store) rewrite(r *Record, key, path string) (int64, error) {
 	st.prints = make([]msgPrint, len(r.Messages))
 	for i, m := range r.Messages {
 		st.prints[i] = printOf(m)
+		st.noteMessage(m)
 	}
 	st.meta, st.appends = metaOf(r), 0
 	return int64(buf.Len()), nil
@@ -512,8 +524,10 @@ func (s *Store) Load(id string) (*Record, error) {
 				st.modTime = preInfo.ModTime().UnixNano()
 			}
 			st.prints = make([]msgPrint, len(r.Messages))
+			st.userTurns, st.preview = 0, ""
 			for i, m := range r.Messages {
 				st.prints[i] = printOf(m)
+				st.noteMessage(m)
 			}
 			st.meta, st.appends = onDisk, 0
 		} else {
@@ -1017,13 +1031,17 @@ func (s *Store) updateIndex(change func(*indexFile)) error {
 }
 
 func entryFor(r *Record, file string, info fs.FileInfo) *indexEntry {
-	msgs := make([]listMsg, len(r.Messages))
-	for i, m := range r.Messages {
-		msgs[i] = listMsg{Role: m.Role, Content: m.Content, Synthetic: m.Synthetic}
+	var state persistedState
+	for _, message := range r.Messages {
+		state.noteMessage(message)
 	}
+	return entryFromState(r, file, info, &state)
+}
+
+func entryFromState(r *Record, file string, info fs.FileInfo, state *persistedState) *indexEntry {
 	return &indexEntry{
 		ID: r.ID, Title: r.Title, Cwd: r.Cwd,
-		Turns: countGenuineUserTurns(msgs), MessageCount: len(msgs), Preview: firstUserPreview(msgs),
+		Turns: state.userTurns, MessageCount: len(r.Messages), Preview: state.preview,
 		CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt,
 		Model: r.Model, TokensIn: r.TokensIn, TokensOut: r.TokensOut, Cost: r.Cost,
 		File: file, Size: info.Size(), ModTime: info.ModTime().UnixNano(),

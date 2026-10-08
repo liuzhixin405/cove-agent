@@ -7,11 +7,27 @@ import (
 	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
+	"github.com/liuzhixin405/cove-agent/internal/checkpoint"
 )
 
 type checkpointEngine interface {
 	ListCheckpoints() []string
 	RestoreCheckpoint(commitHash string) (backup string, err error)
+}
+
+type selectiveCheckpointEngine interface {
+	PreviewCheckpointFiles(string, []string) (*checkpoint.FileRestorePlan, error)
+	ApplyCheckpointFiles(*checkpoint.FileRestorePlan, string) (string, error)
+}
+
+func checkpointScope(eng EngineView) string {
+	if scoped, ok := eng.(interface {
+		PermissionScope() string
+		SessionID() string
+	}); ok {
+		return scoped.PermissionScope() + "\x00" + scoped.SessionID()
+	}
+	return ""
 }
 
 type rateLimitEngine interface {
@@ -27,9 +43,57 @@ func (c *UndoCmd) MutatesEngine([]string) bool { return true }
 func (c *UndoCmd) Aliases() []string           { return nil }
 func (c *UndoCmd) Description() string         { return "回退到检查点" }
 func (c *UndoCmd) Help() string {
-	return "/undo [commit] - 回退到上一个与当前不同的检查点（可连续回退），或指定检查点；回退前自动备份"
+	return "/undo [commit] - 整树回退并备份；/undo files <commit> <文件>... 预览文件级回滚；/undo apply <预览ID> 确认；/undo cancel 放弃预览"
 }
+func (c *UndoCmd) ArgHints() []string { return []string{"files", "apply", "cancel"} }
 func (c *UndoCmd) Execute(ctx context.Context, in Input) (Output, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(in.Args) > 0 {
+		switch in.Args[0] {
+		case "files":
+			c.preview = nil
+			if len(in.Args) < 3 {
+				return Output{Message: c.Help()}, nil
+			}
+			eng, ok := in.Engine.(selectiveCheckpointEngine)
+			if !ok {
+				return Output{Message: "文件级回滚不可用"}, nil
+			}
+			plan, err := eng.PreviewCheckpointFiles(in.Args[1], in.Args[2:])
+			if err != nil {
+				return Output{Message: "预览失败: " + err.Error()}, nil
+			}
+			c.preview, c.previewScope = plan, checkpointScope(in.Engine)
+			return Output{Message: plan.Summary()}, nil
+		case "apply":
+			if len(in.Args) != 2 || c.preview == nil || c.previewScope != checkpointScope(in.Engine) {
+				c.preview = nil
+				return Output{Message: "当前项目/会话没有有效预览，请先 /undo files <commit> <文件>..."}, nil
+			}
+			eng, ok := in.Engine.(selectiveCheckpointEngine)
+			if !ok {
+				return Output{Message: "文件级回滚不可用"}, nil
+			}
+			backup, err := eng.ApplyCheckpointFiles(c.preview, in.Args[1])
+			c.preview = nil
+			message := "已按预览回滚选中文件，未选中文件保持不变。"
+			if err != nil {
+				message = "文件级回滚失败: " + err.Error()
+			}
+			if backup != "" {
+				message += "\n回滚前已备份；撤销此次回滚: /undo " + backup
+			}
+			return Output{Message: message}, nil
+		case "cancel":
+			if len(in.Args) != 1 {
+				return Output{Message: c.Help()}, nil
+			}
+			c.preview = nil
+			return Output{Message: "已放弃文件级回滚预览。"}, nil
+		}
+	}
+	c.preview = nil
 	eng, ok := in.Engine.(checkpointEngine)
 	if !ok || eng == nil {
 		return Output{Message: "检查点功能不可用"}, nil

@@ -16,7 +16,10 @@ func (c *MemoryCmd) Name() string        { return "memory" }
 func (c *MemoryCmd) Aliases() []string   { return nil }
 func (c *MemoryCmd) Description() string { return "管理持久化记忆" }
 func (c *MemoryCmd) Help() string {
-	return "/memory [list|add|remove|search <关键词>|stats] - 管理持久记忆文件"
+	return "/memory [list|add|remove|search <关键词>|source <名称>|stats] - 管理持久记忆文件与来源证据"
+}
+func (c *MemoryCmd) ArgHints() []string {
+	return []string{"list", "add", "remove", "search", "source", "stats"}
 }
 func (c *MemoryCmd) Execute(ctx context.Context, in Input) (Output, error) {
 	if in.MemoryStore == nil {
@@ -37,12 +40,60 @@ func (c *MemoryCmd) Execute(ctx context.Context, in Input) (Output, error) {
 		return Output{Message: sb.String()}, nil
 	}
 	switch in.Args[0] {
+	case "source":
+		if len(in.Args) != 2 {
+			return Output{Message: "用法: /memory source <名称>"}, nil
+		}
+		store, ok := in.MemoryStore.(interface {
+			Provenance(string) (*memory.Provenance, error)
+		})
+		if !ok {
+			return Output{Message: "此记忆存储不支持溯源"}, nil
+		}
+		record, err := store.Provenance(in.Args[1])
+		if err != nil {
+			return Output{}, err
+		}
+		if record == nil {
+			return Output{Message: "来源未知（旧记忆或正文被外部修改）；不会推断来源会话。"}, nil
+		}
+		var text strings.Builder
+		fmt.Fprintf(&text, "记忆来源: %s\n正文 SHA256: %s\n", in.Args[1], record.ContentHash)
+		for index, source := range record.Sources {
+			when := "时间未知"
+			if !source.At.IsZero() {
+				when = source.At.Format("2006-01-02 15:04:05")
+			}
+			fmt.Fprintf(&text, "%d. %s  %s\n", index+1, source.Kind, when)
+			if len(source.SessionIDs) > 0 {
+				fmt.Fprintf(&text, "   来源会话: %s\n", strings.Join(source.SessionIDs, ", "))
+			}
+			if source.Cwd != "" {
+				fmt.Fprintf(&text, "   项目: %s\n", source.Cwd)
+			}
+			if source.FirstMessage > 0 {
+				fmt.Fprintf(&text, "   消息位置: %d-%d；输入 SHA256: %s\n", source.FirstMessage, source.LastMessage, source.TranscriptHash)
+			}
+			if source.Evidence != "" {
+				fmt.Fprintf(&text, "   依据片段:\n%s\n", source.Evidence)
+			}
+		}
+		text.WriteString("来源记录仅说明写入依据，不构成事实真实性验证。")
+		return Output{Message: text.String()}, nil
 	case "add":
 		if len(in.Args) < 3 {
 			return Output{Message: "用法: /memory add <名称> <内容>"}, nil
 		}
 		name := in.Args[1]
 		content := strings.Join(in.Args[2:], " ")
+		source := memory.ProvenanceSource{Kind: "manual", Cwd: in.Cwd}
+		if eng, ok := in.Engine.(interface{ SessionID() string }); ok {
+			source.SessionIDs = []string{eng.SessionID()}
+		}
+		writer, sourced := in.MemoryStore.(interface {
+			SaveWithSource(string, string, memory.ProvenanceSource) error
+			AppendWithSource(string, string, memory.ProvenanceSource) (string, error)
+		})
 		// The write (and the probe it builds on) holds both memory write
 		// locks like every other writer: without them a turn-end extraction
 		// mid read -> append -> rename in this or another cove process
@@ -53,7 +104,13 @@ func (c *MemoryCmd) Execute(ctx context.Context, in Input) (Output, error) {
 			// the new project copy would hide what the global one said.
 			if ap, ok := in.MemoryStore.(memoryAppender); ok {
 				if _, fromLower, exists := ap.BaseContent(name); exists && fromLower {
-					written, err := ap.Append(name, content)
+					var written string
+					var err error
+					if sourced {
+						written, err = writer.AppendWithSource(name, content, source)
+					} else {
+						written, err = ap.Append(name, content)
+					}
 					if err != nil {
 						return err
 					}
@@ -61,7 +118,13 @@ func (c *MemoryCmd) Execute(ctx context.Context, in Input) (Output, error) {
 					return nil
 				}
 			}
-			if err := in.MemoryStore.Save(name, content); err != nil {
+			var err error
+			if sourced {
+				err = writer.SaveWithSource(name, content, source)
+			} else {
+				err = in.MemoryStore.Save(name, content)
+			}
+			if err != nil {
 				return err
 			}
 			msg = fmt.Sprintf("记忆 '%s' 已保存", name)
@@ -120,7 +183,7 @@ func (c *MemoryCmd) Execute(ctx context.Context, in Input) (Output, error) {
 		}
 		return Output{Message: sb.String()}, nil
 	default:
-		return Output{Message: "用法: /memory [list|add|remove|search <关键词>|stats]"}, nil
+		return Output{Message: c.Help()}, nil
 	}
 }
 

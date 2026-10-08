@@ -13,10 +13,12 @@ import (
 // This is the approach used by many agent frameworks (LangChain's BM25Retriever,
 // mem0's keyword fallback, etc.) when embeddings are unavailable or too costly.
 type BM25 struct {
-	k1     float64 // term frequency saturation (default 1.2)
-	b      float64 // length normalization (default 0.75)
-	avgDL  float64 // average document length
-	tokens []bm25Doc
+	k1          float64 // term frequency saturation (default 1.2)
+	b           float64 // length normalization (default 0.75)
+	avgDL       float64 // average document length
+	tokens      []bm25Doc
+	positions   map[int]int
+	totalLength int
 }
 
 type bm25Doc struct {
@@ -43,39 +45,38 @@ func NewBM25(k1, b float64) *BM25 {
 func (b *BM25) Clear() {
 	b.tokens = nil
 	b.avgDL = 0
+	b.positions = nil
+	b.totalLength = 0
 }
 
 // Index adds or updates a document in the index.
 func (b *BM25) Index(docID int, text string, updated time.Time) {
-	// Remove existing document with same ID
-	for i, d := range b.tokens {
-		if d.id == docID {
-			b.tokens = append(b.tokens[:i], b.tokens[i+1:]...)
-			break
-		}
-	}
-
 	tokens := tokenize(text)
 	tf := make(map[string]int)
 	for _, t := range tokens {
 		tf[t]++
 	}
 
-	b.tokens = append(b.tokens, bm25Doc{
+	doc := bm25Doc{
 		id:      docID,
 		text:    text,
 		tokens:  tokens,
 		tf:      tf,
 		length:  len(tokens),
 		updated: updated,
-	})
-
-	// Update average doc length
-	var total int
-	for _, d := range b.tokens {
-		total += d.length
 	}
-	b.avgDL = float64(total) / float64(len(b.tokens))
+	if b.positions == nil {
+		b.positions = make(map[int]int)
+	}
+	if position, found := b.positions[docID]; found {
+		b.totalLength -= b.tokens[position].length
+		b.tokens[position] = doc
+	} else {
+		b.positions[docID] = len(b.tokens)
+		b.tokens = append(b.tokens, doc)
+	}
+	b.totalLength += doc.length
+	b.avgDL = float64(b.totalLength) / float64(len(b.tokens))
 }
 
 // Search returns the top-K documents matching the query, sorted by BM25 score.

@@ -8,6 +8,186 @@ import (
 	"testing"
 )
 
+func TestReadCheckpointFilesDoesNotRestoreAndRejectsUnsafePaths(t *testing.T) {
+	isolatedGit(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "code.go")
+	writeFile(t, path, "original\r\n")
+	manager, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, err := manager.Create("original")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, "fixed\n")
+	target, files, err := manager.ReadFiles(hash, []string{"code.go"})
+	if err != nil || target != hash || string(files["code.go"]) != "original\r\n" || readFile(t, path) != "fixed\n" {
+		t.Fatalf("read = %s, %q, %v", target, files, err)
+	}
+	for _, name := range []string{"../escape", ".git/config", "missing.go"} {
+		if _, _, err := manager.ReadFiles(hash, []string{name}); err == nil {
+			t.Fatalf("accepted %s", name)
+		}
+	}
+	other, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := other.ReadFiles(hash, []string{"code.go"}); err == nil {
+		t.Fatal("accepted another project's checkpoint")
+	}
+}
+
+func TestSelectiveRestoreOnlyChangesApprovedFilesAndKeepsBackup(t *testing.T) {
+	isolatedGit(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "selected.txt"), "before\r\n")
+	writeFile(t, filepath.Join(dir, "keep.txt"), "keep before")
+	mgr, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := mgr.Create("before")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "selected.txt"), "agent changed")
+	writeFile(t, filepath.Join(dir, "keep.txt"), "user changed")
+	writeFile(t, filepath.Join(dir, "new.txt"), "added")
+	plan, err := mgr.PreviewFiles(target, []string{"selected.txt", "new.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, filepath.Join(dir, "selected.txt")) != "agent changed" {
+		t.Fatal("preview wrote files")
+	}
+	backup, err := mgr.ApplyFiles(plan, plan.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, filepath.Join(dir, "selected.txt")) != "before\r\n" || readFile(t, filepath.Join(dir, "keep.txt")) != "user changed" {
+		t.Fatal("selected restore modified the wrong contents")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("new selected file was not removed: %v", err)
+	}
+	if _, err := mgr.ApplyFiles(plan, plan.ID()); err == nil {
+		t.Fatal("approval executed twice")
+	}
+	if _, err := mgr.Restore(backup); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, filepath.Join(dir, "selected.txt")) != "agent changed" || readFile(t, filepath.Join(dir, "new.txt")) != "added" {
+		t.Fatal("selective rollback backup could not restore original state")
+	}
+}
+
+func TestSelectiveRestoreRejectsUserEditsWithoutChangingAnyFile(t *testing.T) {
+	isolatedGit(t)
+	dir := t.TempDir()
+	for _, name := range []string{"first.txt", "second.txt"} {
+		writeFile(t, filepath.Join(dir, name), "before")
+	}
+	mgr, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := mgr.Create("before")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"first.txt", "second.txt"} {
+		writeFile(t, filepath.Join(dir, name), "agent changed")
+	}
+	plan, err := mgr.PreviewFiles(target, []string{"first.txt", "second.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "second.txt"), "user edited after preview")
+	if _, err := mgr.ApplyFiles(plan, plan.ID()); err == nil {
+		t.Fatal("overwrote user edits")
+	}
+	if readFile(t, filepath.Join(dir, "first.txt")) != "agent changed" || readFile(t, filepath.Join(dir, "second.txt")) != "user edited after preview" {
+		t.Fatal("rejected rollback partially modified files")
+	}
+}
+
+func TestSelectiveRestoreRejectsUnsafePathsAndCrossProject(t *testing.T) {
+	isolatedGit(t)
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "file [one].txt"), "before")
+	manager, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := manager.Create("before")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "file [one].txt"), "after")
+	for _, path := range []string{"../escape.txt", ".git/config", ".", filepath.Join(t.TempDir(), "outside.txt")} {
+		if _, err := manager.PreviewFiles(target, []string{path}); err == nil {
+			t.Fatalf("unsafe path accepted: %s", path)
+		}
+	}
+	other, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := other.PreviewFiles(target, []string{"file [one].txt"}); err == nil {
+		t.Fatal("another project's checkpoint accepted")
+	}
+	plan, err := manager.PreviewFiles(target, []string{"file [one].txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ApplyFiles(plan, "wrong token"); err == nil {
+		t.Fatal("incorrect approval token accepted")
+	}
+	if _, err := other.ApplyFiles(plan, plan.ID()); err == nil {
+		t.Fatal("another manager accepted approval")
+	}
+	if _, err := manager.ApplyFiles(plan, plan.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, filepath.Join(dir, "file [one].txt")) != "before" {
+		t.Fatal("literal bracketed filename not restored")
+	}
+}
+
+func TestSelectiveRestoreRecreatesDeletedFile(t *testing.T) {
+	isolatedGit(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "deleted.txt")
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, path, "restore me")
+	manager, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, err := manager.Create("before")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Dir(path)); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := manager.PreviewFiles(target, []string{"sub/deleted.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ApplyFiles(plan, plan.ID()); err != nil {
+		t.Fatal(err)
+	}
+	if readFile(t, path) != "restore me" {
+		t.Fatal("deleted file not restored")
+	}
+}
+
 // withGlobalGitConfig points git's global config at a temp file holding body,
 // the way a user's ~/.gitconfig (or Git for Windows' defaults) would leak into
 // the shadow store.

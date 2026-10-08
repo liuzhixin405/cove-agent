@@ -23,7 +23,7 @@ var (
 	conversationManaged = []string{
 		"messages", "sessionView", "systemPrompt", "totalTokens", "lastInputTokens", "usageMsgCount",
 		"session", "costBase", "fileHistory", "turnFilesChanged", "turnRanGit", "turnChangedFiles", "turnCheckpointed",
-		"pendingSteer", "pendingSteerN", "loopDetector", "guardrails",
+		"pendingSteer", "pendingSteerN", "loopDetector", "guardrails", "acceptance",
 		"lastReviewMsgCount", "turnsSinceReview", "turnUsedWork", "conversationGen",
 		"newMemories", "shownMemories", "repoMapExcerpts", "injectedSkills",
 	}
@@ -40,7 +40,7 @@ var (
 		"IterationLimitPrompt", "OnBackgroundSummary",
 		"OnSteerConsumed", "bg", "bgPending", "reviewBg", "extractSaved", "lastSaveErr", "bgMu",
 		"dreamSeen", "lastDreamNeeded", "turnTimeUnit", "rateLimits", "extractRunner", "backgroundModel",
-		"autoLearnOff", "dreamRunner", "fastOutcomes", "recordingEnabled", "recordingDir", "recordingSeq",
+		"autoLearnOff", "dreamRunner", "fastOutcomes", "recordingEnabled", "recordingDir", "recordingSeq", "acceptanceMu",
 		"recordingReady", "recordingMu", "replayEnabled", "replayDir", "replayResponses", "replayIndex",
 		"actMu", "acts", "actSeq", "provRef", "collectContext", "refreshGit", "costNoticeFor",
 		"fileDiffs", "diffMu", "contextTokens", "turnModelSnap", "repoMapMu", "reviewRunning", "nonInteractive", "skillMu", "requestOverhead", "smallWindowWarned",

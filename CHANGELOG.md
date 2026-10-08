@@ -1,5 +1,64 @@
 ﻿## [Unreleased]
 
+## [12.1.0] - 2026-10-08
+
+### Added
+- **四类显式工作流（首版，默认全部关闭）**：命令注册在交互 REPL 与 headless 的公共前端，
+  结果存配置目录、不自动写入原项目；JSON 示例、调度入口与安全边界见
+  [工作流指南](docs/guide/workflows.md)。Git worktree 不是 OS/网络/进程沙箱。
+  - **维护任务与结果收件箱**：`/automations list|add|run|tick|event|remove` 定义定时或事件触发的
+    维护任务，`/inbox list|show|patch|review` 审阅结果。每次尝试在新建的 detached worktree 中以
+    committed HEAD 为输入，事件按项目/任务/occurrence key 去重，失败或崩溃不自动重放；收件箱保留基线、
+    命令 argv、退出码、输出、补丁与审阅状态，`accepted` 只记录决定，不应用、合并或推送。
+  - **浏览器实操验收**：`/browser-verify <spec.json>|results|artifacts` 在 Chrome/Chromium
+    （`go build -tags chromedp`）执行 DOM 断言，桌面 1280×800 与移动 390×844 独立重放，保留 PNG、
+    尺寸与 SHA256 并接入 `/acceptance`；无标签或 Chrome 不可用时状态为未验证，不会假绿。
+  - **双方案竞跑**：`/race run|show|cancel|select` 在两个独立 worktree 用同一显式 argv 验证器跑两个
+    方案，模型自评不能决定通过；仅通过候选可显式 `select`，应用前复核项目/分支/commit/干净状态/
+    验证器一致性与补丁哈希，退出时取消 worker 并有界清理 worktree。
+  - **跨设备监督**：`/remote start|status|stop` 起认证远程监督 API（默认随机 loopback 端口、Bearer
+    认证、严格 Host/Origin 校验），可查看任务摘要、排队与引导状态，发送 steer/cancel/pause，并对当前
+    待批工具做一次性 approve/deny；请求 ID 防重放，审批绑定工具、输入摘要与有效期、单次消费，本地
+    答案、取消、状态漂移或停服即撤销 pending。
+  - 独立入口 `cove --automation <action> <项目>` 与 `cove --automation-inbox <action> <项目>` 必须在
+    首位，由 OS 调度器显式调用，不默认启动守护进程。
+- **`/acceptance` 任务验收证据**：展示当前会话最新任务的验收条件、命令退出码、耗时与输出尾部；报告
+  原子保存、切回原会话可查看，每个会话只保留最新一份，后续工具写入或回滚使旧通过证据失效。
+- **持久化任务队列**：运行中任务与待执行消息原子保存到配置目录 `task-queues`，重启仅提示、不自动
+  重放；`/tasks saved|restore|remove|move|retry|skip|run` 显式恢复与管理。存储失败即暂停队列、不启动
+  后续任务并显示错误；崩溃或退出前可能已产生副作用的当前任务标记为“状态不明”，需人工 `/tasks retry`
+  或 `/tasks skip` 处理。
+- **选择性文件回滚**：`/undo files <检查点> <文件>...` 预览（不改工作区）、`/undo apply <预览ID>` 确认、
+  `/undo cancel` 放弃预览。确认令牌绑定本次预览、项目与会话并有有效期；确认前复核全部选中文件漂移，
+  不一致则整批拒绝；只恢复选中文件，未选中文件不动，执行前自动备份。
+- **记忆溯源**：`/memory source <名称>` 查看当前正文版本的来源会话、项目、消息位置、输入 SHA256 与
+  依据片段；手动 `/memory add` 与自动提取都会记录来源，元数据存记忆目录 `.provenance` 隐藏子目录，
+  按记忆名与正文 SHA256 绑定，不改正文、不计入记忆提示、不注入模型上下文。
+- **`verify` 子智能体与 `regression_verify` 工具**：独立反向回归验证（首版支持 Go）——用修复前检查点
+  的旧源码构建 Go overlay，要求同一测试在旧实现上真实失败、在当前实现上通过；子智能体使用独立对话
+  上下文，只获得代码阅读工具与该工具，不能改文件、写测试、执行通用 Shell、联网或再派生子智能体；
+  仅当旧实现退出码 1 且出现真正的具名测试失败、当前实现退出码 0 才记为通过，证据接入 `/acceptance`
+  并在后续文件修改或回滚时失效。
+
+### Fixed
+- **长响应体未做上限检查**：`internal/api` 用 `LimitReader` 截断后不再校验，超过 `maxResponseBytes`
+  的响应被静默截成无效 JSON；现在多读一字节即报错。
+- **取消后的工具调用与重试不响应 context**：工具执行的短暂重试 sleep、并行调度取信号量，以及
+  `edit`/`write` 的入口，此前在 `ctx.Done()` 后仍可能继续跑或睡满；现在这些点都检查取消并立即返回。
+- **`/continue` 在队列暂停时**：队列因状态不明暂停时不再直接重试，改为提示先 `/tasks retry` 或
+  `/tasks skip`。
+- **记忆检索索引重复构建**：BM25 每次搜索都重建、按 ID 线性删除并整表重算平均长度；改为按 ID 定位
+  增量更新并缓存索引、在条目变化时失效，索引构建只做一次。
+- **Windows 原子写入保留属性**：新增 `WriteFileRoot` 走 `os.Root`，root 内替换同样保留隐藏属性与
+  NTFS 备用数据流，相对路径不能逃出 root。
+- **gate 未执行时记录原因**：完成校验因“本轮无文件变更”或“项目未信任”而未执行时，验收报告单独
+  注明，不再与“未验证”混同。
+
+### Changed
+- 前端新增统一的工作流关闭钩子：退出或 headless 结束时停止 remote 与 race，并清理竞跑产生的 worktree。
+- 记忆检索新增可取消的 `SearchContext` 并在各阶段响应 `ctx`；`Store.All` 抽出 `allLocked` 复用缓存。
+- 授权框中新增 `AskSpec.External` 外部答案通道，供远程一次性审批在本机 REPL 线程复核后生效。
+
 ## [12.0.0] - 2026-09-30
 
 ### Added

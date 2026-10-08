@@ -125,6 +125,9 @@ func (e *Engine) resetConversationState() {
 	e.steerMu.Lock()
 	e.pendingSteer, e.pendingSteerN = "", 0
 	e.steerMu.Unlock()
+	e.acceptanceMu.Lock()
+	e.acceptance = nil
+	e.acceptanceMu.Unlock()
 
 	e.fileMu.Lock()
 	// Emptied, not nil: trackFileChanges assigns into it, and the nil map

@@ -88,7 +88,7 @@ func NewAgentTool() Tool {
 	return &AgentToolI{baseTool{def: Def{
 		Name: "agent", Aliases: []string{"Agent"},
 		Description: "Spawn a sub-agent to handle complex multi-step tasks independently.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"type":{"type":"string","enum":["general","explore","plan","review","test"],"description":"Agent type: general (can edit), explore/plan/review (read-only), test"},"prompt":{"type":"string","description":"Task description for the sub-agent"}},"required":["type","prompt"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"type":{"type":"string","enum":["general","explore","plan","review","test","verify"],"description":"Agent type: general (can edit), explore/plan/review (read-only), test, verify (independent Go red/green regression verification)"},"prompt":{"type":"string","description":"Task description for the sub-agent"}},"required":["type","prompt"]}`),
 		IsReadOnly:  false, IsConcurrencySafe: true, PlanSafe: true, UserFacingName: "Agent",
 	}}}
 }
@@ -102,7 +102,7 @@ func (t *AgentToolI) Call(ctx context.Context, input Input, tctx Context) (Resul
 				return Result{Data: fmt.Sprintf("Sub-agent error: %v", err), IsError: true}, nil
 			}
 			return Result{Data: fmt.Sprintf("%s\nSub-agent [%s] result:\n%s\nCost: $%.4f | Steps: %d | Success: %v",
-				agentExitLine(result), agentType, result.Output, result.Cost, result.Steps, result.Success)}, nil
+				agentExitLine(result), agentType, result.Output, result.Cost, result.Steps, result.Success), IsError: strings.EqualFold(agentType, "verify") && !result.Success}, nil
 		}
 	}
 	return Result{Data: fmt.Sprintf("Sub-agent runner unavailable. Requested [%s]: %s", agentType, truncateStr(task, 300)), IsError: true}, nil

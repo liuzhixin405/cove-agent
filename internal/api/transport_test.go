@@ -63,3 +63,62 @@ func TestReadSSELine(t *testing.T) {
 		t.Fatalf("an over-long line was accepted: %v", err)
 	}
 }
+
+type bodyReadTransport struct{ body io.ReadCloser }
+
+func (transport bodyReadTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: transport.body}, nil
+}
+
+type failingBodyReader struct{ err error }
+
+func (reader failingBodyReader) Read([]byte) (int, error) { return 0, reader.err }
+
+type trackedResponseBody struct {
+	io.Reader
+	closed bool
+}
+
+func (body *trackedResponseBody) Close() error {
+	body.closed = true
+	return nil
+}
+
+func bodyReadEndpoint(body io.ReadCloser) endpoint {
+	return endpoint{
+		url: "https://response.test", client: &http.Client{Transport: bodyReadTransport{body: body}},
+		key: func() string { return "test" }, auth: func(http.Header, string) {},
+	}
+}
+
+func TestPostPropagatesBodyReadError(t *testing.T) {
+	for _, readErr := range []error{io.ErrUnexpectedEOF, context.Canceled, context.DeadlineExceeded} {
+		t.Run(readErr.Error(), func(t *testing.T) {
+			body := &trackedResponseBody{Reader: io.MultiReader(strings.NewReader(`{"choices":[]}`), failingBodyReader{err: readErr})}
+			_, err := bodyReadEndpoint(body).post(context.Background(), []byte(`{}`))
+			if !errors.Is(err, readErr) {
+				t.Fatalf("post error = %v, want %v", err, readErr)
+			}
+			if !body.closed {
+				t.Fatal("failed response body was not closed")
+			}
+		})
+	}
+}
+
+func TestPostResponseSizeBoundary(t *testing.T) {
+	for _, size := range []int{maxResponseBytes, maxResponseBytes + 1} {
+		body := &trackedResponseBody{Reader: strings.NewReader(strings.Repeat("x", size))}
+		response, err := bodyReadEndpoint(body).post(context.Background(), []byte(`{}`))
+		if size == maxResponseBytes {
+			if err != nil || len(response.Body) != size {
+				t.Fatalf("boundary response: bytes=%d err=%v", len(response.Body), err)
+			}
+		} else if err == nil || !strings.Contains(err.Error(), "exceeds") {
+			t.Fatalf("oversized response error = %v", err)
+		}
+		if !body.closed {
+			t.Fatal("response body was not closed")
+		}
+	}
+}

@@ -45,6 +45,26 @@ func TestEditTool_ExactMatchUnchanged(t *testing.T) {
 	}
 }
 
+func TestCancelledFileToolsLeaveContentUnchanged(t *testing.T) {
+	for _, fileTool := range []Tool{NewWriteTool(), NewEditTool()} {
+		t.Run(fileTool.Def().Name, func(t *testing.T) {
+			dir, path := writeTempFile(t, "original\n")
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			result, err := fileTool.Call(ctx, Input{
+				"filePath": path, "content": "replacement\n", "oldString": "original", "newString": "replacement",
+			}, Context{Cwd: dir})
+			if err != nil || !result.IsError || result.Data != "Error: context canceled" {
+				t.Fatalf("cancellation result = %+v, %v", result, err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil || string(data) != "original\n" {
+				t.Fatalf("cancelled tool changed file: data=%q err=%v", data, err)
+			}
+		})
+	}
+}
+
 func TestEditTool_FuzzySingleLineWhitespace(t *testing.T) {
 	// Real file has irregular internal spacing; model's oldString is
 	// normalized/tidy. Exact match fails, normalized match should succeed

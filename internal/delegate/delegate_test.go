@@ -11,6 +11,36 @@ import (
 	"github.com/liuzhixin405/cove-agent/internal/tool"
 )
 
+func TestRegressionEvidenceRequiresRealRedGreenTests(t *testing.T) {
+	fail := `{"Action":"fail","Package":"example","Test":"TestRegression"}`
+	pass := `{"Action":"pass","Package":"example","Test":"TestRegression"}`
+	for _, test := range []struct {
+		name          string
+		before, after RegressionRun
+		status        string
+	}{
+		{"red green", RegressionRun{ExitCode: 1, Output: fail}, RegressionRun{Output: pass}, "passed"},
+		{"both green", RegressionRun{Output: pass}, RegressionRun{Output: pass}, "failed"},
+		{"build failure", RegressionRun{ExitCode: 1, Output: `{"Action":"fail","Package":"example"}`}, RegressionRun{Output: pass}, "unverified"},
+		{"different test", RegressionRun{ExitCode: 1, Output: fail}, RegressionRun{Output: `{"Action":"pass","Package":"example","Test":"TestOther"}`}, "unverified"},
+		{"skipped", RegressionRun{ExitCode: 1, Output: fail}, RegressionRun{Output: `{"Action":"skip","Package":"example","Test":"TestRegression"}`}, "unverified"},
+		{"cancelled", RegressionRun{ExitCode: 1, Output: fail, Error: "context cancelled"}, RegressionRun{Output: pass}, "unverified"},
+		{"fixed fails", RegressionRun{ExitCode: 1, Output: fail}, RegressionRun{ExitCode: 1, Output: fail}, "failed"},
+		{"invalid output", RegressionRun{ExitCode: 1, Output: "not json"}, RegressionRun{Output: pass}, "unverified"},
+		{"Go timeout", RegressionRun{ExitCode: 1, Output: `{"Action":"output","Package":"example","Output":"panic: test timed out after 1m0s"}` + "\n" + fail}, RegressionRun{Output: pass}, "unverified"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := CompareRegression(test.before, test.after)
+			if got.Status != test.status {
+				t.Fatalf("evidence = %+v, want %s", got, test.status)
+			}
+			if got.Status == "passed" && (len(got.Tests) != 1 || got.Tests[0] != "example/TestRegression") {
+				t.Fatalf("wrong passing evidence: %+v", got)
+			}
+		})
+	}
+}
+
 // fakeProvider replays one scripted response per Chat call.
 type fakeProvider struct {
 	responses []*api.ChatResponse
@@ -78,6 +108,33 @@ func writeCall() *api.ChatResponse {
 	return &api.ChatResponse{ToolCalls: []api.ToolCall{
 		{ID: "tc1", Name: "write", Input: map[string]any{"filePath": "a.go"}},
 	}}
+}
+
+func TestVerifierCannotPassOnModelClaimOrDeniedExecution(t *testing.T) {
+	for _, output := range []string{"verified, all tests passed", `{"status":"passed"}`} {
+		provider := &fakeProvider{responses: []*api.ChatResponse{{Content: output}}}
+		sa := NewSubAgent(Config{Provider: provider, Model: "m", RequireRegression: true})
+		result := sa.Run(context.Background(), "verify", "independent verifier")
+		if result.Success || result.ExitReason != ExitUnverified {
+			t.Fatalf("model claim accepted: %+v", result)
+		}
+	}
+	provider := &fakeProvider{responses: []*api.ChatResponse{{ToolCalls: []api.ToolCall{{ID: "verify", Name: "regression_verify"}}}, {Content: "verified"}}}
+	sa := NewSubAgent(Config{Provider: provider, Model: "m", RequireRegression: true})
+	result := sa.Run(context.Background(), "verify", "independent verifier")
+	if result.Success || result.ExitReason != ExitUnverified {
+		t.Fatalf("missing/denied tool accepted: %+v", result)
+	}
+}
+
+func TestVerifierFiltersWritableToolsEvenWithoutReadOnlyOption(t *testing.T) {
+	write := &probeTool{}
+	provider := &fakeProvider{responses: []*api.ChatResponse{{Content: "verified"}}}
+	delegator := NewDelegator(provider, "m", []tool.Tool{write})
+	result := delegator.DelegateWith(context.Background(), "verify", "verify", "independent verifier", Options{RequireRegression: true})
+	if result.Success || len(provider.lastReq.Tools) != 0 || write.calls != 0 {
+		t.Fatalf("verifier tools=%+v result=%+v calls=%d", provider.lastReq.Tools, result, write.calls)
+	}
 }
 
 // A sub-agent used to call every tool directly, with PermissionMode hardcoded

@@ -2,6 +2,9 @@ package extract
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -107,6 +110,25 @@ func conversation(n int) []api.Message {
 
 func memoryBlock(file, mode, content string) string {
 	return fmt.Sprintf("---MEMORY---\nFILE: %s\nMODE: %s\nCONTENT:\n%s\n---END---\n", file, mode, content)
+}
+
+func TestExtractionProvenanceUsesCapturedSessionAndWindow(t *testing.T) {
+	provider := &fakeProvider{response: memoryBlock("fact.md", "write", "durable fact")}
+	runner, dir := newTestRunner(t, provider)
+	runner.ExtractWithSource(context.Background(), conversation(24), memory.ProvenanceSource{SessionIDs: []string{"captured-session"}, Cwd: "captured-project"})
+	record, err := memory.NewStoreForDirs(dir).Provenance("fact.md")
+	if err != nil || record == nil || len(record.Sources) != 1 {
+		t.Fatalf("provenance = %+v, %v", record, err)
+	}
+	source := record.Sources[0]
+	encoded, err := json.Marshal(conversation(24)[4:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := sha256.Sum256(encoded)
+	if source.Kind != "extraction" || len(source.SessionIDs) != 1 || source.SessionIDs[0] != "captured-session" || source.Cwd != "captured-project" || source.FirstMessage != 5 || source.LastMessage != 24 || source.TranscriptHash != hex.EncodeToString(expected[:]) || !strings.Contains(source.Evidence, "message 4") || strings.Contains(source.Evidence, "message 0\n") {
+		t.Fatalf("source = %+v", source)
+	}
 }
 
 func readMemory(t *testing.T, dir, name string) string {

@@ -9,6 +9,7 @@ import (
 	"github.com/liuzhixin405/cove-agent/internal/dream"
 	"github.com/liuzhixin405/cove-agent/internal/extract"
 	"github.com/liuzhixin405/cove-agent/internal/log"
+	"github.com/liuzhixin405/cove-agent/internal/memory"
 )
 
 // BackgroundSummary is what the turn-end background work did, for the one
@@ -121,6 +122,7 @@ type backgroundJob struct {
 	learn     bool          // background learning is on (not --no-auto)
 	saved     bool          // the turn-end session save succeeded
 	sessionID string        // the session pruning must keep, and a learned skill names
+	cwd       string
 	keep      int           // max_sessions
 	review    []api.Message // snapshot for the skill review; nil = skip it
 	// checkpointed: the turn wrote or edited files after a checkpoint was
@@ -183,7 +185,7 @@ func (e *Engine) runBackgroundWork(job backgroundJob) {
 		ctx, cancel := context.WithTimeout(context.Background(), extractTimeout)
 		before := e.extractSaved.Load()
 		mems := e.memorySnapshot()
-		e.extractRunner.Extract(ctx, job.msgs)
+		e.extractRunner.ExtractWithSource(ctx, job.msgs, memory.ProvenanceSource{SessionIDs: []string{job.sessionID}, Cwd: job.cwd})
 		cancel()
 		extracted = int(e.extractSaved.Load() - before)
 		if extracted > 0 {

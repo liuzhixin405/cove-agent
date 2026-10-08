@@ -148,7 +148,13 @@ type AskSpec struct {
 	Keys string
 	// Options are offered on the input line with Up/Down; Enter sends the
 	// one shown.
-	Options []string
+	Options  []string
+	External func() (<-chan ExternalAnswer, func())
+}
+
+type ExternalAnswer struct {
+	Answer   string
+	Validate func() bool
 }
 
 // AskWith is Ask with one-key answers and selectable options.
@@ -160,6 +166,14 @@ func AskWith(s AskSpec) (answer string, ok bool) {
 	consoleMu.Lock()
 	permKeys, permOptions, permOptionIdx = s.Keys, s.Options, -1
 	consoleMu.Unlock()
+	var external <-chan ExternalAnswer
+	if s.External != nil {
+		var cleanup func()
+		external, cleanup = s.External()
+		if cleanup != nil {
+			defer cleanup()
+		}
+	}
 	BeginPromptInput()
 	termui.PrintAbove(s.Text)
 	timer := time.NewTimer(s.Timeout)
@@ -167,6 +181,19 @@ func AskWith(s AskSpec) (answer string, ok bool) {
 	select {
 	case answer = <-ch:
 		ok = true
+	case result, open := <-external:
+		answer = result.Answer
+		select {
+		case answer = <-ch:
+			ok = true
+		default:
+			ok = open && (result.Validate == nil || result.Validate())
+			select {
+			case answer = <-ch:
+				ok = true
+			default:
+			}
+		}
 	case <-timer.C:
 	}
 	EndPromptInput()

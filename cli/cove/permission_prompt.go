@@ -72,6 +72,10 @@ var keyHintShown atomic.Bool
 // policy rule), "p"/"permanent" also write that rule to the policies file
 // (engine.PolicyFilePath) for this project, anything else denies.
 func askToolPermission(eng permissionRuleAdder, toolName string, input map[string]any, reason string) bool {
+	return askToolPermissionExternal(eng, toolName, input, reason, nil)
+}
+
+func askToolPermissionExternal(eng permissionRuleAdder, toolName string, input map[string]any, reason string, external func() (<-chan repl.ExternalAnswer, func())) bool {
 	if !replInteractive {
 		// Nothing is reading answer lines (e.g. a -p one-shot run), so deny
 		// rather than block on a prompt that cannot be answered.
@@ -125,7 +129,7 @@ func askToolPermission(eng permissionRuleAdder, toolName string, input map[strin
 	}
 
 	answer, ok := repl.AskWith(repl.AskSpec{Text: text, Accepts: permissionAnswerAccepted, Hint: permissionAnswerHint,
-		Timeout: permissionPromptTimeout, Keys: keys})
+		Timeout: permissionPromptTimeout, Keys: keys, External: external})
 	if !ok {
 		termui.PrintAbove(termui.PromptContentIndent + termui.Styled(termui.Dim, "授权超时，已拒绝 "+toolName) + "\n")
 		return false

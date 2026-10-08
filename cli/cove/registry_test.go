@@ -64,7 +64,7 @@ func TestToolSchemasUseEnums(t *testing.T) {
 	cases := map[string][]string{
 		"todowrite":   {`"enum":["pending","in_progress","completed","cancelled"]`, `"enum":["high","medium","low"]`},
 		"task_update": {`"enum":["pending","running","completed","failed","cancelled"]`},
-		"agent":       {`"enum":["general","explore","plan","review","test"]`},
+		"agent":       {`"enum":["general","explore","plan","review","test","verify"]`},
 	}
 	for name, wants := range cases {
 		schema := toolSchema(t, name)

@@ -2,9 +2,88 @@ package repl
 
 import (
 	"bufio"
+	"io"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestOwnerInputWakeWithoutTyping(t *testing.T) {
+	source, writer := io.Pipe()
+	defer source.Close()
+	defer writer.Close()
+	wake := make(chan struct{}, 1)
+	polled := make(chan struct{}, 8)
+	reader := &LineReader{}
+	reader.SetOwnerEventHook(func() <-chan struct{} { return wake }, func() { polled <- struct{}{} })
+	input := bufio.NewReader(ownerInput{source: source, lr: reader})
+	done := make(chan inputResult, 1)
+	go func() {
+		line, err := input.ReadString('\n')
+		done <- inputResult{data: []byte(line), err: err}
+	}()
+	wake <- struct{}{}
+	select {
+	case <-polled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("owner did not wake while stdin was silent")
+	}
+	select {
+	case <-done:
+		t.Fatal("wake submitted an input line")
+	default:
+	}
+	if _, err := io.WriteString(writer, "partial"); err != nil {
+		t.Fatal(err)
+	}
+	writer.Close()
+	select {
+	case got := <-done:
+		if string(got.data) != "partial" || got.err != io.EOF {
+			t.Fatalf("input=%q err=%v", got.data, got.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("EOF did not finish the reader")
+	}
+}
+
+func TestOwnerInputPreservesPartialEscapeAndPaste(t *testing.T) {
+	restore := captureStdout(t)
+	defer restore()
+	source, writer := io.Pipe()
+	defer source.Close()
+	defer writer.Close()
+	wake := make(chan struct{}, 1)
+	polled := make(chan struct{}, 8)
+	reader := New(nil)
+	reader.SetOwnerEventHook(func() <-chan struct{} { return wake }, func() { polled <- struct{}{} })
+	reader.rawReader = bufio.NewReaderSize(ownerInput{source: source, lr: reader}, rawInputBufferSize)
+	done := make(chan inputResult, 1)
+	go func() {
+		line, err := reader.editLine()
+		done <- inputResult{data: []byte(line), err: err}
+	}()
+	if _, err := io.WriteString(writer, "ab"); err != nil {
+		t.Fatal(err)
+	}
+	wake <- struct{}{}
+	select {
+	case <-polled:
+	case <-time.After(3 * time.Second):
+		t.Fatal("partial input prevented owner wake")
+	}
+	if _, err := io.WriteString(writer, "\x1b[DZ\x1b[200~x\n\tY\x1b[201~\r"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-done:
+		if string(got.data) != "aZx\n\tYb" || got.err != nil {
+			t.Fatalf("input=%q err=%v", got.data, got.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("escape/paste input did not submit")
+	}
+}
 
 func TestReadInputRuneDecodesUTF8(t *testing.T) {
 	r := bufio.NewReader(strings.NewReader("你好\r"))

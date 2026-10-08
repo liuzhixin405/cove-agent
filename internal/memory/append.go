@@ -31,6 +31,10 @@ func (s *Store) BaseContent(name string) (content string, fromLower, ok bool) {
 // AppendFileBytes (or MaxIndexLines) the content goes to the first
 // name-N.md roll-over file with room. Writes go through Save.
 func (s *Store) Append(name, content string) (string, error) {
+	return s.append(name, content, nil)
+}
+
+func (s *Store) append(name, content string, source *ProvenanceSource) (string, error) {
 	if err := validName(name); err != nil {
 		return "", err
 	}
@@ -43,7 +47,7 @@ func (s *Store) Append(name, content string) (string, error) {
 		}
 		existing, _, ok := s.BaseContent(cand)
 		if !ok || existing == "" {
-			return cand, s.Save(cand, content)
+			return cand, s.save(cand, content, source, "")
 		}
 		if endsWithLines(existing, content) {
 			// Already the file's last lines: appending again only duplicates.
@@ -51,11 +55,11 @@ func (s *Store) Append(name, content string) (string, error) {
 		}
 		combined := existing + "\n" + content
 		if len(combined) <= AppendFileBytes && strings.Count(combined, "\n")+1 <= MaxIndexLines {
-			return cand, s.Save(cand, combined)
+			return cand, s.save(cand, combined, source, cand)
 		}
 	}
 	cand := fmt.Sprintf("%s-%d%s", base, 100, ext)
-	return cand, s.Save(cand, content)
+	return cand, s.save(cand, content, source, "")
 }
 
 // Dirs are the store's directories, primary (written) first.

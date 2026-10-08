@@ -168,15 +168,23 @@ func (g *VerifyGate) MaxRetries() int {
 // success this turn, after its last change (see noteVerifyEvidence): those
 // are not run again and count as passed.
 func (g *VerifyGate) Run(ctx context.Context, alreadyPassed func(cmd string) bool) (results []VerifyResult, allPassed bool) {
+	return g.run(ctx, alreadyPassed, nil)
+}
+
+func (g *VerifyGate) run(ctx context.Context, alreadyPassed func(string) bool, observe func([]string, []VerifyResult)) (results []VerifyResult, allPassed bool) {
 	if !g.Enabled() {
 		return nil, true
+	}
+	commands := g.turnCommands()
+	if observe != nil {
+		defer func() { observe(commands, results) }()
 	}
 	runner := g.runner
 	if runner == nil {
 		runner = runVerifyCommand
 	}
 	allPassed = true
-	for _, cmdStr := range g.turnCommands() {
+	for _, cmdStr := range commands {
 		if alreadyPassed != nil && alreadyPassed(cmdStr) {
 			results = append(results, VerifyResult{Command: cmdStr, Passed: true, Skipped: true})
 			continue
@@ -349,6 +357,10 @@ func shellResultPassed(out string) bool {
 // line. Read-only tools leave the evidence alone.
 func (e *Engine) noteVerifyEvidence(l *turnLimits, name string, input map[string]any, result string, failed bool) {
 	e.noteWorkTool(l, name, failed)
+	agentType, _ := input["type"].(string)
+	if !failed && (name == "regression_verify" || name == "agent" && strings.EqualFold(agentType, "verify")) {
+		return
+	}
 	if permission.IsShellTool(name) {
 		cmd, _ := input["command"].(string)
 		cmd = normalizeCommand(cmd)
@@ -358,6 +370,7 @@ func (e *Engine) noteVerifyEvidence(l *turnLimits, name string, input map[string
 		autoOK := e.classifier != nil && e.classifier.AutoApproveLineFor(cmd, e.perm.ShellKindFor(name))
 		if !autoOK {
 			l.passedCmds = nil // the line may have changed files
+			e.invalidateAcceptance("")
 		}
 		if !failed && shellResultPassed(result) {
 			if l.passedCmds == nil {
@@ -366,6 +379,7 @@ func (e *Engine) noteVerifyEvidence(l *turnLimits, name string, input map[string
 			l.passedCmds[cmd] = true
 		} else {
 			delete(l.passedCmds, cmd)
+			e.invalidateAcceptance(cmd)
 		}
 		return
 	}
@@ -373,6 +387,7 @@ func (e *Engine) noteVerifyEvidence(l *turnLimits, name string, input map[string
 		return
 	}
 	l.passedCmds = nil
+	e.invalidateAcceptance("")
 }
 
 // verifyPassed reports whether cmd passed this turn after the last change

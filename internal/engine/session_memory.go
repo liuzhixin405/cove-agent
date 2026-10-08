@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"strings"
 
 	"github.com/liuzhixin405/cove-agent/internal/memory"
@@ -139,6 +140,10 @@ const (
 // relevant to query that the system prompt does not carry in full, in one
 // <turn_memories> block of at most turnMemoryNoteMaxBytes.
 func (e *Engine) turnMemoryNote(query string) string {
+	return e.turnMemoryNoteContext(context.Background(), query)
+}
+
+func (e *Engine) turnMemoryNoteContext(ctx context.Context, query string) string {
 	const open, closing = "<turn_memories>\n", "</turn_memories>"
 	learned := e.takeNewMemoriesNote()
 	if learned != "" {
@@ -149,7 +154,7 @@ func (e *Engine) turnMemoryNote(query string) string {
 	if rel := relevantMemoryBudget(e.config.Model); budget > rel {
 		budget = rel
 	}
-	relevant := e.relevantMemoriesNote(query, budget)
+	relevant := e.relevantMemoriesNote(ctx, query, budget)
 	if learned == "" && relevant == "" {
 		return ""
 	}
@@ -164,8 +169,8 @@ func (e *Engine) turnMemoryNote(query string) string {
 // use); past that the system prompt only lists memory names. Entries are
 // taken one by one rather than from RelevantMemoriesFor's rendered block so
 // each can be deduplicated and the block cut between entries.
-func (e *Engine) relevantMemoriesNote(query string, budget int) string {
-	if e.memStore == nil || strings.TrimSpace(query) == "" {
+func (e *Engine) relevantMemoriesNote(ctx context.Context, query string, budget int) string {
+	if ctx.Err() != nil || e.memStore == nil || strings.TrimSpace(query) == "" {
 		return ""
 	}
 	total := 0
@@ -181,9 +186,13 @@ func (e *Engine) relevantMemoriesNote(query string, budget int) string {
 	const tail = "</relevant_memories>\n"
 	used := len(head) + len(tail)
 	var sb strings.Builder
+	matches := e.memStore.SearchContext(ctx, query, memory.RelevantTopK*2)
+	if ctx.Err() != nil {
+		return ""
+	}
 	e.bgMu.Lock()
 	defer e.bgMu.Unlock()
-	for _, m := range e.memStore.Search(query, memory.RelevantTopK*2) {
+	for _, m := range matches {
 		if m.Entry.Project || e.shownMemories[m.Entry.Path] {
 			continue
 		}

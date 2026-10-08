@@ -14,6 +14,7 @@ import (
 	"github.com/liuzhixin405/cove-agent/internal/engine"
 	"github.com/liuzhixin405/cove-agent/internal/log"
 	"github.com/liuzhixin405/cove-agent/internal/repl"
+	"github.com/liuzhixin405/cove-agent/internal/session"
 )
 
 type replTaskRunner struct {
@@ -26,6 +27,12 @@ type replTaskRunner struct {
 	pendingFailedMsg *api.Message
 	current          api.Message
 	currentStart     time.Time
+	queueStore       *session.QueueStore
+	queueID          string
+	queueSession     string
+	queueCwd         string
+	paused           bool
+	persistenceError string
 	// closing is set by CancelForExit: the program is leaving, so a task
 	// that ends now neither reclaims its steer nor starts the next one.
 	closing bool
@@ -33,11 +40,13 @@ type replTaskRunner struct {
 
 // TaskSnapshot is a read-only view of the runner state for /tasks.
 type TaskSnapshot struct {
-	Running      bool
-	Current      string
-	Elapsed      time.Duration
-	Queued       []string
-	PendingRetry string
+	Running          bool
+	Current          string
+	Elapsed          time.Duration
+	Queued           []string
+	PendingRetry     string
+	Paused           bool
+	PersistenceError string
 	// PendingSteer previews guidance steered into the running task that its
 	// next model call has not picked up yet.
 	PendingSteer string
@@ -60,7 +69,7 @@ func taskPreview(msg api.Message) string {
 func (r *replTaskRunner) Snapshot() TaskSnapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	snap := TaskSnapshot{Running: r.running}
+	snap := TaskSnapshot{Running: r.running, Paused: r.paused, PersistenceError: r.persistenceError}
 	if r.running {
 		snap.Current = taskPreview(r.current)
 		snap.Elapsed = time.Since(r.currentStart)
@@ -161,6 +170,12 @@ func commonPrefixRunes(a, b string) int {
 // formatTaskSnapshot renders a TaskSnapshot for the /tasks command.
 func formatTaskSnapshot(s TaskSnapshot) string {
 	var sb strings.Builder
+	if s.PersistenceError != "" {
+		fmt.Fprintf(&sb, "任务队列持久化失败: %s\n", s.PersistenceError)
+	}
+	if s.Paused {
+		sb.WriteString("队列已暂停；/tasks run 启动待执行任务，/tasks retry 重试状态不明任务，/tasks skip 放弃该任务\n")
+	}
 	if s.Running {
 		fmt.Fprintf(&sb, "当前任务 (已运行 %s):\n  %s\n", s.Elapsed.Truncate(time.Second), s.Current)
 		if s.PendingSteer != "" {
@@ -176,7 +191,11 @@ func formatTaskSnapshot(s TaskSnapshot) string {
 		}
 	}
 	if s.PendingRetry != "" {
-		fmt.Fprintf(&sb, "可重试 (输入“继续”): %s\n", s.PendingRetry)
+		if s.Paused {
+			fmt.Fprintf(&sb, "状态不明 (检查副作用后 /tasks retry 或 /tasks skip): %s\n", s.PendingRetry)
+		} else {
+			fmt.Fprintf(&sb, "可重试 (输入“继续”): %s\n", s.PendingRetry)
+		}
 	}
 	return sb.String()
 }
@@ -187,6 +206,7 @@ func newREPLTaskRunner(eng *engine.Engine) *replTaskRunner {
 		queue: make([]api.Message, 0),
 	}
 	r.cond = sync.NewCond(&r.mu)
+	r.initQueueStore()
 	if eng != nil {
 		eng.OnSteerConsumed = r.steerConsumed
 	}
@@ -225,6 +245,9 @@ func (r *replTaskRunner) CancelRunning() bool {
 func (r *replTaskRunner) CancelForExit() bool {
 	r.mu.Lock()
 	r.closing = true
+	if !r.running {
+		r.persistQueueLocked()
+	}
 	r.mu.Unlock()
 	return r.CancelRunning()
 }
@@ -246,7 +269,11 @@ func (r *replTaskRunner) PendingFailed() *api.Message {
 func (r *replTaskRunner) ClearPendingFailed() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if !r.syncQueueScopeLocked() {
+		return
+	}
 	r.pendingFailedMsg = nil
+	r.persistQueueLocked()
 }
 
 // Enqueue hands msg to the runner: it starts at once when nothing is
@@ -257,6 +284,9 @@ func (r *replTaskRunner) Enqueue(msg api.Message) (int, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	queuedAhead, merged, _ := r.enqueueLocked(msg)
+	if queuedAhead < 0 {
+		repl.PrintAbove("[未接收] 原会话队列保存失败，请处理持久化错误后重新提交。\r\n")
+	}
 	return queuedAhead, merged
 }
 
@@ -268,7 +298,7 @@ func (r *replTaskRunner) Enqueue(msg api.Message) (int, bool) {
 func (r *replTaskRunner) EnqueueWithFeedback(msg api.Message) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return enqueueFeedback(r.enqueueLocked(msg))
+	return r.enqueueQueueFeedbackLocked(msg)
 }
 
 // SubmitWithFeedback hands a typed message to the right place and returns
@@ -287,7 +317,7 @@ func (r *replTaskRunner) SubmitWithFeedback(msg api.Message) string {
 		repl.SetSteerCount(n)
 		return steerFeedback
 	}
-	return enqueueFeedback(r.enqueueLocked(msg))
+	return r.enqueueQueueFeedbackLocked(msg)
 }
 
 // reclaimSteerLocked moves guidance the finished task never consumed to the
@@ -319,7 +349,11 @@ func (r *replTaskRunner) reclaimSteerLocked() bool {
 // enqueueLocked is Enqueue's body. wasRunning reports that a task was
 // already running when msg arrived, so msg waits. Callers hold r.mu.
 func (r *replTaskRunner) enqueueLocked(msg api.Message) (queuedAhead int, merged, wasRunning bool) {
+	if !r.syncQueueScopeLocked() {
+		return -1, false, false
+	}
 	defer func() { repl.SetQueuedCount(len(r.queue)) }()
+	defer r.persistQueueLocked()
 	wasRunning = r.running
 	if r.running && len(r.queue) > 0 {
 		for i := len(r.queue) - 1; i >= 0; i-- {
@@ -359,7 +393,7 @@ func (r *replTaskRunner) WaitIdleUntil(deadline time.Time) bool {
 }
 
 func (r *replTaskRunner) startNextLocked() {
-	if r.running || r.closing || len(r.queue) == 0 {
+	if r.running || r.closing || r.paused || len(r.queue) == 0 {
 		return
 	}
 	msg := r.queue[0]
@@ -368,6 +402,14 @@ func (r *replTaskRunner) startNextLocked() {
 	r.running = true
 	r.current = msg
 	r.currentStart = time.Now()
+	if !r.persistQueueLocked() {
+		r.running = false
+		r.current = api.Message{}
+		r.currentStart = time.Time{}
+		r.queue = append([]api.Message{msg}, r.queue...)
+		repl.SetQueuedCount(len(r.queue))
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 
@@ -460,6 +502,7 @@ func (r *replTaskRunner) finishLocked() {
 	r.cancel = nil
 	r.current = api.Message{}
 	r.currentStart = time.Time{}
+	r.persistQueueLocked()
 	r.cond.Broadcast()
 }
 

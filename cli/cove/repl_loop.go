@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/url"
@@ -55,6 +56,10 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 		enqueue: func(msg api.Message) { tasks.Enqueue(msg) },
 	}
 	cmdReg = fe.install(cmdReg)
+	defer fe.closeWorkflows()
+	fe.installRemotePermissionPrompt()
+	defer fe.stopRemote(context.Background())
+	defer fe.closeRemoteOwner()
 
 	allCommands := buildCommandList(cmdReg, toolReg)
 
@@ -78,6 +83,17 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 		return complete(input, allCommands, skillDescs)
 
 	})
+	configureRemoteReader := func(reader *repl.LineReader) {
+		reader.SetOwnerEventHook(fe.remoteWake, func() {
+			fe.pollRemote()
+			if tasks.IsRunning() {
+				reader.SetPrompt(repl.PromptRunning())
+			} else {
+				reader.SetPrompt(repl.Prompt())
+			}
+		})
+	}
+	configureRemoteReader(reader)
 
 	// Everything that writes to the terminal now goes through the editor, so
 	// output lands above the input line instead of on top of it. That covers
@@ -145,6 +161,9 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 	}()
 
 	// On startup, check for interrupted draft and notify user
+	if notice := tasks.queueRecoveryNotice(); notice != "" {
+		repl.PrintAbove(notice + "\r\n")
+	}
 
 	if draft := usableInterruptedDraft(eng); draft != nil {
 
@@ -167,6 +186,7 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 		input, err := reader.ReadLine()
 
 		if errors.Is(err, repl.ErrInterrupt) {
+			fe.revokeRemoteApproval()
 
 			denyPendingPermissionPrompt()
 
@@ -192,6 +212,7 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 		// with nothing running it does nothing.
 		if errors.Is(err, repl.ErrEscape) {
 			if tasks.IsRunning() {
+				fe.revokeRemoteApproval()
 				denyPendingPermissionPrompt()
 				if tasks.CancelRunning() {
 					repl.PrintAbove(fmt.Sprintf("%s[已中断] 正在停止当前任务…输入 /continue 可继续%s\r\n", repl.Yellow, repl.Reset))
@@ -205,6 +226,7 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 			// Ctrl+D / stdin EOF leaves like /exit. It used to save at once
 			// while the task kept running: half a turn saved, the save racing
 			// the task's appends, and the task then killed with no draft.
+			fe.closeRemoteOwner()
 			leaveREPL(tasks, func() { autoSaveSession(eng) })
 
 			repl.PrintAbove("再见！\r\n")
@@ -222,6 +244,7 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 				return complete(input, allCommands, skillDescs)
 
 			})
+			configureRemoteReader(reader)
 
 			continue
 
@@ -271,6 +294,7 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 
 		case input == "exit" || input == "/exit":
 
+			fe.closeRemoteOwner()
 			leaveREPL(tasks, func() { autoSaveSession(eng) })
 
 			repl.PrintAbove("再见！\r\n")
@@ -293,6 +317,7 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 
 		case fe.dispatch(input):
 			if fe.exitRequested {
+				fe.closeRemoteOwner()
 				leaveREPL(tasks, func() { autoSaveSession(eng) })
 				if fe.restartRequested {
 					repl.PrintAbove("正在重启 cove…\r\n")
@@ -586,6 +611,10 @@ func (fe *frontend) takeHistoryPick(input string, resume func(string)) bool {
 // "继续" on.
 func (fe *frontend) continueTyped(input string) {
 	eng, tasks := fe.eng, fe.tasks
+	if tasks.Snapshot().Paused {
+		fe.print("队列已暂停，请通过 /tasks retry 或 /tasks skip 处理状态不明任务，再 /tasks run。")
+		return
+	}
 	if tasks.IsRunning() {
 		fe.print("[提示] 当前有任务正在运行，请等待其结束后再重试。")
 		return

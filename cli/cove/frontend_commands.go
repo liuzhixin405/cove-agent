@@ -74,6 +74,22 @@ func (fe *frontend) interactive() bool { return fe.tasks != nil }
 
 func (fe *frontend) running() bool { return fe.tasks != nil && fe.tasks.IsRunning() }
 
+func (fe *frontend) closeWorkflows() {
+	if err := fe.stopRemote(context.Background()); err != nil && fe.print != nil {
+		fe.print("remote shutdown: " + err.Error())
+	}
+	if fe.reg == nil {
+		return
+	}
+	if entry, exists := fe.reg.Find("race"); exists {
+		if closer, ok := entry.(interface{ Close() error }); ok {
+			if err := closer.Close(); err != nil && fe.print != nil {
+				fe.print("race shutdown: " + err.Error())
+			}
+		}
+	}
+}
+
 // feCmd is a front-end command. run gets the line as typed. A command that
 // overlays a generic one of the same name (base) handles what it knows and
 // hands the rest to base: bare /config shows the configuration, /config
@@ -158,6 +174,11 @@ var helpCategories = []string{catModel, catSession, catTasks, catSystem}
 // reg the registry fe dispatches through.
 func (fe *frontend) install(reg *command.Registry) *command.Registry {
 	fe.reg = reg
+	for _, commands := range [][]command.Command{fe.automationCommands(), fe.browserVerificationCommands(), fe.raceCommands(), fe.remoteCommands()} {
+		for _, entry := range commands {
+			reg.Register(entry)
+		}
+	}
 	base := func(name string) command.Command {
 		c, _ := reg.Find(name)
 		return c
@@ -229,6 +250,10 @@ func (fe *frontend) install(reg *command.Registry) *command.Registry {
 		{name: "export", desc: "导出当前会话为 Markdown", category: catSession, base: base("export"), run: session},
 		{name: "continue", desc: "从中断处继续上一轮", category: catSession,
 			run: func(ctx context.Context, in command.Input) bool {
+				if fe.tasks != nil && fe.tasks.Snapshot().Paused {
+					fe.print("队列已暂停，请通过 /tasks retry 或 /tasks skip 处理状态不明任务，再 /tasks run。")
+					return true
+				}
 				if t := fe.eng.CostTracker(); t != nil && t.OverBudget() {
 					fe.print(budgetExceededRetryHint(t))
 					return true
@@ -262,12 +287,25 @@ func (fe *frontend) install(reg *command.Registry) *command.Registry {
 			}},
 
 		// Background tasks.
-		{name: "tasks", desc: "查看运行中/排队的后台任务", category: catTasks,
+		{name: "acceptance", desc: "查看当前会话最新任务的验收证据", category: catTasks,
+			run: func(ctx context.Context, in command.Input) bool {
+				report, err := fe.eng.LastAcceptance()
+				if err != nil {
+					fe.print("读取验收报告失败: " + err.Error())
+				} else if report == nil {
+					fe.print("当前会话尚无任务验收报告。")
+				} else {
+					fe.print(report.Summary())
+				}
+				return true
+			}},
+		{name: "tasks", desc: "查看、恢复和管理持久化任务队列", category: catTasks,
+			hints: []string{"saved", "restore", "remove", "move", "run", "retry", "skip"},
 			run: func(ctx context.Context, in command.Input) bool {
 				if fe.tasks == nil {
 					fe.print("headless 模式按行同步执行，不维护后台任务队列。")
 				} else {
-					fe.print(strings.TrimRight(formatTaskSnapshot(fe.tasks.Snapshot()), "\r\n"))
+					fe.print(fe.tasks.taskQueueCommand(in.Args))
 				}
 				return true
 			}},

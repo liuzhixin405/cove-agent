@@ -63,6 +63,35 @@ func TestWriteFileKeepsWindowsAttributesAndStreams(t *testing.T) {
 	}
 }
 
+func TestWriteFileRootKeepsWindowsAttributesAndStreams(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "private.env")
+	if err := os.WriteFile(path, []byte("before"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path+":meta", []byte("kept"), 0600); err != nil {
+		t.Skipf("filesystem without alternate data streams: %v", err)
+	}
+	setFileAttrs(t, path, windows.FILE_ATTRIBUTE_HIDDEN|windows.FILE_ATTRIBUTE_ARCHIVE)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if err := WriteFileRoot(root, "private.env", []byte("after"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if data, _ := os.ReadFile(path); string(data) != "after" {
+		t.Fatalf("body = %q", data)
+	}
+	if fileAttrs(t, path)&windows.FILE_ATTRIBUTE_HIDDEN == 0 {
+		t.Fatal("hidden attribute lost")
+	}
+	if data, err := os.ReadFile(path + ":meta"); err != nil || string(data) != "kept" {
+		t.Fatalf("alternate stream lost: %q, %v", data, err)
+	}
+}
+
 // The fallback when ReplaceFileW cannot be used restores the attributes too.
 func TestRenameKeepingAttributesFallback(t *testing.T) {
 	dir := t.TempDir()

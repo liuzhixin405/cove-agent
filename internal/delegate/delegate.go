@@ -19,18 +19,20 @@ import (
 
 // SubAgent is an isolated child agent that executes a specific sub-task.
 type SubAgent struct {
-	provider       api.Provider
-	model          string
-	registry       *tool.Registry
-	maxIter        int
-	cwd            string
-	permissionMode string
-	authorize      Authorizer
-	executor       Executor
-	budgetExceeded func() bool
-	contextTokens  int
-	progress       func(step string)
-	fallback       string
+	requireRegression bool
+	regressionPassed  bool
+	provider          api.Provider
+	model             string
+	registry          *tool.Registry
+	maxIter           int
+	cwd               string
+	permissionMode    string
+	authorize         Authorizer
+	executor          Executor
+	budgetExceeded    func() bool
+	contextTokens     int
+	progress          func(step string)
+	fallback          string
 }
 
 // Authorizer decides whether a sub-agent may run one tool call. It is the same
@@ -48,10 +50,12 @@ type Executor func(ctx context.Context, tc api.ToolCall) string
 
 // Config configures a sub-agent.
 type Config struct {
-	Provider api.Provider
-	Model    string
-	Tools    []tool.Tool // restricted tool set
-	MaxIter  int         // max model calls (0 = DefaultMaxIter)
+	// RequireRegression refuses a completion claim without tool-produced red/green evidence.
+	RequireRegression bool
+	Provider          api.Provider
+	Model             string
+	Tools             []tool.Tool // restricted tool set
+	MaxIter           int         // max model calls (0 = DefaultMaxIter)
 	// Cwd is the project directory tool calls resolve relative paths against.
 	Cwd string
 	// PermissionMode is the session's real mode. It is passed through to
@@ -79,6 +83,8 @@ type Config struct {
 
 // Options adjusts a single delegated task.
 type Options struct {
+	// RequireRegression limits tools to code inspection and regression_verify.
+	RequireRegression bool
 	// ReadOnly restricts the sub-agent to read-only tools.
 	ReadOnly bool
 	// Exclude names tools the sub-agent does not get (a code review has no
@@ -121,18 +127,19 @@ func NewSubAgent(cfg Config) *SubAgent {
 		reg.Register(t)
 	}
 	return &SubAgent{
-		provider:       cfg.Provider,
-		model:          cfg.Model,
-		registry:       reg,
-		maxIter:        cfg.MaxIter,
-		cwd:            cfg.Cwd,
-		permissionMode: cfg.PermissionMode,
-		authorize:      cfg.Authorize,
-		executor:       cfg.Executor,
-		budgetExceeded: cfg.BudgetExceeded,
-		contextTokens:  cfg.ContextTokens,
-		progress:       cfg.Progress,
-		fallback:       cfg.Fallback,
+		requireRegression: cfg.RequireRegression,
+		provider:          cfg.Provider,
+		model:             cfg.Model,
+		registry:          reg,
+		maxIter:           cfg.MaxIter,
+		cwd:               cfg.Cwd,
+		permissionMode:    cfg.PermissionMode,
+		authorize:         cfg.Authorize,
+		executor:          cfg.Executor,
+		budgetExceeded:    cfg.BudgetExceeded,
+		contextTokens:     cfg.ContextTokens,
+		progress:          cfg.Progress,
+		fallback:          cfg.Fallback,
 	}
 }
 
@@ -210,6 +217,8 @@ const (
 	ExitInterrupted = "interrupted"
 	// ExitError: a model call failed.
 	ExitError = "error"
+	// ExitUnverified: the model finished without passing regression evidence.
+	ExitUnverified = "unverified"
 	// ExitLoop: the same tool-call batch was requested loopLimit times.
 	ExitLoop = "loop"
 )
@@ -342,6 +351,9 @@ func (sa *SubAgent) Run(ctx context.Context, task string, systemPrompt string) *
 		if len(resp.ToolCalls) == 0 {
 			res.Output, res.Success, res.Steps = resp.Content, true, iter+1
 			res.ExitReason = ExitCompleted
+			if sa.requireRegression && !sa.regressionPassed {
+				res.Success, res.ExitReason, res.Error = false, ExitUnverified, "no passing red/green regression evidence; model claims are not proof"
+			}
 			return res
 		}
 
@@ -365,6 +377,10 @@ func (sa *SubAgent) Run(ctx context.Context, task string, systemPrompt string) *
 		})
 		for _, tc := range resp.ToolCalls {
 			content := sa.runTool(ctx, tc)
+			if sa.requireRegression && tc.Name == "regression_verify" {
+				var evidence RegressionEvidence
+				sa.regressionPassed = json.Unmarshal([]byte(content), &evidence) == nil && evidence.Status == "passed" && len(evidence.Tests) > 0 && evidence.Baseline != "" && evidence.Current != "" && evidence.Before.ExitCode == 1 && evidence.After.ExitCode == 0 && evidence.Before.Error == "" && evidence.After.Error == ""
+			}
 			steps = append(steps, stepSummary(tc, content))
 			if sa.progress != nil {
 				sa.progress(steps[len(steps)-1])
@@ -578,14 +594,18 @@ func (d *Delegator) DelegateWith(ctx context.Context, taskID, task, systemPrompt
 	log.Debugf("delegate: starting sub-agent for task %s", taskID)
 
 	tools := d.tools
-	if opts.ReadOnly || len(opts.Exclude) > 0 {
+	if opts.ReadOnly || len(opts.Exclude) > 0 || opts.RequireRegression {
 		excluded := map[string]bool{}
 		for _, n := range opts.Exclude {
 			excluded[n] = true
 		}
 		tools = nil
 		for _, t := range d.tools {
-			if opts.ReadOnly && !t.Def().IsReadOnly || excluded[t.Def().Name] {
+			name := t.Def().Name
+			if opts.RequireRegression && name != "read" && name != "glob" && name != "grep" && name != "repo_map" && name != "regression_verify" {
+				continue
+			}
+			if (opts.ReadOnly || opts.RequireRegression) && !t.Def().IsReadOnly && !(opts.RequireRegression && name == "regression_verify") || excluded[name] {
 				continue
 			}
 			tools = append(tools, t)
@@ -606,17 +626,18 @@ func (d *Delegator) DelegateWith(ctx context.Context, taskID, task, systemPrompt
 		fallback = d.fallbackFor(model)
 	}
 	sa := NewSubAgent(Config{
-		Provider:       provider,
-		Model:          model,
-		Tools:          tools,
-		MaxIter:        d.maxIterOrDefault(),
-		Cwd:            d.cwd,
-		PermissionMode: d.permissionMode,
-		Authorize:      d.authorize,
-		Executor:       d.executor,
-		BudgetExceeded: d.budgetExceeded,
-		ContextTokens:  contextTokens,
-		Fallback:       fallback,
+		RequireRegression: opts.RequireRegression,
+		Provider:          provider,
+		Model:             model,
+		Tools:             tools,
+		MaxIter:           d.maxIterOrDefault(),
+		Cwd:               d.cwd,
+		PermissionMode:    d.permissionMode,
+		Authorize:         d.authorize,
+		Executor:          d.executor,
+		BudgetExceeded:    d.budgetExceeded,
+		ContextTokens:     contextTokens,
+		Fallback:          fallback,
 	})
 	if d.progress == nil {
 		return sa.Run(subCtx, task, systemPrompt)

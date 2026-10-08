@@ -60,6 +60,10 @@ func platformRename(from, to string) error {
 }
 
 func replaceFileW(replaced, replacement *uint16) error {
+	return replaceFileWFlags(replaced, replacement, replacefileIgnoreMergeErrors|replacefileIgnoreACLErrors)
+}
+
+func replaceFileWFlags(replaced, replacement *uint16, flags uintptr) error {
 	if err := procReplaceFileW.Find(); err != nil {
 		return err
 	}
@@ -67,7 +71,7 @@ func replaceFileW(replaced, replacement *uint16) error {
 		uintptr(unsafe.Pointer(replaced)),
 		uintptr(unsafe.Pointer(replacement)),
 		0,
-		replacefileIgnoreMergeErrors|replacefileIgnoreACLErrors,
+		flags,
 		0, 0)
 	if r == 0 {
 		if e == nil || errors.Is(e, windows.ERROR_SUCCESS) {

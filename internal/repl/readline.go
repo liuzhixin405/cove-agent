@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"golang.org/x/term"
 )
@@ -35,6 +36,50 @@ type LineReader struct {
 	// cursor is on, so the next redraw or erase can go back to its top.
 	drawnRows int
 	cursorRow int
+	ownerWake func() <-chan struct{}
+	ownerPoll func()
+}
+
+func (lr *LineReader) SetOwnerEventHook(wake func() <-chan struct{}, poll func()) {
+	lr.ownerWake, lr.ownerPoll = wake, poll
+}
+
+type ownerInput struct {
+	source io.Reader
+	lr     *LineReader
+}
+
+type inputResult struct {
+	data []byte
+	err  error
+}
+
+func (in ownerInput) Read(dst []byte) (int, error) {
+	if in.lr.ownerPoll == nil {
+		return in.source.Read(dst)
+	}
+	result := make(chan inputResult, 1)
+	go func() {
+		data := make([]byte, len(dst))
+		count, err := in.source.Read(data)
+		result <- inputResult{data: data[:count], err: err}
+	}()
+	ticker := time.NewTicker(250 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var wake <-chan struct{}
+		if in.lr.ownerWake != nil {
+			wake = in.lr.ownerWake()
+		}
+		select {
+		case read := <-result:
+			return copy(dst, read.data), read.err
+		case <-wake:
+			in.lr.ownerPoll()
+		case <-ticker.C:
+			in.lr.ownerPoll()
+		}
+	}
 }
 
 var ErrExit = fmt.Errorf("exit")
@@ -58,6 +103,8 @@ func New(completer Completer) *LineReader {
 // SetPrompt changes the prompt string and recalculates its visual width.
 // ANSI escape sequences are skipped so the width reflects only visible cells.
 func (lr *LineReader) SetPrompt(p string) {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
 	lr.prompt = p
 	lr.promptWidth = promptVisibleWidth(p)
 }
@@ -69,6 +116,9 @@ func (lr *LineReader) SetPrompt(p string) {
 // mid-task ReadLine.
 
 func (lr *LineReader) ReadLine() (string, error) {
+	if lr.ownerPoll != nil {
+		lr.ownerPoll()
+	}
 	if shouldUseFallbackReadline() {
 		return lr.fallbackRead()
 	}
@@ -86,7 +136,7 @@ func (lr *LineReader) ReadLine() (string, error) {
 	// every call, so whatever the previous read had already buffered — the
 	// rest of a paste, keys typed ahead — was thrown away with it.
 	if lr.rawReader == nil {
-		lr.rawReader = bufio.NewReaderSize(os.Stdin, rawInputBufferSize)
+		lr.rawReader = bufio.NewReaderSize(ownerInput{source: os.Stdin, lr: lr}, rawInputBufferSize)
 	}
 	// Bracketed paste makes the terminal wrap pasted text in ESC[200~ …
 	// ESC[201~, so its newlines can be told apart from Enter. Terminals that
@@ -467,7 +517,7 @@ func (lr *LineReader) historyDown(buf *[]rune, cursor *int) {
 
 func (lr *LineReader) fallbackRead() (string, error) {
 	if lr.fallbackReader == nil {
-		lr.fallbackReader = bufio.NewReader(os.Stdin)
+		lr.fallbackReader = bufio.NewReader(ownerInput{source: os.Stdin, lr: lr})
 	}
 	termPrint(lr.prompt)
 	line, err := lr.fallbackReader.ReadString('\n')

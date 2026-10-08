@@ -100,6 +100,8 @@ cove /new "添加一个新的 API 接口并更新 README"
 | `/continue`         | 从中断处继续上一轮（已完成的工具步骤不会重做）                  |
 | `/export`           | 导出当前对话                                                    |
 | `/undo`             | 回退到上一个检查点                                              |
+| 独立回归验证         | 要求使用 `verify` 子 Agent：Go 同一测试必须旧实现失败、新实现通过，证据见 `/acceptance` |
+| `/undo files <检查点> <文件>...` | 预览文件级回滚，`/undo apply <预览ID>` 确认；执行前检测选中文件漂移 |
 | `/checkpoints`      | 列出所有检查点                                                  |
 | `/diff`             | 显示 git diff                                                   |
 | `/commit [msg]`     | Git add + commit                                                |
@@ -108,6 +110,7 @@ cove /new "添加一个新的 API 接口并更新 README"
 | `/cd <路径>`        | 切换工作目录（按新目录重新加载 `policies.json` 规则）         |
 | `/attach <文件...>` | 挂载图片或文件（支持 `list`/`remove`/`clear` 子命令）     |
 | `/memory [list        | add                                                             |
+| `/memory source <名称>` | 查看当前正文版本的来源会话、消息位置与提取依据                 |
 | `/dream [status       | run]`                                                           |
 | `/hooks`            | 列出从 `hooks.json` 加载的钩子                                |
 | `/mcp`              | MCP 服务器管理                                                  |
@@ -115,6 +118,13 @@ cove /new "添加一个新的 API 接口并更新 README"
 | `/skill <名称>`     | 查看或调用一个技能（别名 `/skills`）                          |
 | `/tools`            | 列出可用工具                                                    |
 | `/tasks`            | 查看运行中/排队任务（TUI）；headless 显示同步执行状态           |
+| `/tasks saved`      | 列出当前项目持久化队列；显式恢复、删除和排序，重启不自动执行 |
+| `/acceptance`       | 查看最新任务的通过、失败、未验证项与命令执行证据               |
+| `/automations`      | 显式维护任务：定时扫描、去重事件、Git worktree 隔离执行 |
+| `/inbox`            | 查看维护结果、验证输出和补丁；接受只记录决定，不自动合并 |
+| `/browser-verify`   | Chrome 实操断言、桌面/移动截图与验收证据；未启用 Chrome 时记为未验证 |
+| `/race`             | 两个 worktree 竞跑、同一验证器比较；显式 select 应用通过方案 |
+| `/remote`           | 显式启动认证远程监督；状态、引导、取消、队列暂停及一次性工具审批 |
 | `/stop`             | 取消当前任务（别名 `/cancel`）                                |
 | `/record [status      | start                                                           |
 | `/x [编号] [all]`   | 展开工具块折叠的输出（别名 `/expand`）                        |
@@ -125,6 +135,8 @@ cove /new "添加一个新的 API 接口并更新 README"
 | `/exit`             | 退出 REPL                                                       |
 
 *更多信息请查看 [贡献指南](CONTRIBUTING.md) 和 [开发文档](docs/README.md)。*
+
+四项工作流的 JSON 示例、调度入口和安全边界见 [工作流指南](docs/guide/workflows.md)。默认不启动调度、浏览器或远程监听；维护与竞跑需要有提交记录的 Git 项目，worktree 不是安全沙箱。
 
 <a name="english"></a>
 

@@ -33,6 +33,9 @@ func NewEditTool() Tool {
 }
 
 func (t *EditTool) Call(ctx context.Context, input Input, tctx Context) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{Data: "Error: " + err.Error(), IsError: true}, nil
+	}
 	path, _ := input["filePath"].(string)
 	oldS, _ := input["oldString"].(string)
 	newS, _ := input["newString"].(string)
@@ -160,6 +163,9 @@ func (t *EditTool) Call(ctx context.Context, input Input, tctx Context) (Result,
 		}
 	}
 
+	if err := ctx.Err(); err != nil {
+		return Result{Data: "Error: " + err.Error(), IsError: true}, nil
+	}
 	if err := replaceFile(path, out); err != nil {
 		return Result{Data: "Error: " + err.Error(), IsError: true}, nil
 	}

@@ -215,8 +215,10 @@ type Engine struct {
 	autoLearnOff       bool
 	dreamRunner        *dream.Runner
 	cpMgr              *checkpoint.Manager
-	lastReviewMsgCount int                     // guarded by bgMu, with reviewRunning
-	verifyGate         *VerifyGate             // completion verification gate (P0-0, minimal EDCL)
+	lastReviewMsgCount int         // guarded by bgMu, with reviewRunning
+	verifyGate         *VerifyGate // completion verification gate (P0-0, minimal EDCL)
+	acceptanceMu       sync.Mutex
+	acceptance         *AcceptanceReport
 	fastOutcomes       *fastModelOutcomeWindow // recent fast-model success/failure, feeds router scoring
 	recordingEnabled   bool
 	recordingDir       string
@@ -978,7 +980,31 @@ func (e *Engine) RestoreCheckpoint(commitHash string) (string, error) {
 	if e == nil || e.cpMgr == nil {
 		return "", fmt.Errorf("checkpoint manager unavailable")
 	}
-	return e.cpMgr.Restore(commitHash)
+	backup, err := e.cpMgr.Restore(commitHash)
+	if backup != "" {
+		e.invalidateSavedAcceptance()
+	}
+	return backup, err
+}
+
+// PreviewCheckpointFiles prepares a file-scoped rollback without writing files.
+func (e *Engine) PreviewCheckpointFiles(hash string, paths []string) (*checkpoint.FileRestorePlan, error) {
+	if e == nil || e.cpMgr == nil {
+		return nil, fmt.Errorf("checkpoint manager unavailable")
+	}
+	return e.cpMgr.PreviewFiles(hash, paths)
+}
+
+// ApplyCheckpointFiles executes an explicitly approved, unchanged preview.
+func (e *Engine) ApplyCheckpointFiles(plan *checkpoint.FileRestorePlan, token string) (string, error) {
+	if e == nil || e.cpMgr == nil {
+		return "", fmt.Errorf("checkpoint manager unavailable")
+	}
+	backup, err := e.cpMgr.ApplyFiles(plan, token)
+	if backup != "" {
+		e.invalidateSavedAcceptance()
+	}
+	return backup, err
 }
 func (e *Engine) RateLimitInfo() api.RateLimitInfo {
 	if e == nil || e.rateLimits == nil {
@@ -1213,6 +1239,9 @@ func (e *Engine) runToolRecovered(ctx context.Context, tc api.ToolCall) (out str
 // tell a failure by an "Error:" or "BLOCKED" prefix, which a guardrail note
 // or any wrapper in front of the text silently defeated.
 func (e *Engine) executeTool(ctx context.Context, tc api.ToolCall) (toolOutput string, failed bool) {
+	if err := ctx.Err(); err != nil {
+		return "Error: " + err.Error(), true
+	}
 	// If the provider layer could not parse this call's arguments as JSON
 	// even after best-effort repair (internal/api/tool_repair.go), don't
 	// dispatch garbage input to the real tool. Return a normal "Error: ..."
@@ -1421,6 +1450,9 @@ func (e *Engine) executeTool(ctx context.Context, tc api.ToolCall) (toolOutput s
 		}
 	}
 	e.noteGitInvocation(tc)
+	if err := ctx.Err(); err != nil {
+		return "Error: " + err.Error(), true
+	}
 	result, err := t.Call(ctx, tc.Input, tctx)
 	if err == nil && !result.IsError && diffOK {
 		e.recordFileDiff(tc.ID, diffPath, diffBefore)
@@ -1428,7 +1460,14 @@ func (e *Engine) executeTool(ctx context.Context, tc api.ToolCall) (toolOutput s
 	if err != nil {
 		// Retry once for transient errors (network, timeout, temporary file locks)
 		if isTransientError(err) {
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return "Error: " + ctx.Err().Error(), true
+			case <-time.After(100 * time.Millisecond):
+			}
+			if err := ctx.Err(); err != nil {
+				return "Error: " + err.Error(), true
+			}
 			result, err = t.Call(ctx, tc.Input, tctx)
 			if err != nil {
 				if e.guardrails != nil {
@@ -2421,6 +2460,7 @@ func (e *Engine) runTurnEndPipeline() {
 		learn:     !e.autoLearnOff,
 		saved:     e.lastSaveErr == nil,
 		sessionID: e.SessionID(),
+		cwd:       e.projectCwd(),
 		keep:      e.config.MaxSessions,
 	}
 	if job.learn && e.localProvider() {
@@ -2538,6 +2578,7 @@ func (e *Engine) WirePlanExecutor() {
 	if e.runtime == nil {
 		return
 	}
+	e.registry.Register(&regressionTool{engine: e})
 
 	if e.llm != nil {
 		d := delegate.NewDelegator(nil, "", e.registry.All())
@@ -2573,7 +2614,11 @@ func (e *Engine) WirePlanExecutor() {
 		}
 		// The agent tool looks for a runner here; nothing used to set one, so
 		// every agent call failed with "Sub-agent runner unavailable".
-		e.runtime.AgentRunner = newAgentRunner(d)
+		runner := newAgentRunner(d)
+		runner.onUnverified = func(reason string) {
+			e.recordRegressionEvidence(delegate.RegressionEvidence{Status: "unverified", Reason: "independent verifier did not finish with proof: " + reason})
+		}
+		e.runtime.AgentRunner = runner
 		return
 	}
 

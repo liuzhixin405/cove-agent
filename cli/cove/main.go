@@ -24,6 +24,7 @@ import (
 	"github.com/charmbracelet/x/term"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
+	"github.com/liuzhixin405/cove-agent/internal/checkpoint"
 
 	"github.com/liuzhixin405/cove-agent/internal/command"
 
@@ -54,7 +55,7 @@ type chatRunner interface {
 }
 
 var (
-	Version = "12.0.0"
+	Version = "12.1.0"
 
 	BuildTime = "pro"
 
@@ -76,6 +77,12 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && (os.Args[1] == "--automation" || os.Args[1] == "--automation-inbox") {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		_, exitCode := RunAutomationCLI(ctx, os.Args[1:], os.Stdout, os.Stderr)
+		stop()
+		os.Exit(exitCode)
+	}
 
 	opts, err := parseCLIArgs(os.Args[1:])
 	if err != nil {
@@ -595,6 +602,16 @@ func (a replEngineAdapter) RestoreCheckpoint(commitHash string) (string, error) 
 	return a.eng.RestoreCheckpoint(commitHash)
 }
 
+func (a replEngineAdapter) PreviewCheckpointFiles(hash string, paths []string) (*checkpoint.FileRestorePlan, error) {
+	return a.eng.PreviewCheckpointFiles(hash, paths)
+}
+
+func (a replEngineAdapter) ApplyCheckpointFiles(plan *checkpoint.FileRestorePlan, token string) (string, error) {
+	return a.eng.ApplyCheckpointFiles(plan, token)
+}
+
+func (a replEngineAdapter) PermissionScope() string { return a.eng.PermissionScope() }
+
 func (a replEngineAdapter) RateLimitInfo() api.RateLimitInfo { return a.eng.RateLimitInfo() }
 
 func (a replEngineAdapter) ReloadProvider(provider, model, baseURL, apiKey string) error {
@@ -635,6 +652,14 @@ func (fe *frontend) execute(ctx context.Context, input string) {
 	parts := strings.Fields(input)
 
 	name := strings.TrimPrefix(parts[0], "/")
+	if len(parts) > 1 && ((name == "undo" && parts[1] == "files") || (name == "memory" && parts[1] == "source")) {
+		quoted, err := splitQuotedFields(input)
+		if err != nil {
+			fe.print("参数解析失败: " + err.Error())
+			return
+		}
+		parts = quoted
+	}
 
 	c, ok := reg.Find(name)
 
@@ -1042,6 +1067,9 @@ func printCLIHelp() {
  cove --replay <dir>        使用录制数据回放（不调用真实 API）
 
  cove --list-sessions [all] 列出当前目录的会话记录（all: 所有项目）
+
+ cove --automation <action> <project> [arguments]  独立维护入口（开关必须在首位）
+ cove --automation-inbox <action> <project> [arguments]  查看/审阅持久化维护结果
 
 
  cove -d, --debug           开启调试模式并打印日志

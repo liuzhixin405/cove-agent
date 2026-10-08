@@ -9,6 +9,7 @@
 package fsatomic
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -128,6 +129,43 @@ func WriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("rename temp onto %s: %w", path, err)
 	}
 	return nil
+}
+
+// WriteFileRoot atomically replaces a relative path without escaping root.
+func WriteFileRoot(root *os.Root, path string, data []byte, perm os.FileMode) error {
+	if root == nil {
+		return fmt.Errorf("atomic write requires a root")
+	}
+	if runtime.GOOS == "windows" && strings.Contains(filepath.Base(path), ":") {
+		return ErrStreamName
+	}
+	tmpName := filepath.Join(filepath.Dir(path), tempPrefix+rand.Text())
+	tmp, err := root.OpenFile(tmpName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tmp.Close(); _ = root.Remove(tmpName) }()
+	if _, err := tmp.Write(data); err != nil {
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	err = renameRootFile(root, tmpName, path)
+	for _, delay := range renameBackoff {
+		if err == nil || !retryableRename(err) {
+			return err
+		}
+		sleep(delay)
+		err = renameRootFile(root, tmpName, path)
+	}
+	return err
 }
 
 // renameBackoff is the wait before each retry of a failed rename.

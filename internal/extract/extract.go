@@ -2,6 +2,9 @@ package extract
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -125,6 +128,11 @@ func historyKey(messages []api.Message) string {
 // Extract analyzes the recent conversation and saves any important memories.
 // Should be called after each turn ends (runs as a background goroutine).
 func (r *Runner) Extract(ctx context.Context, messages []api.Message) {
+	r.ExtractWithSource(ctx, messages, memory.ProvenanceSource{})
+}
+
+// ExtractWithSource binds saved facts to a captured session and transcript window.
+func (r *Runner) ExtractWithSource(ctx context.Context, messages []api.Message, source memory.ProvenanceSource) {
 	// Need at least a few messages to extract from. Checked before the
 	// claim: a too-short conversation used to claim the slot, so the first
 	// turn worth learning from was then skipped.
@@ -145,6 +153,22 @@ func (r *Runner) Extract(ctx context.Context, messages []api.Message) {
 	if len(window) > 20 {
 		window = window[len(window)-20:]
 	}
+	source.Kind = "extraction"
+	source.FirstMessage, source.LastMessage = len(messages)-len(window)+1, len(messages)
+	encoded, err := json.Marshal(window)
+	if err != nil {
+		log.Warnf("[extractMemories] cannot record source transcript: %v", err)
+		return
+	}
+	hash := sha256.Sum256(encoded)
+	source.TranscriptHash = hex.EncodeToString(hash[:])
+	var evidence strings.Builder
+	for index, msg := range window {
+		if msg.Content != "" {
+			fmt.Fprintf(&evidence, "%d %s: %s\n", source.FirstMessage+index, msg.Role, textutil.ClipRunes(msg.Content, 160))
+		}
+	}
+	source.Evidence = textutil.ClipBytes(evidence.String(), 4096, "\n[truncated]")
 
 	st := r.store()
 	dirs := st.Dirs()
@@ -221,9 +245,9 @@ func (r *Runner) Extract(ctx context.Context, messages []api.Message) {
 		// directory has, starts from the global content.
 		var err error
 		if m.Append {
-			name, err = st.Append(name, m.Content)
+			name, err = st.AppendWithSource(name, m.Content, source)
 		} else {
-			err = st.Save(name, m.Content)
+			err = st.SaveWithSource(name, m.Content, source)
 		}
 		if err != nil {
 			log.Warnf("[extractMemories] write %s failed: %v", name, err)

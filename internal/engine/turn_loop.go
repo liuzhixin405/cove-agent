@@ -135,7 +135,15 @@ type toolResult struct {
 	Elapsed time.Duration
 }
 
-func (e *Engine) RunMessageWithStream(ctx context.Context, userMessage api.Message, onDelta func(delta string), onReasoning func(reasoning string)) (string, error) {
+func (e *Engine) RunMessageWithStream(ctx context.Context, userMessage api.Message, onDelta func(delta string), onReasoning func(reasoning string)) (reply string, runErr error) {
+	e.beginAcceptance(userMessage)
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			e.finishAcceptance(fmt.Errorf("internal panic: %v", recovered))
+			panic(recovered)
+		}
+		e.finishAcceptance(runErr)
+	}()
 	if e.costTracker.OverBudget() {
 		return "", fmt.Errorf("%w: %s", ErrBudgetExceeded, e.costTracker.Summary())
 	}
@@ -330,7 +338,7 @@ func (e *Engine) beginTurn(ctx context.Context, userMessage api.Message, onDelta
 		}
 		// Changing state (git) and per-turn guidance travel with the turn,
 		// after the user's message, so the cached prefix stays intact.
-		note := e.turnContextNote(userMessage.Content)
+		note := e.turnContextNote(ctx, userMessage.Content)
 		if note != "" {
 			e.messages = append(e.messages, newSyntheticUserMsg(note))
 		}
@@ -645,10 +653,14 @@ func (e *Engine) finishOrNudge(t *turn, iter int, resp *api.ChatResponse) flow {
 	// turns that claim into something checked instead of trusted.
 	gaveUpUnresolved := false
 	due := e.verifyGate.Enabled() && (!e.verifyGate.onlyWhenFilesChanged || e.filesChangedThisTurn())
+	if !due && e.verifyGate.Enabled() {
+		e.skipAcceptance("本轮无文件变更，未触发校验")
+	}
 	if due && !e.verifyTrusted(e.verifyGate) {
 		// Skipped, neither passed nor failed: the turn ends as if no gate
 		// were configured.
 		due = false
+		e.skipAcceptance("项目未信任，校验未执行")
 		if !e.verifyTrustNoticed {
 			e.verifyTrustNoticed = true
 			e.engineOutput(untrustedVerifyNotice)
@@ -657,7 +669,7 @@ func (e *Engine) finishOrNudge(t *turn, iter int, resp *api.ChatResponse) flow {
 	if due {
 		// Said once, when a check first runs: a chat turn used to print it too.
 		e.announceVerifyGate()
-		results, passed := e.verifyGate.Run(t.ctx, t.limits.verifyPassed)
+		results, passed := e.verifyGate.run(t.ctx, t.limits.verifyPassed, e.recordAcceptanceResults)
 		if t.ctx.Err() != nil {
 			// Ctrl+C during the check is the user's doing, not a failed
 			// verification: it used to count a retry, hand "[verify_gate]
@@ -819,7 +831,9 @@ func (e *Engine) dispatchTools(ctx context.Context, calls []api.ToolCall) []tool
 	// (which normalized later) skipped its own: the file changed with
 	// nothing for /undo to restore.
 	calls = e.canonicalToolCalls(calls)
-	e.checkpointBefore(calls)
+	if ctx.Err() == nil {
+		e.checkpointBefore(calls)
+	}
 	ctx = withCheckpointed(ctx)
 
 	if len(calls) == 1 || len(calls) == 0 {
@@ -937,8 +951,13 @@ func (e *Engine) dispatchTools(ctx context.Context, calls []api.ToolCall) []tool
 
 		if safe {
 			enterGroup(kind)
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				results[i] = toolResult{ID: tc.ID, Name: tc.Name, Input: tc.Input, Content: "Error: " + ctx.Err().Error(), Failed: true}
+				continue
+			}
 			wg.Add(1)
-			sem <- struct{}{}
 			go func(idx int, tcall api.ToolCall) {
 				defer wg.Done()
 				defer func() { <-sem }()

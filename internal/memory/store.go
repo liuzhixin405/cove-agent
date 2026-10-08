@@ -52,6 +52,7 @@ type Store struct {
 	cacheTTL    time.Duration
 	promptCache string
 	promptDirty bool
+	searchIndex *BM25
 
 	// Optional semantic search (opt-in; nil by default = pure BM25, the
 	// original and still fully-supported behavior). See
@@ -232,6 +233,9 @@ func (s *Store) vectorScores(ctx context.Context, query string, entries []Entry)
 	s.mu.Unlock()
 
 	fail := func(err error) {
+		if ctx.Err() != nil {
+			return
+		}
 		if err != nil && isInputSizeError(err) {
 			return
 		}
@@ -314,7 +318,10 @@ func (s *Store) vectorScores(ctx context.Context, query string, entries []Entry)
 func (s *Store) All() []Entry {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.allLocked()
+}
 
+func (s *Store) allLocked() []Entry {
 	// Return cached if fresh
 	if s.cachedAll != nil && time.Since(s.cacheTime) < s.cacheTTL {
 		return s.cachedAll
@@ -384,7 +391,27 @@ func (s *Store) All() []Entry {
 	s.cachedAll = entries
 	s.cacheTime = time.Now()
 	s.promptDirty = true
+	s.searchIndex = nil
 	return entries
+}
+
+func (s *Store) searchSnapshot() ([]Entry, *BM25) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entries := s.allLocked()
+	if s.searchIndex == nil {
+		index := NewBM25(1.2, 0.75)
+		now := time.Now()
+		for id, entry := range entries {
+			updated := entry.Updated
+			if updated.IsZero() {
+				updated = now
+			}
+			index.Index(id, entry.Content, updated)
+		}
+		s.searchIndex = index
+	}
+	return entries, s.searchIndex
 }
 
 // BuildPrompt renders the memory block without a query: instruction files
@@ -590,6 +617,14 @@ type EntryMatch struct {
 // top matches ranked by relevance (blended with recency). No embeddings are
 // used. Results are deduplicated by entry name.
 func (s *Store) Search(query string, topK int) []EntryMatch {
+	return s.SearchContext(context.Background(), query, topK)
+}
+
+// SearchContext retrieves ranked memories and cancels semantic requests with ctx.
+func (s *Store) SearchContext(ctx context.Context, query string, topK int) []EntryMatch {
+	if ctx.Err() != nil {
+		return nil
+	}
 	query = strings.TrimSpace(query)
 	if query == "" {
 		return nil
@@ -597,29 +632,12 @@ func (s *Store) Search(query string, topK int) []EntryMatch {
 	if topK <= 0 {
 		topK = 5
 	}
-	entries := s.All()
+	entries, bm25 := s.searchSnapshot()
 	if len(entries) == 0 {
 		return nil
 	}
 
-	// The index is rebuilt from scratch on every search anyway (the former
-	// shared s.bm25 was Clear()ed each time, so it carried no state worth
-	// reusing). Keeping it call-local removes the data race where two
-	// concurrent Search calls would Clear/Index/Search the same instance.
-	bm25 := NewBM25(1.2, 0.75)
-
-	// Index with each file's mtime. Every document used to be indexed with
-	// updated=now, which made the 0.3 recency term of CombinedScore the same
-	// constant for all of them, so a months-old memory ranked exactly like
-	// one saved a minute ago.
 	now := time.Now()
-	for i, e := range entries {
-		updated := e.Updated
-		if updated.IsZero() {
-			updated = now
-		}
-		bm25.Index(i, e.Content, updated)
-	}
 
 	scored := bm25.Search(query, topK*2)
 	// Optional semantic re-ranking bonus (nil map when disabled/unavailable
@@ -635,7 +653,10 @@ func (s *Store) Search(query string, topK int) []EntryMatch {
 		}
 	}
 	var vecScores map[int]float64
-	if candScores := s.vectorScores(context.Background(), query, cands); candScores != nil {
+	if ctx.Err() != nil {
+		return nil
+	}
+	if candScores := s.vectorScores(ctx, query, cands); candScores != nil {
 		vecScores = make(map[int]float64, len(candScores))
 		ci := 0
 		for _, r := range scored {
@@ -646,6 +667,9 @@ func (s *Store) Search(query string, topK int) []EntryMatch {
 				ci++
 			}
 		}
+	}
+	if ctx.Err() != nil {
+		return nil
 	}
 
 	seen := make(map[string]bool)
@@ -743,6 +767,10 @@ func validName(name string) error {
 }
 
 func (s *Store) Save(name, content string) error {
+	return s.save(name, content, nil, "")
+}
+
+func (s *Store) save(name, content string, source *ProvenanceSource, appendTo string) error {
 	if err := validName(name); err != nil {
 		return err
 	}
@@ -789,6 +817,9 @@ func (s *Store) Save(name, content string) error {
 	}
 
 	// Atomic replace so a crash cannot leave a half-written memory entry.
+	if err := s.prepareProvenance(name, content, source, appendTo); err != nil {
+		return err
+	}
 	err := fsatomic.WriteFile(filepath.Join(dir, name), []byte(content), 0644)
 	if err == nil {
 		s.invalidateCache()
@@ -821,6 +852,9 @@ func (s *Store) Delete(name string) error {
 			err := os.Remove(path)
 			if err == nil {
 				s.invalidateCache()
+				if cleanupErr := os.RemoveAll(filepath.Join(d, ".provenance", provenanceHash(pathKey(name)))); cleanupErr != nil {
+					return fmt.Errorf("memory removed but provenance cleanup failed: %w", cleanupErr)
+				}
 			}
 			return err
 		}
@@ -833,6 +867,7 @@ func (s *Store) Delete(name string) error {
 func (s *Store) invalidateCache() {
 	s.mu.Lock()
 	s.cachedAll = nil
+	s.searchIndex = nil
 	s.cacheTime = time.Time{}
 	s.promptDirty = true
 	s.promptCache = ""

@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -77,4 +79,78 @@ func TestToolPanicRecoveredOnDeferredCall(t *testing.T) {
 	}, w)
 	requirePanicResult(t, res, "w1")
 	requirePanicResult(t, res, "w2")
+}
+
+type cancelAfterCallTool struct {
+	mockTool
+	cancel context.CancelFunc
+}
+
+func (probe *cancelAfterCallTool) Call(context.Context, tool.Input, tool.Context) (tool.Result, error) {
+	probe.cancel()
+	return tool.Result{Data: "cancelled context"}, nil
+}
+
+func TestCancellationPreventsQueuedWrite(t *testing.T) {
+	for _, parallel := range []bool{false, true} {
+		name := "serial"
+		if parallel {
+			name = "parallel"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			t.Chdir(dir)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			probe := &cancelAfterCallTool{mockTool: mockTool{name: "cancel", readOnly: true, safe: parallel}, cancel: cancel}
+			eng := newTestEngine(&mockProvider{}, probe, tool.NewWriteTool())
+			path := filepath.Join(dir, "queued.txt")
+			results := eng.dispatchTools(ctx, []api.ToolCall{
+				{ID: "cancel", Name: "cancel", Input: map[string]any{}},
+				{ID: "write", Name: "write", Input: map[string]any{"filePath": path, "content": "must not be written"}},
+			})
+			if data, err := os.ReadFile(path); !os.IsNotExist(err) {
+				t.Fatalf("queued write reached disk after cancellation: data=%q err=%v", data, err)
+			}
+			if len(results) != 2 || results[1].ID != "write" || !results[1].Failed || results[1].Content != "Error: context canceled" {
+				t.Fatalf("cancelled call must retain its matching error result: %+v", results)
+			}
+		})
+	}
+}
+
+func TestCancelledBatchDoesNotExecuteTools(t *testing.T) {
+	for _, count := range []int{1, 3} {
+		probe := &mockTool{name: "look", readOnly: true, safe: true, result: "unexpected"}
+		eng := newTestEngine(&mockProvider{}, probe)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		calls := make([]api.ToolCall, count)
+		for index := range calls {
+			calls[index] = api.ToolCall{ID: "call", Name: "look", Input: map[string]any{}}
+		}
+		results := eng.dispatchTools(ctx, calls)
+		if probe.callCount != 0 {
+			t.Fatalf("cancelled batch executed %d calls", probe.callCount)
+		}
+		for _, result := range results {
+			if result.ID != "call" || !result.Failed || result.Content != "Error: context canceled" {
+				t.Fatalf("missing cancellation result: %+v", result)
+			}
+		}
+	}
+}
+
+func TestCancellationPreventsDeferredWrite(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	probe := &cancelAfterCallTool{mockTool: mockTool{name: "write", readOnly: true}, cancel: cancel}
+	eng := newTestEngine(&mockProvider{}, probe)
+	results := eng.dispatchTools(ctx, []api.ToolCall{
+		{ID: "first", Name: "write", Input: map[string]any{"filePath": "same.txt"}},
+		{ID: "deferred", Name: "write", Input: map[string]any{"filePath": "same.txt"}},
+	})
+	if len(results) != 2 || results[0].Failed || results[1].ID != "deferred" || !results[1].Failed || results[1].Content != "Error: context canceled" {
+		t.Fatalf("deferred write did not preserve cancellation result: %+v", results)
+	}
 }

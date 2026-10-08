@@ -91,3 +91,62 @@ func TestDiffNewMemoriesSkipsReappendedFact(t *testing.T) {
 		t.Fatalf("re-appended fact reported as new: %q", got)
 	}
 }
+
+type blockingMemoryEmbedder struct{ started chan struct{} }
+
+func (*blockingMemoryEmbedder) Dim() int { return 3 }
+
+func (provider *blockingMemoryEmbedder) Embed(ctx context.Context, _ []string) ([][]float32, error) {
+	close(provider.started)
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(2 * time.Second):
+		return nil, context.DeadlineExceeded
+	}
+}
+
+func TestMemoryRetrievalDoesNotHoldBackgroundLock(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	store := memory.NewStoreForDirs(dir)
+	for _, name := range []string{"first.md", "second.md"} {
+		if err := store.Save(name, "docker deployment "+strings.Repeat("notes ", 3000)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider := &blockingMemoryEmbedder{started: make(chan struct{})}
+	store.EnableRemoteEmbeddings(provider)
+	eng := &Engine{memStore: store, config: Config{Model: "test-model"}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	finished := make(chan string, 1)
+	go func() { finished <- eng.turnMemoryNoteContext(ctx, "docker deployment") }()
+	select {
+	case <-provider.started:
+	case <-time.After(time.Second):
+		t.Fatal("semantic retrieval did not start")
+	}
+	updated := make(chan struct{})
+	go func() {
+		eng.addNewMemories([]string{"new.md: learned while searching"})
+		close(updated)
+	}()
+	select {
+	case <-updated:
+	case <-time.After(time.Second):
+		t.Fatal("semantic retrieval held the background lock")
+	}
+	cancel()
+	select {
+	case note := <-finished:
+		if note != "" {
+			t.Fatalf("cancelled retrieval returned note %q", note)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("semantic retrieval ignored cancellation")
+	}
+	if note := eng.takeNewMemoriesNote(); !strings.Contains(note, "learned while searching") {
+		t.Fatalf("concurrent background update was lost: %q", note)
+	}
+}

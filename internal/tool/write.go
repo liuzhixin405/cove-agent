@@ -30,6 +30,9 @@ func NewWriteTool() Tool {
 }
 
 func (t *WriteTool) Call(ctx context.Context, input Input, tctx Context) (Result, error) {
+	if err := ctx.Err(); err != nil {
+		return Result{Data: "Error: " + err.Error(), IsError: true}, nil
+	}
 	path, _ := input["filePath"].(string)
 	content, _ := input["content"].(string)
 
@@ -88,6 +91,9 @@ func (t *WriteTool) Call(ctx context.Context, input Input, tctx Context) (Result
 		if out, err = legacy.encode(content); err != nil {
 			return legacy.encodeFailure(path, "content", err), nil
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return Result{Data: "Error: " + err.Error(), IsError: true}, nil
 	}
 	if err := replaceFile(path, out); err != nil {
 		return Result{Data: "Error: write: " + err.Error(), IsError: true}, nil

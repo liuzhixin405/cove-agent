@@ -1,5 +1,11 @@
 package command
 
+import (
+	"sync"
+
+	"github.com/liuzhixin405/cove-agent/internal/checkpoint"
+)
+
 type CommitCmd struct{}
 type ReviewCmd struct{}
 type DoctorCmd struct{}
@@ -7,7 +13,11 @@ type ConfigCmd struct{}
 type CompactCmd struct{}
 type CostCmd struct{}
 type DiffCmd struct{}
-type UndoCmd struct{}
+type UndoCmd struct {
+	mu           sync.Mutex
+	preview      *checkpoint.FileRestorePlan
+	previewScope string
+}
 type CheckpointsCmd struct{}
 type RateLimitCmd struct{}
 type MemoryCmd struct{}

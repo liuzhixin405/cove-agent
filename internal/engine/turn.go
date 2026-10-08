@@ -116,7 +116,7 @@ func sameRequest(interrupted, msg api.Message) bool {
 // to the fast tier, and a "plan it first with todowrite" note for any message of
 // 300+ bytes (about 100 Chinese characters). The fast tiers in use are capable
 // models, and the planning note turned ordinary requests into ceremony.
-func (e *Engine) turnContextNote(query string) string {
+func (e *Engine) turnContextNote(ctx context.Context, query string) string {
 	var parts []string
 	if e.projCtx != nil && e.projCtx.IsGitRepo {
 		branch, status := e.projCtx.GetGitInfo()
@@ -129,7 +129,7 @@ func (e *Engine) turnContextNote(query string) string {
 			parts = append(parts, "<environment>\n"+git+"\n</environment>")
 		}
 	}
-	if mem := e.turnMemoryNote(query); mem != "" {
+	if mem := e.turnMemoryNoteContext(ctx, query); mem != "" {
 		parts = append(parts, mem)
 	}
 	if plan := e.previousPlanNote(query); plan != "" {
@@ -636,6 +636,7 @@ var webTools = []string{"websearch", "webfetch", "browser"}
 
 // builtinAgents are the types the agent tool advertises.
 var builtinAgents = map[string]agentSpec{
+	"verify":  {readOnly: true, exclude: webTools, prompt: "You are an independent regression verifier, not the author of the fix. Inspect the request, production code and tests. Use regression_verify with a pre-fix checkpoint, changed production .go files, a project-relative package and a focused test regex. The tool must observe the same actual tests failing on the original implementation and passing on current code. Build errors, skips, absent tests and model assertions are not proof. Do not write files, weaken assertions or run arbitrary shell commands. If no valid baseline or meaningful regression test exists, report unverified. Cite concrete defects, the tested scope and tool evidence; do not claim the whole request is correct just because one regression passed."},
 	"general": {prompt: "You are a sub-agent. Complete the assigned task using the tools available, then report what you did and what you found. Be concise."},
 	"explore": {readOnly: true, prompt: "You are a read-only exploration sub-agent. Investigate the codebase or sources to answer the question. Do not modify anything. Report findings with file paths and line references."},
 	"plan":    {readOnly: true, prompt: "You are a read-only planning sub-agent. Study the relevant code and produce a concrete, ordered implementation plan. Do not modify anything."},
@@ -647,10 +648,11 @@ var builtinAgents = map[string]agentSpec{
 // plan executor's delegator, so agent sub-agents share its provider source,
 // tool pipeline and budget check.
 type agentRunner struct {
-	d      *delegate.Delegator
-	seq    atomic.Int64
-	mu     sync.Mutex
-	custom map[string]agentSpec
+	onUnverified func(string)
+	d            *delegate.Delegator
+	seq          atomic.Int64
+	mu           sync.Mutex
+	custom       map[string]agentSpec
 }
 
 func newAgentRunner(d *delegate.Delegator) *agentRunner {
@@ -678,7 +680,10 @@ func (r *agentRunner) spec(name string) agentSpec {
 func (r *agentRunner) Run(ctx context.Context, name, task string) (*api.AgentRunResult, error) {
 	s := r.spec(name)
 	id := fmt.Sprintf("agent-%s-%d", name, r.seq.Add(1))
-	res := r.d.DelegateWith(ctx, id, task, s.prompt, delegate.Options{ReadOnly: s.readOnly, Exclude: s.exclude})
+	res := r.d.DelegateWith(ctx, id, task, s.prompt, delegate.Options{ReadOnly: s.readOnly, Exclude: s.exclude, RequireRegression: strings.EqualFold(name, "verify")})
+	if strings.EqualFold(name, "verify") && !res.Success && r.onUnverified != nil {
+		r.onUnverified(res.Error)
+	}
 
 	price := cost.NewTracker(0)
 	price.AddDetailed(res.Model, res.InputTokens, res.OutputTokens, 0, 0)

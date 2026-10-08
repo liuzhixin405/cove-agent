@@ -104,7 +104,13 @@ func (ep endpoint) post(ctx context.Context, data []byte) (response, error) {
 		return response{}, &RetryableError{Msg: fmt.Sprintf("http: %v", err)}
 	}
 	defer func() { _ = resp.Body.Close() }()
-	raw, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return response{}, fmt.Errorf("read response body: %w", err)
+	}
+	if len(raw) > maxResponseBytes {
+		return response{}, fmt.Errorf("response body exceeds %d bytes", maxResponseBytes)
+	}
 	// 529 is Anthropic's "overloaded"; it falls under >= 500.
 	if resp.StatusCode >= 500 || resp.StatusCode == http.StatusTooManyRequests {
 		wait := RetryAfterFor(resp.StatusCode, resp.Header)
