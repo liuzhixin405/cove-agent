@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/automation"
@@ -81,7 +82,10 @@ func automationRunner(cfg *config.Config) (automation.Runner, error) {
 		disabled := false
 		isolated.DoneVerifyAuto, isolated.DoneVerifyTests = &disabled, &disabled
 		isolated.DoneSelfReview, isolated.DoneCheck = "off", "off"
-		data, err := json.Marshal(isolated)
+		// MarshalRaw keeps the API key: json.Marshal would write the masked
+		// "sk-r****7890" form, which the worker's Load clears, so every
+		// maintenance run failed authentication.
+		data, err := isolated.MarshalRaw()
 		if err == nil {
 			err = fsatomic.WriteFile(filepath.Join(dir, "config.json"), data, 0600)
 		}
@@ -143,6 +147,12 @@ func executeAutomationCommand(ctx context.Context, name string, in command.Input
 	}
 	store, err := automationStore(in.Cwd)
 	if err != nil {
+		return "", err
+	}
+	// Expired claims (a crashed worker) become uncertain on every command,
+	// as documented, not only when a run/tick/event happens to go through
+	// the executor: /inbox list and /automations remove see the real state.
+	if err := store.Recover(time.Now().UTC()); err != nil {
 		return "", err
 	}
 	state, err := store.Read()
@@ -230,7 +240,9 @@ func executeAutomationCommand(ctx context.Context, name string, in command.Input
 		}
 		message, marshalErr := automationJSON(data)
 		if err != nil {
-			return "", errors.Join(err, marshalErr, fmt.Errorf("persisted result: %s; inspect /inbox list", message))
+			// The result JSON carries patches and logs of up to 4 MiB each;
+			// name the result IDs, do not print the whole thing as an error.
+			return "", errors.Join(err, marshalErr, fmt.Errorf("persisted result %s; inspect /inbox show <result-id>", automationResultIDs(data)))
 		}
 		return message, marshalErr
 	default:
@@ -317,6 +329,24 @@ func executeInbox(store *automation.Store, state automation.Snapshot, args []str
 		}
 	}
 	return "", fmt.Errorf("unknown inbox result %q", args[1])
+}
+
+// automationResultIDs names the persisted results of a run/tick/event so an
+// error line can point at them without printing their patches and logs.
+func automationResultIDs(data any) string {
+	var ids []string
+	switch value := data.(type) {
+	case automation.Result:
+		ids = append(ids, value.ID)
+	case []automation.Result:
+		for _, result := range value {
+			ids = append(ids, result.ID)
+		}
+	}
+	if len(ids) == 0 {
+		return "(none)"
+	}
+	return strings.Join(ids, ", ")
 }
 
 func automationJSON(value any) (string, error) {

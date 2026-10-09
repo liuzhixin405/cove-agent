@@ -248,11 +248,19 @@ func (s *Store) Add(spec Spec, now time.Time) error {
 }
 
 func (s *Store) Remove(id string) error {
+	now := time.Now().UTC()
 	return s.update(func(state *Snapshot) error {
-		for _, result := range state.Results {
-			if result.TaskID == id && result.State == "running" {
+		for index := range state.Results {
+			result := &state.Results[index]
+			if result.TaskID != id || result.State != "running" {
+				continue
+			}
+			if now.Before(result.LeaseUntil) {
 				return errors.New("cannot remove a running automation")
 			}
+			// An expired claim (worker crashed) is uncertain, not running; it
+			// used to block removal until some run/tick command converted it.
+			result.State, result.Error = "uncertain", "worker lease expired; outcome unknown, not retried"
 		}
 		for index, spec := range state.Specs {
 			if spec.ID == id {

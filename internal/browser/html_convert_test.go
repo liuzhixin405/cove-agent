@@ -46,6 +46,21 @@ func TestHTMLToText(t *testing.T) {
 			in:   `<h2>中文标题</h2><p>价格 &gt; 100 元 &#20803;</p>`,
 			want: "中文标题\n价格 > 100 元 元",
 		},
+		{
+			name: "quoted greater-than stays inside an attribute",
+			in:   `<p title="a > b">visible</p>`,
+			want: "visible",
+		},
+		{
+			name: "comments with angle brackets are not content",
+			in:   `<p>one</p><!-- hidden > <b>secret</b> --><p>two</p>`,
+			want: "one\n\ntwo",
+		},
+		{
+			name: "unclosed script body is not content",
+			in:   `<p>visible</p><script>secret body <p>not text</p>`,
+			want: "visible",
+		},
 	}
 
 	for _, tt := range tests {
@@ -112,6 +127,36 @@ func TestHTMLToMarkdown(t *testing.T) {
 			name: "CJK heading, list and entities",
 			in:   `<h2>中文标题</h2><ul><li>第一项 &amp; 第二项</li></ul><p>价格 &gt; 100 元</p>`,
 			want: "## 中文标题\n\n- 第一项 & 第二项\n\n价格 > 100 元",
+		},
+		{
+			name: "quoted greater-than stays inside an attribute",
+			in:   `<h2 title="a > b">Heading</h2><p>visible</p>`,
+			want: "## Heading\n\nvisible",
+		},
+		{
+			name: "unquoted href and entities are supported",
+			in:   `<p><a href=/docs?a=1&amp;b=2>Docs</a></p>`,
+			want: "[Docs](/docs?a=1&b=2)",
+		},
+		{
+			name: "pre preserves indentation and repeated spaces",
+			in:   "<pre><code>func main() {\n\tfmt.Println(\"x  y\")\n}\n</code></pre>",
+			want: "```\nfunc main() {\n\tfmt.Println(\"x  y\")\n}\n```",
+		},
+		{
+			name: "pre preserves leading trailing and internal blank lines",
+			in:   "<pre>\n  first\n\n\n  last\n\n</pre>",
+			want: "```\n\n  first\n\n\n  last\n\n```",
+		},
+		{
+			name: "pre fence is longer than code backticks",
+			in:   "<pre>```\nexample\n```</pre>",
+			want: "````\n```\nexample\n```\n````",
+		},
+		{
+			name: "unclosed pre preserves code and decoded entities",
+			in:   "<pre><code>\tif x &lt; 2 {\n\t\treturn &amp;value\n",
+			want: "```\n\tif x < 2 {\n\t\treturn &value\n```",
 		},
 	}
 

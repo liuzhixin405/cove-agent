@@ -115,6 +115,31 @@ func TestAnthropicWireToolResultsBecomeOneUserTurn(t *testing.T) {
 	}
 }
 
+func TestAnthropicWireToolImagesFollowToolResults(t *testing.T) {
+	body := captureAnthropicBody(t, ChatRequest{Model: "deepseek-flash", Messages: []Message{
+		{Role: "user", Content: "inspect screenshots"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "read-1", Name: "read", Input: map[string]any{}}, {ID: "read-2", Name: "read", Input: map[string]any{}}}},
+		{Role: "tool", ToolCallID: "read-1", Content: "Image: first.png"},
+		{Role: "tool", ToolCallID: "read-2", Content: "Image: second.png"},
+		{Role: "user", Synthetic: true, Content: "Tool image results", Parts: []MessagePart{{Type: "image", MimeType: "image/png", Data: "Zmlyc3Q="}, {Type: "image", MimeType: "image/png", Data: "c2Vjb25k"}}},
+	}})
+	messages := wireMessages(t, body)
+	if len(messages) != 3 || messages[2]["role"] != "user" {
+		t.Fatalf("unexpected message roles: %+v", messages)
+	}
+	blocks := wireBlocks(messages[2])
+	if len(blocks) != 5 || blocks[0]["type"] != "tool_result" || blocks[0]["tool_use_id"] != "read-1" || blocks[1]["type"] != "tool_result" || blocks[1]["tool_use_id"] != "read-2" {
+		t.Fatalf("tool results not before images: %+v", blocks)
+	}
+	for index, expected := range []string{"Zmlyc3Q=", "c2Vjb25k"} {
+		block := blocks[index+3]
+		source, _ := block["source"].(map[string]any)
+		if block["type"] != "image" || source["type"] != "base64" || source["media_type"] != "image/png" || source["data"] != expected {
+			t.Fatalf("image %d changed: %+v", index, block)
+		}
+	}
+}
+
 // Empty text blocks are rejected by the API; a message with nothing to say
 // must not produce one.
 func TestAnthropicWireNeverSendsEmptyTextBlocks(t *testing.T) {

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
@@ -32,7 +33,21 @@ type SubAgent struct {
 	budgetExceeded    func() bool
 	contextTokens     int
 	progress          func(step string)
+	activity          func(Event)
 	fallback          string
+}
+
+type Event struct {
+	ID         string
+	TaskID     string
+	Task       string
+	Model      string
+	Stage      string
+	Tool       string
+	Summary    string
+	ExitReason string
+	Success    bool
+	At         time.Time
 }
 
 // Authorizer decides whether a sub-agent may run one tool call. It is the same
@@ -298,6 +313,12 @@ func (sa *SubAgent) Run(ctx context.Context, task string, systemPrompt string) *
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				res.Error = "timed out"
 			}
+			// What was done so far is still worth reporting, as when the
+			// step cap is reached: thirty tool calls must not vanish into
+			// "Sub-agent did not finish: timed out".
+			if len(steps) > 0 || lastText != "" {
+				res.Output, res.Truncated = partialOutput(steps, lastText), true
+			}
 			return res
 		default:
 		}
@@ -308,6 +329,9 @@ func (sa *SubAgent) Run(ctx context.Context, task string, systemPrompt string) *
 
 		if sa.contextTokens > 0 {
 			messages = trimHistory(messages, sa.contextTokens-token.Estimate(systemPrompt))
+		}
+		if sa.activity != nil {
+			sa.activity(Event{Stage: "model", Model: sa.model})
 		}
 		resp, err := sa.provider.Chat(ctx, api.ChatRequest{
 			Model:      sa.model,
@@ -339,6 +363,9 @@ func (sa *SubAgent) Run(ctx context.Context, task string, systemPrompt string) *
 			}
 			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 				res.Error = "timed out: " + res.Error
+			}
+			if ctx.Err() != nil && (len(steps) > 0 || lastText != "") {
+				res.Output, res.Truncated = partialOutput(steps, lastText), true
 			}
 			return res
 		}
@@ -376,7 +403,18 @@ func (sa *SubAgent) Run(ctx context.Context, task string, systemPrompt string) *
 			Role: "assistant", Content: resp.Content, ToolCalls: resp.ToolCalls, ThinkingBlocks: resp.ThinkingBlocks,
 		})
 		for _, tc := range resp.ToolCalls {
-			content := sa.runTool(ctx, tc)
+			if sa.activity != nil {
+				summary := tc.Name
+				if path, ok := tc.Input["path"].(string); ok {
+					summary += " " + textutil.ClipRunes(path, 120)
+				}
+				sa.activity(Event{Stage: "tool", Tool: tc.Name, Summary: summary})
+			}
+			toolCtx := ctx
+			if sa.activity != nil {
+				toolCtx = context.WithValue(ctx, activityContextKey{}, sa.activity)
+			}
+			content := sa.runTool(toolCtx, tc)
 			if sa.requireRegression && tc.Name == "regression_verify" {
 				var evidence RegressionEvidence
 				sa.regressionPassed = json.Unmarshal([]byte(content), &evidence) == nil && evidence.Status == "passed" && len(evidence.Tests) > 0 && evidence.Baseline != "" && evidence.Current != "" && evidence.Before.ExitCode == 1 && evidence.After.ExitCode == 0 && evidence.Before.Error == "" && evidence.After.Error == ""
@@ -475,6 +513,7 @@ type Delegator struct {
 	mu     sync.Mutex
 	tools  []tool.Tool
 	active map[string]context.CancelFunc
+	events func(Event)
 
 	// providerSource is consulted when each task starts, so a provider or
 	// model switch after construction reaches later sub-agents.
@@ -506,6 +545,8 @@ type Delegator struct {
 	fallbackFor func(model string) string
 }
 
+var delegationSequence atomic.Uint64
+
 // SetFallback installs the overload fallback (see fallbackFor). Call it
 // before the first Delegate; not guarded by mu.
 func (d *Delegator) SetFallback(f func(model string) string) { d.fallbackFor = f }
@@ -514,6 +555,8 @@ func (d *Delegator) SetFallback(f func(model string) string) { d.fallbackFor = f
 // first Delegate; not guarded by mu. It is called from the sub-agents'
 // goroutines, in parallel for a parallel plan.
 func (d *Delegator) SetProgress(f func(line string)) { d.progress = f }
+
+func (d *Delegator) SetEventSink(f func(Event)) { d.events = f }
 
 // SetContextSource installs the project context source (see contextSource).
 // Call it before the first Delegate; not guarded by mu.
@@ -582,6 +625,7 @@ func (d *Delegator) DelegateWith(ctx context.Context, taskID, task, systemPrompt
 
 	d.mu.Lock()
 	d.active[taskID] = cancel
+	runID := fmt.Sprintf("%s/%d", taskID, delegationSequence.Add(1))
 	d.mu.Unlock()
 
 	defer func() {
@@ -639,17 +683,38 @@ func (d *Delegator) DelegateWith(ctx context.Context, taskID, task, systemPrompt
 		ContextTokens:     contextTokens,
 		Fallback:          fallback,
 	})
-	if d.progress == nil {
-		return sa.Run(subCtx, task, systemPrompt)
+	sa.activity = func(event Event) {
+		if d.events == nil {
+			return
+		}
+		event.ID, event.TaskID, event.Task = runID, taskID, task
+		if event.Model == "" {
+			event.Model = sa.model
+		}
+		event.At = time.Now()
+		d.events(event)
 	}
-	sa.progress = func(step string) { d.progress("├ " + taskID + " · " + step) }
-	d.progress("▸ " + taskID + " 开始：" + textutil.ClipRunes(strings.Join(strings.Fields(task), " "), 80))
+	sa.activity(Event{Stage: "starting"})
+	if d.progress != nil {
+		sa.progress = func(step string) { d.progress("├ " + taskID + " · " + step) }
+		d.progress("▸ " + taskID + " 开始：" + textutil.ClipRunes(strings.Join(strings.Fields(task), " "), 80))
+	}
 	start := time.Now()
 	res := sa.Run(subCtx, task, systemPrompt)
+	stage := "finished"
+	if subCtx.Err() != nil {
+		stage = "cancelled"
+		if errors.Is(subCtx.Err(), context.DeadlineExceeded) {
+			stage = "timed_out"
+		}
+	}
+	sa.activity(Event{Stage: stage, Model: sa.model, Success: res.Success, ExitReason: res.ExitReason, Summary: res.ExitReason})
 	mark, how := "✓", "完成"
 	if !res.Success {
 		mark, how = "✗", "未完成："+textutil.ClipRunes(res.Error, 60)
 	}
-	d.progress(fmt.Sprintf("%s %s %s · %d 步 · %s", mark, taskID, how, res.Steps, time.Since(start).Round(time.Second)))
+	if d.progress != nil {
+		d.progress(fmt.Sprintf("%s %s %s · %d 步 · %s", mark, taskID, how, res.Steps, time.Since(start).Round(time.Second)))
+	}
 	return res
 }

@@ -80,9 +80,10 @@ func (t *EnterWorktreeTool) Call(ctx context.Context, input Input, tctx Context)
 		return Result{Data: fmt.Sprintf("Error creating worktree: %v\n%s", err, string(out)), IsError: true}, nil
 	}
 	if tctx.Runtime != nil {
+		tctx.Runtime.SetWorktreeMain(cwd)
 		tctx.Runtime.SetWorktreeDir(wtPath)
 	}
-	return Result{Data: fmt.Sprintf("Worktree created at %s\nGit output: %s", wtPath, string(out))}, nil
+	return Result{Data: fmt.Sprintf("Worktree created at %s and entered: until exit_worktree, read/edit/write/glob/grep and shell commands run inside it (the main tree is not reachable; checkpoints and /undo cover the main tree only).\nGit output: %s", wtPath, string(out))}, nil
 }
 func (t *EnterWorktreeTool) CheckPermissions(input Input, tctx Context) PermissionDecision {
 	return Asked("worktree creation requires confirmation")
@@ -104,8 +105,13 @@ func (t *ExitWorktreeTool) Call(ctx context.Context, input Input, tctx Context) 
 	if wtPath == "" {
 		return Result{Data: "No active worktree", IsError: true}, nil
 	}
-	cwd := tctx.Cwd
+	// Run git from the project the worktree was entered from: tctx.Cwd is
+	// the worktree itself now, and git will not remove the tree it runs in.
+	cwd := tctx.Runtime.GetWorktreeMain()
 	if cwd == "" {
+		cwd = tctx.Cwd
+	}
+	if cwd == "" || cwd == wtPath {
 		cwd, _ = os.Getwd()
 	}
 	cmd := exec.CommandContext(ctx, "git", "worktree", "remove", wtPath)
@@ -118,7 +124,8 @@ func (t *ExitWorktreeTool) Call(ctx context.Context, input Input, tctx Context) 
 		return Result{Data: fmt.Sprintf("Error removing worktree %s: %v\n%s", wtPath, err, string(out)), IsError: true}, nil
 	}
 	tctx.Runtime.SetWorktreeDir("")
-	return Result{Data: fmt.Sprintf("Worktree removed.\n%s", string(out))}, nil
+	tctx.Runtime.SetWorktreeMain("")
+	return Result{Data: fmt.Sprintf("Worktree removed; tools run in the project directory again.\n%s", string(out))}, nil
 }
 
 // validWorktreeBranch rejects branch names that git would parse as an option

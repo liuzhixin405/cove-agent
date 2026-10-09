@@ -100,6 +100,11 @@ func Capture(ctx context.Context, dir string) (Baseline, error) {
 	}
 	branch, err := Git(ctx, abs, nil, "symbolic-ref", "--quiet", "HEAD")
 	if err != nil {
+		if ctx.Err() != nil {
+			// A cancelled or timed-out git call is not a detached HEAD; keep
+			// the context error so callers (and the timeout report) see it.
+			return Baseline{}, err
+		}
 		return Baseline{}, errors.New("race requires a target branch, not detached HEAD")
 	}
 	return Baseline{abs, strings.TrimSpace(string(commit)), strings.TrimSpace(string(branch))}, nil
@@ -139,6 +144,14 @@ func safePath(path string) bool {
 }
 
 func Patch(ctx context.Context, dir, commit string) ([]byte, error) {
+	// Build caches and test artefacts (__pycache__, node_modules, bin/) are
+	// ignored files the generation or the verifier leaves behind in the fresh
+	// worktree; they can never be part of the patch, so remove them before the
+	// capture instead of failing every Python/Node/.NET candidate. Nested Git
+	// repositories survive `clean` without -ff and are still reported below.
+	if _, err := Git(ctx, dir, nil, "clean", "-fdX", "-q", "--", "."); err != nil {
+		return nil, err
+	}
 	ignored, err := Git(ctx, dir, nil, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
 	if err != nil {
 		return nil, err
@@ -186,6 +199,15 @@ func (b Baseline) Apply(ctx context.Context, patch []byte, hash string) error {
 	if err := b.Check(ctx); err != nil {
 		return err
 	}
-	_, err := Git(ctx, b.Root, patch, "apply", "--whitespace=nowarn", "-")
-	return err
+	// The final apply must not be killed half-way by a Ctrl+C or shutdown
+	// cancellation: git apply is atomic against hunk failures but not against
+	// being killed, and a partially applied patch leaves the project dirty with
+	// nothing to roll back to. Detach from the cancellable context and keep an
+	// independent bound instead.
+	applyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 60*time.Second)
+	defer cancel()
+	if _, err := Git(applyCtx, b.Root, patch, "apply", "--whitespace=nowarn", "-"); err != nil {
+		return fmt.Errorf("%w; inspect `git status` before retrying", err)
+	}
+	return nil
 }

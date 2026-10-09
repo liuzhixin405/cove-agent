@@ -13,7 +13,13 @@ import (
 )
 
 func showConfig() {
-	cfg, _ := config.Load()
+	// The same profile the session runs with (--profile x, else
+	// active_profile): config.Load() showed the base file's model and
+	// provider, which is not what `cove --profile work --config` asked.
+	cfg, err := config.LoadWithProfile(profileName)
+	if err != nil || cfg == nil {
+		cfg, _ = config.Load()
+	}
 	pc := cfg.EffectiveProvider()
 	data, _ := json.MarshalIndent(map[string]any{
 		"version":         Version,
@@ -104,6 +110,9 @@ func printHelp(cmdReg *command.Registry, toolReg *tool.Registry, pluginMgr *plug
 	outln("\n" + providerEnvHelpLine())
 	outln("启动参数: -p <提示> [--image <路径>] [--file <路径>] | -r <会话ID> | --profile <name> | --record <dir> | --replay <dir> | --no-tui | -d --debug | -v --version | --doctor | --config（完整列表: cove --help）")
 	outln("附件输入: 在 REPL 或 -p 文本中可写 @路径，例如：解释这张图 @assets/screen.png")
+	outln("图片输入: 支持括号粘贴的终端可拖入图片；Windows 用 Alt+V 粘贴截图；空输入框 Alt+Backspace 移除最后一个附件。")
+	outln("命令选择: 输入 / 筛选，上下键选择，Enter 填入；/history 支持搜索和预览。")
+	outln("Agent Map: Alt+M 展开/收起，空输入 Tab 或 Shift+Tab 切换焦点，上下键查看，Esc 返回；/agents 查看快照。")
 	outln()
 }
 

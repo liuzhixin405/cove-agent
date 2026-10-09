@@ -1,7 +1,9 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/liuzhixin405/cove-agent/internal/fsatomic"
 	"github.com/liuzhixin405/cove-agent/internal/log"
 )
 
@@ -192,6 +195,13 @@ func (m *Marketplace) saveIndex() error {
 
 // Refresh fetches the latest index from all enabled sources.
 func (m *Marketplace) Refresh() error {
+	return m.RefreshContext(context.Background())
+}
+
+func (m *Marketplace) RefreshContext(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -199,17 +209,25 @@ func (m *Marketplace) Refresh() error {
 	var errs []string
 
 	for _, src := range m.sources {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !src.Enabled {
 			continue
 		}
-		entries, err := m.fetchSource(src)
+		entries, err := m.fetchSourceContext(ctx, src)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: %v", src.Name, err))
-			continue
+			if !errors.Is(err, ErrMarketplaceStale) {
+				continue
+			}
 		}
 		allEntries = append(allEntries, entries...)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.index = allEntries
 	if err := m.saveIndex(); err != nil {
 		errs = append(errs, fmt.Sprintf("cache index: %v", err))
@@ -222,9 +240,13 @@ func (m *Marketplace) Refresh() error {
 }
 
 func (m *Marketplace) fetchSource(src MarketplaceSource) ([]MarketplaceEntry, error) {
+	return m.fetchSourceContext(context.Background(), src)
+}
+
+func (m *Marketplace) fetchSourceContext(ctx context.Context, src MarketplaceSource) ([]MarketplaceEntry, error) {
 	switch src.Type {
 	case "git":
-		return m.fetchGitSource(src)
+		return m.fetchGitSourceContext(ctx, src)
 	case "file":
 		return m.fetchFileSource(src.URL)
 	case "directory":
@@ -248,7 +270,21 @@ type claudePluginJSON struct {
 }
 
 func (m *Marketplace) fetchGitSource(src MarketplaceSource) ([]MarketplaceEntry, error) {
+	return m.fetchGitSourceContext(context.Background(), src)
+}
+
+func (m *Marketplace) fetchGitSourceContext(ctx context.Context, src MarketplaceSource) ([]MarketplaceEntry, error) {
 	repoDir := filepath.Join(m.cacheDir, sanitizeName(src.Name))
+	// stale is set when the cached clone could not be updated; the entries
+	// read from it are still returned, with this error, so /plugin refresh
+	// says the index is old instead of "已更新".
+	var stale error
+	withStale := func(entries []MarketplaceEntry, err error) ([]MarketplaceEntry, error) {
+		if err != nil {
+			return entries, err
+		}
+		return entries, stale
+	}
 
 	// git's output is CAPTURED, never inherited.
 	//
@@ -259,9 +295,12 @@ func (m *Marketplace) fetchGitSource(src MarketplaceSource) ([]MarketplaceEntry,
 	// front end decides what to do with it.
 	if _, err := os.Stat(filepath.Join(repoDir, ".git")); err == nil {
 		// Pull latest
-		cmd := gitCommand("-C", repoDir, "pull", "--ff-only")
-		if out, err := cmd.CombinedOutput(); err != nil {
+		if out, err := runGitCommand(ctx, "-C", repoDir, "pull", "--ff-only"); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			log.Debugf("marketplace pull %s: %v: %s", src.Name, err, strings.TrimSpace(string(out)))
+			stale = fmt.Errorf("%w (%v)", ErrMarketplaceStale, err)
 		}
 	} else {
 		// Clone
@@ -269,7 +308,7 @@ func (m *Marketplace) fetchGitSource(src MarketplaceSource) ([]MarketplaceEntry,
 		log.Infof("正在克隆 marketplace 源: %s ...", src.Name)
 		// --progress is dropped along with the inherited terminal: it only
 		// draws a meter for a tty, and there is no tty to draw it on now.
-		if err := cloneRepo(src.URL, repoDir); err != nil {
+		if err := cloneRepoContext(ctx, src.URL, repoDir); err != nil {
 			return nil, fmt.Errorf("%s: %w", src.URL, err)
 		}
 	}
@@ -281,13 +320,18 @@ func (m *Marketplace) fetchGitSource(src MarketplaceSource) ([]MarketplaceEntry,
 		for i := range entries {
 			entries[i].Marketplace = src.Name
 		}
-		return entries, err
+		return withStale(entries, err)
 	}
 
 	// Fall back to Claude plugins official format:
 	// scan plugins/*/.claude-plugin/plugin.json and external_plugins/*/.claude-plugin/plugin.json
-	return m.fetchClaudePluginsRepo(repoDir, src)
+	return withStale(m.fetchClaudePluginsRepo(repoDir, src))
 }
+
+// ErrMarketplaceStale: the source's clone could not be updated (offline, or
+// the upstream was force-pushed so --ff-only refuses); the index was built
+// from the cached copy.
+var ErrMarketplaceStale = errors.New("marketplace index not updated, using cached copy")
 
 // fetchClaudePluginsRepo scans a repo with anthropics/claude-plugins-official layout.
 func (m *Marketplace) fetchClaudePluginsRepo(repoDir string, src MarketplaceSource) ([]MarketplaceEntry, error) {
@@ -466,13 +510,24 @@ func (m *Marketplace) List() []MarketplaceEntry {
 
 // InstallFromMarketplace installs a plugin by name from the registry.
 func (m *Marketplace) InstallFromMarketplace(name string) error {
-	_, err := m.installFromMarketplace(name)
+	return m.InstallFromMarketplaceContext(context.Background(), name)
+}
+
+func (m *Marketplace) InstallFromMarketplaceContext(ctx context.Context, name string) error {
+	_, err := m.installFromMarketplaceContext(ctx, name)
 	return err
 }
 
 // installFromMarketplace installs the index entry matching name (ignoring
 // case) and returns the entry's name, which is the directory it went into.
 func (m *Marketplace) installFromMarketplace(name string) (string, error) {
+	return m.installFromMarketplaceContext(context.Background(), name)
+}
+
+func (m *Marketplace) installFromMarketplaceContext(ctx context.Context, name string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -489,11 +544,15 @@ func (m *Marketplace) installFromMarketplace(name string) (string, error) {
 	}
 
 	e := *entry
-	return e.Name, m.installFromSource(e.Name, e.Source, e.Version, &e)
+	return e.Name, m.installFromSourceContext(ctx, e.Name, e.Source, e.Version, &e)
 }
 
 // InstallFromGit installs a plugin directly from a git URL.
 func (m *Marketplace) InstallFromGit(url string) error {
+	return m.InstallFromGitContext(context.Background(), url)
+}
+
+func (m *Marketplace) InstallFromGitContext(ctx context.Context, url string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -505,12 +564,19 @@ func (m *Marketplace) InstallFromGit(url string) error {
 
 	// No index entry: the URL the user gave is cloned, never a cached plugin
 	// that merely has the same name.
-	return m.installFromSource(name, url, "", nil)
+	return m.installFromSourceContext(ctx, name, url, "", nil)
 }
 
 // installFromSource installs name from source. entry is the index entry being
 // installed, if any; only its own marketplace's cache is used for a copy.
 func (m *Marketplace) installFromSource(name, source, version string, entry *MarketplaceEntry) error {
+	return m.installFromSourceContext(context.Background(), name, source, version, entry)
+}
+
+func (m *Marketplace) installFromSourceContext(ctx context.Context, name, source, version string, entry *MarketplaceEntry) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	// name reaches here from the marketplace index, which is built by reading
 	// manifest "name" fields out of a CLONED REMOTE REPOSITORY. It is joined
 	// into a path that is then git-cloned into and RemoveAll'd on failure, so
@@ -533,6 +599,10 @@ func (m *Marketplace) installFromSource(name, source, version string, entry *Mar
 		if err := copyDir(cachedDir, pluginDir); err != nil {
 			_ = os.RemoveAll(pluginDir)
 			return fmt.Errorf("copy from cache: %w", err)
+		}
+		if err := ctx.Err(); err != nil {
+			_ = os.RemoveAll(pluginDir)
+			return err
 		}
 		// Generate manifest.json from .claude-plugin/plugin.json if needed
 		m.ensureManifest(pluginDir)
@@ -559,7 +629,7 @@ func (m *Marketplace) installFromSource(name, source, version string, entry *Mar
 
 	// Clone the plugin repo
 	if isGitURL(source) {
-		if err := cloneRepo(source, pluginDir); err != nil {
+		if err := cloneRepoContext(ctx, source, pluginDir); err != nil {
 			_ = os.RemoveAll(pluginDir) // cleanup on failure
 			return err
 		}
@@ -582,7 +652,11 @@ func (m *Marketplace) installFromSource(name, source, version string, entry *Mar
 	}
 
 	// Get commit SHA for version lock
-	sha := getGitSHA(pluginDir)
+	sha := getGitSHAContext(ctx, pluginDir)
+	if err := ctx.Err(); err != nil {
+		_ = os.RemoveAll(pluginDir)
+		return err
+	}
 	if version == "" {
 		version = readManifestVersion(pluginDir)
 	}
@@ -605,6 +679,13 @@ func (m *Marketplace) installFromSource(name, source, version string, entry *Mar
 
 // Update updates a single plugin to latest.
 func (m *Marketplace) Update(name string) error {
+	return m.UpdateContext(context.Background(), name)
+}
+
+func (m *Marketplace) UpdateContext(ctx context.Context, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -624,13 +705,15 @@ func (m *Marketplace) Update(name string) error {
 	}
 
 	// Pull latest
-	cmd := gitCommand("-C", pluginDir, "pull", "--ff-only", "--quiet")
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if out, err := runGitCommand(ctx, "-C", pluginDir, "pull", "--ff-only", "--quiet"); err != nil {
 		return fmt.Errorf("git pull failed: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 
 	// Update lock
-	lock.CommitSHA = getGitSHA(pluginDir)
+	lock.CommitSHA = getGitSHAContext(ctx, pluginDir)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	lock.Version = readManifestVersion(pluginDir)
 	lock.UpdatedAt = time.Now().Format(time.RFC3339)
 	m.lockfile.Plugins[name] = lock
@@ -642,10 +725,18 @@ func (m *Marketplace) Update(name string) error {
 
 // UpdateAll updates all plugins with auto_update=true.
 func (m *Marketplace) UpdateAll() (updated []string, errs []string) {
+	return m.UpdateAllContext(context.Background())
+}
+
+func (m *Marketplace) UpdateAllContext(ctx context.Context) (updated []string, errs []string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	for name, lock := range m.lockfile.Plugins {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err.Error())
+			break
+		}
 		if !lock.AutoUpdate {
 			continue
 		}
@@ -664,13 +755,16 @@ func (m *Marketplace) UpdateAll() (updated []string, errs []string) {
 			continue
 		}
 
-		cmd := gitCommand("-C", pluginDir, "pull", "--ff-only", "--quiet")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %s", name, strings.TrimSpace(string(out))))
+		if out, err := runGitCommand(ctx, "-C", pluginDir, "pull", "--ff-only", "--quiet"); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v: %s", name, err, strings.TrimSpace(string(out))))
 			continue
 		}
 
-		newSHA := getGitSHA(pluginDir)
+		newSHA := getGitSHAContext(ctx, pluginDir)
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, err.Error())
+			break
+		}
 		if newSHA != lock.CommitSHA {
 			lock.CommitSHA = newSHA
 			lock.Version = readManifestVersion(pluginDir)
@@ -713,22 +807,31 @@ func (m *Marketplace) saveLockfile() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(m.lockfilePath(), data, 0644)
+	return fsatomic.WriteFile(m.lockfilePath(), data, 0644)
 }
 
 // recordInstall adds a lock entry for a plugin cloned into dir outside the
 // marketplace (from a URL the user gave), so update can find it.
-func (m *Marketplace) recordInstall(name, source, dir string) error {
+func (m *Marketplace) recordInstall(name, source, dir, commitSHA string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	previous, existed := m.lockfile.Plugins[name]
 	m.lockfile.Plugins[name] = LockEntry{
 		Source:      source,
 		Version:     readManifestVersion(dir),
-		CommitSHA:   getGitSHA(dir),
+		CommitSHA:   commitSHA,
 		InstalledAt: time.Now().Format(time.RFC3339),
 		AutoUpdate:  true,
 	}
-	return m.saveLockfile()
+	if err := m.saveLockfile(); err != nil {
+		if existed {
+			m.lockfile.Plugins[name] = previous
+		} else {
+			delete(m.lockfile.Plugins, name)
+		}
+		return err
+	}
+	return nil
 }
 
 // forget drops a plugin's lock entry after it has been uninstalled.
@@ -795,8 +898,11 @@ func isValidSource(source string) bool {
 }
 
 func getGitSHA(dir string) string {
-	cmd := gitCommand("-C", dir, "rev-parse", "HEAD")
-	out, err := cmd.Output()
+	return getGitSHAContext(context.Background(), dir)
+}
+
+func getGitSHAContext(ctx context.Context, dir string) string {
+	out, err := runGitCommand(ctx, "-C", dir, "rev-parse", "HEAD")
 	if err != nil {
 		return ""
 	}

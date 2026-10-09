@@ -176,7 +176,14 @@ func (c *PluginCmd) Execute(ctx context.Context, in Input) (Output, error) {
 				MarketplaceInstall(name string) error
 			}
 			if mi, ok := in.PluginManager.(marketInstaller); ok {
-				err := mi.MarketplaceInstall(name)
+				var err error
+				if contextual, ok := in.PluginManager.(interface {
+					MarketplaceInstallContext(context.Context, string) error
+				}); ok {
+					err = contextual.MarketplaceInstallContext(ctx, name)
+				} else {
+					err = mi.MarketplaceInstall(name)
+				}
 				if err == nil {
 					return Output{Message: fmt.Sprintf("✓ 已从 marketplace 安装: %s", name)}, nil
 				}
@@ -186,7 +193,15 @@ func (c *PluginCmd) Execute(ctx context.Context, in Input) (Output, error) {
 			}
 		}
 
-		if err := in.PluginManager.Install(name, url); err != nil {
+		var err error
+		if contextual, ok := in.PluginManager.(interface {
+			InstallContext(context.Context, string, string) error
+		}); ok {
+			err = contextual.InstallContext(ctx, name, url)
+		} else {
+			err = in.PluginManager.Install(name, url)
+		}
+		if err != nil {
 			return Output{}, err
 		}
 		return Output{Message: fmt.Sprintf("已安装插件: %s", name)}, nil
@@ -231,7 +246,15 @@ func (c *PluginCmd) Execute(ctx context.Context, in Input) (Output, error) {
 			MarketplaceRefresh() error
 		}
 		if mr, ok := in.PluginManager.(marketRefresher); ok {
-			if err := mr.MarketplaceRefresh(); err != nil {
+			var err error
+			if contextual, ok := in.PluginManager.(interface {
+				MarketplaceRefreshContext(context.Context) error
+			}); ok {
+				err = contextual.MarketplaceRefreshContext(ctx)
+			} else {
+				err = mr.MarketplaceRefresh()
+			}
+			if err != nil {
 				return Output{Message: fmt.Sprintf("刷新marketplace索引时部分失败: %v", err)}, nil
 			}
 			return Output{Message: "✓ marketplace 索引已更新"}, nil
@@ -246,7 +269,15 @@ func (c *PluginCmd) Execute(ctx context.Context, in Input) (Output, error) {
 			MarketplaceUpdate(name string) (string, error)
 		}
 		if mu, ok := in.PluginManager.(marketUpdater); ok {
-			msg, err := mu.MarketplaceUpdate(name)
+			var msg string
+			var err error
+			if contextual, ok := in.PluginManager.(interface {
+				MarketplaceUpdateContext(context.Context, string) (string, error)
+			}); ok {
+				msg, err = contextual.MarketplaceUpdateContext(ctx, name)
+			} else {
+				msg, err = mu.MarketplaceUpdate(name)
+			}
 			if err != nil {
 				return Output{}, err
 			}

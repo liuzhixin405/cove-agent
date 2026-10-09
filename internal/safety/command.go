@@ -60,6 +60,9 @@ func catastrophicCommand(command string, depth int) (string, bool) {
 	// such as C:\proj\build is still judged by its literal spelling as well.
 	// Braces are read the bash way in the second pass as well ("{/etc,/usr}"
 	// is one word there, brace-expanded below; the literal reading splits it).
+	if psIexOfPipelineInput.MatchString(command) && fetches(command) {
+		return "downloaded content run by iex in a script block", true
+	}
 	for _, pipeline := range readings(command) {
 		if why, ok := catastrophicPipeline(pipeline); ok {
 			return why, true
@@ -83,6 +86,16 @@ func catastrophicCommand(command string, depth int) (string, bool) {
 			if inner, ok := evalText(c.words); ok {
 				if why, ok := catastrophicCommand(inner, depth+1); ok {
 					return why, true
+				}
+			}
+			// git -c alias.x='!rm -rf ~' x: the alias body runs through the
+			// shell. Deny rules read it (NestedCommands); the hard block did
+			// not.
+			if name, args := commandWords(c.words); name == "git" {
+				for _, alias := range GitShellAliases(args) {
+					if why, ok := catastrophicCommand(alias, depth+1); ok {
+						return why, true
+					}
 				}
 			}
 			// The command xargs or find -exec starts, with its arguments
@@ -203,6 +216,59 @@ func unwrapShell(words []string) (inner string, encoded, ok bool) {
 				return strings.Join(args[i+1:], " "), false, true
 			}
 		}
+	case "su", "runuser", "script":
+		// su -c 'rm -rf /', runuser -u x -c '...', script -c '...'
+		for i := 0; i < len(args); i++ {
+			a := args[i]
+			switch {
+			case a == "-c" || a == "--command":
+				if i+1 < len(args) {
+					return args[i+1], false, true
+				}
+			case strings.HasPrefix(a, "--command="):
+				return strings.TrimPrefix(a, "--command="), false, true
+			}
+		}
+	case "start-process", "saps":
+		// Start-Process rm -ArgumentList '-rf','/': the program and its
+		// argument list, as one command line.
+		program, argList := "", []string{}
+		for i := 0; i < len(args); i++ {
+			la := strings.ToLower(args[i])
+			switch {
+			case la == "-filepath" && i+1 < len(args):
+				program = args[i+1]
+				i++
+			case (la == "-argumentlist" || la == "-args") && i+1 < len(args):
+				argList = append(argList, strings.Split(args[i+1], ",")...)
+				i++
+			case strings.HasPrefix(la, "-"):
+			case program == "":
+				program = args[i]
+			default:
+				argList = append(argList, strings.Split(args[i], ",")...)
+			}
+		}
+		if program != "" {
+			for j := range argList {
+				argList[j] = strings.Trim(strings.TrimSpace(argList[j]), "'\"")
+			}
+			return strings.Join(append([]string{program}, argList...), " "), false, true
+		}
+	case "start":
+		// cmd's start [/b] [/wait] [/d dir] ["title"] command ...
+		for i := 0; i < len(args); i++ {
+			la := strings.ToLower(args[i])
+			switch {
+			case la == "/d" && i+1 < len(args):
+				i++
+			case strings.HasPrefix(la, "/"):
+			case i == 0 && strings.HasPrefix(args[i], "\"") && strings.HasSuffix(args[i], "\""):
+				// a quoted window title
+			default:
+				return strings.Join(args[i:], " "), false, true
+			}
+		}
 	case "pwsh", "powershell":
 		for i := 0; i < len(args); i++ {
 			la := strings.ToLower(args[i])
@@ -309,6 +375,19 @@ func catastrophicStarted(words []string, depth int) (string, bool) {
 		started = append(started, xargsCommand(args))
 	case "find":
 		started = findExecCommands(args)
+	case "go":
+		// go test/run -exec 'cmd' runs cmd around the binary, -toolexec
+		// around every tool; cmd/go splits the value on blanks.
+		for i := 0; i < len(args); i++ {
+			a := args[i]
+			switch {
+			case (a == "-exec" || a == "-toolexec" || a == "--exec" || a == "--toolexec") && i+1 < len(args):
+				started = append(started, strings.Fields(args[i+1]))
+				i++
+			case strings.HasPrefix(a, "-exec=") || strings.HasPrefix(a, "-toolexec=") || strings.HasPrefix(a, "--exec=") || strings.HasPrefix(a, "--toolexec="):
+				started = append(started, strings.Fields(a[strings.IndexByte(a, '=')+1:]))
+			}
+		}
 	}
 	for _, w := range started {
 		if len(w) == 0 {
@@ -830,6 +909,22 @@ var runnerArgOptions = map[string]map[string]bool{
 	"nohup":   {},
 	"command": {},
 	"busybox": {},
+	// More programs that only run what follows them: the hard block and
+	// deny rules saw none of "setsid rm -rf /", "stdbuf -o0 rm -rf /",
+	// "ionice -c3 rm -rf /", "strace rm -rf /", "wsl rm -rf /".
+	"setsid":      {},
+	"stdbuf":      {"-i": true, "-o": true, "-e": true},
+	"ionice":      {"-c": true, "-n": true, "-p": true},
+	"strace":      {"-o": true, "-e": true, "-p": true, "-s": true, "-E": true},
+	"ltrace":      {"-o": true, "-e": true, "-p": true},
+	"systemd-run": {"-p": true, "-u": true, "--unit": true, "--property": true},
+	"unshare":     {},
+	"nsenter":     {"-t": true},
+	"fakeroot":    {},
+	"caffeinate":  {"-t": true},
+	"flock":       {"-w": true, "-E": true},
+	"wsl":         {"-d": true, "-u": true, "--distribution": true, "--user": true, "--cd": true},
+	"parallel":    {"-j": true},
 }
 
 // StripCommandRunners drops what runs in front of the real command — sudo,
@@ -843,18 +938,47 @@ func StripCommandRunners(words []string) []string {
 		name := ProgramName(w)
 		if argOpts, ok := runnerArgOptions[name]; ok {
 			words = words[1:]
+			split := false
 			for len(words) > 0 && strings.HasPrefix(words[0], "-") && words[0] != "-" {
 				opt := words[0]
 				words = words[1:]
 				if opt == "--" {
 					break
 				}
+				// env -S 'rm -rf /' (--split-string): the value IS the
+				// command line, split on blanks; it used to be dropped as an
+				// option value, so the hard block and deny rules saw an
+				// empty command.
+				if name == "env" {
+					value, ok := "", false
+					switch {
+					case opt == "-S" || opt == "--split-string":
+						if len(words) > 0 {
+							value, ok, words = words[0], true, words[1:]
+						}
+					case strings.HasPrefix(opt, "--split-string="):
+						value, ok = strings.TrimPrefix(opt, "--split-string="), true
+					case strings.HasPrefix(opt, "-S") && len(opt) > 2:
+						value, ok = opt[2:], true
+					}
+					if ok {
+						words = append(strings.Fields(value), words...)
+						split = true
+						break
+					}
+				}
 				if argOpts[opt] && len(words) > 0 {
 					words = words[1:]
 				}
 			}
+			if split {
+				continue // the split words may start with VAR=value or another runner
+			}
 			if name == "timeout" && len(words) > 0 {
 				words = words[1:] // the duration
+			}
+			if name == "flock" && len(words) > 0 && !strings.HasPrefix(words[0], "-") {
+				words = words[1:] // the lock file (or descriptor)
 			}
 			continue
 		}
@@ -886,8 +1010,30 @@ var (
 		"~": true, "$home": true, "${home}": true, "%userprofile%": true,
 		"$env:userprofile": true, "%systemroot%": true, "$env:systemroot": true,
 		"%windir%": true, "$env:windir": true,
+		// The other deterministic spellings of the home directory, the
+		// system drive and the system directories (cmd, PowerShell and the
+		// Windows variables Git Bash exposes). "${env:X}" is normalized to
+		// "$env:x" before the lookup.
+		"$userprofile": true, "${userprofile}": true,
+		"%systemdrive%": true, "$env:systemdrive": true, "$systemdrive": true, "${systemdrive}": true,
+		"%homedrive%": true, "$env:homedrive": true, "$homedrive": true,
+		"%homedrive%%homepath%": true, "$env:homedrive$env:homepath": true, "$homedrive$homepath": true,
+		"%programfiles%": true, "%programfiles(x86)%": true, "%programw6432%": true,
+		"$env:programfiles": true, "$env:programfiles(x86)": true, "$env:programw6432": true,
+		"$programfiles": true, "$programdata": true,
+		"%programdata%": true, "$env:programdata": true, "%allusersprofile%": true, "$env:allusersprofile": true,
+		"%appdata%": true, "$env:appdata": true, "$appdata": true,
+		"%localappdata%": true, "$env:localappdata": true, "$localappdata": true,
+		"%public%": true, "$env:public": true,
+		"/home/$user": true, "/home/${user}": true, "/home/$logname": true, "/home/$username": true,
+		"/users/$user": true, "/users/${user}": true,
 	}
 )
+
+// dotGlobSuffixes name a directory's dot entries: "~/.*", "~/.[!.]*" and
+// "~/.??*" (after the trailing "*" is trimmed) delete .ssh, .gnupg, .aws and
+// everything else in the home directory; rm skips only "." and "..".
+var dotGlobSuffixes = []string{"/.[!.]", "/.??", "/.", `\.[!.]`, `\.??`, `\.`}
 
 // criticalPath reports whether deleting (or chmod-ing) target recursively
 // would destroy the system or the user's home rather than a project directory.
@@ -908,6 +1054,27 @@ func criticalPath(target string) bool {
 	// "/**", "/*/", "/etc/**", "~/**". Only one "*" and then the slashes used
 	// to be stripped, so those were judged as some other path.
 	base := strings.TrimRight(t, `*/\`)
+	for changed := true; changed; {
+		changed = false
+		for _, suffix := range dotGlobSuffixes {
+			if strings.HasSuffix(base, suffix) && len(base) > len(suffix) {
+				base = strings.TrimRight(base[:len(base)-len(suffix)], `*/\`)
+				changed = true
+			}
+		}
+		// "~/.." is the parent of the home directory (/home): deleting it
+		// takes the home with it.
+		for _, suffix := range []string{"/..", `\..`} {
+			if strings.HasSuffix(base, suffix) && len(base) > len(suffix) {
+				base = strings.TrimRight(base[:len(base)-len(suffix)], `*/\`)
+				changed = true
+			}
+		}
+	}
+	base = strings.ReplaceAll(base, "${env:", "$env:")
+	if strings.HasPrefix(base, "$env:") && strings.HasSuffix(base, "}") && !strings.Contains(base, "{") {
+		base = strings.TrimSuffix(base, "}")
+	}
 	if base == "" {
 		// "/", "/**", `\` are the root; "", "*", "**", "*/" the working
 		// directory (destructive, but project-scoped: a warning).
@@ -1023,8 +1190,19 @@ func catastrophicSimple(c simpleCmd) (string, bool) {
 		if n := len(operands); n >= 2 && rawDisk(operands[n-1]) {
 			return name + " onto raw disk " + operands[n-1], true
 		}
-	case "shutdown", "reboot", "halt", "poweroff", "stop-computer", "restart-computer":
+	case "shutdown", "reboot", "halt", "poweroff", "stop-computer", "restart-computer", "telinit":
 		return name + " takes the machine down", true
+	case "init":
+		if len(args) > 0 && (args[0] == "0" || args[0] == "6") {
+			return name + " " + args[0] + " takes the machine down", true
+		}
+	case "systemctl":
+		for _, a := range args {
+			switch strings.ToLower(a) {
+			case "poweroff", "reboot", "halt", "kexec", "suspend", "hibernate":
+				return name + " " + a + " takes the machine down", true
+			}
+		}
 	case "find":
 		return catastrophicFind(args)
 	}
@@ -1060,10 +1238,15 @@ var (
 
 func rawDisk(path string) bool {
 	p := strings.ToLower(path)
-	for _, prefix := range []string{"/dev/sd", "/dev/hd", "/dev/nvme", "/dev/vd", "/dev/xvd", "/dev/disk", "/dev/mmcblk", `\\.\physicaldrive`} {
+	for _, prefix := range []string{"/dev/sd", "/dev/hd", "/dev/nvme", "/dev/vd", "/dev/xvd", "/dev/disk", "/dev/mmcblk", `\\.\physicaldrive`,
+		"/dev/mapper/", "/dev/dm-", "/dev/md", "/dev/loop", "/dev/zd"} {
 		if strings.HasPrefix(p, prefix) {
 			return true
 		}
+	}
+	// \\.\C: is the volume device of drive C.
+	if strings.HasPrefix(p, `\\.\`) && len(p) >= 6 && p[5] == ':' {
+		return true
 	}
 	return false
 }
@@ -1078,7 +1261,12 @@ var (
 		"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "fish": true,
 		"python": true, "python3": true, "perl": true, "ruby": true, "node": true, "php": true,
 		"pwsh": true, "powershell": true, "iex": true, "invoke-expression": true,
+		"source": true, ".": true,
 	}
+	// psIexOfPipelineInput is iex applied to the pipeline variable inside a
+	// script block: "iwr URL | % { iex $_.Content }". The block splits the
+	// pipeline for the tokenizer, so the source and the sink never meet.
+	psIexOfPipelineInput = regexp.MustCompile(`(?i)\b(?:iex|invoke-expression)\s+\$_`)
 )
 
 // catastrophicPipeline catches downloaded or decoded text being run as code:
@@ -1127,6 +1315,9 @@ func stdinScript(a string) bool {
 // were let through while they run the piped download.
 func readsCodeFromStdin(name string, args []string) bool {
 	switch {
+	case name == "source" || name == ".":
+		// source /dev/stdin, . - : the current shell runs what is piped in.
+		return len(args) > 0 && stdinScript(args[0])
 	case posixShells[name]:
 		for i := 0; i < len(args); i++ {
 			a := args[i]

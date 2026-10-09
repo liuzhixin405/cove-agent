@@ -140,10 +140,11 @@ func CapabilitiesOf(p Provider) Capabilities {
 }
 
 type ProviderConfig struct {
-	Name    string
-	APIKey  string
-	APIKeys []string
-	BaseURL string
+	Name          string
+	APIKey        string
+	APIKeys       []string
+	BaseURL       string
+	ImageFilesAPI bool
 }
 
 func NewProvider(cfg ProviderConfig) Provider {

@@ -156,21 +156,28 @@ func (c *RateLimitCmd) Execute(ctx context.Context, in Input) (Output, error) {
 	if !info.HasData() {
 		return Output{Message: "暂无速率限制数据（尚未收到相关响应头）"}, nil
 	}
+	// The reset durations were relative to the response that carried them;
+	// shown later they must count down (or say the window has reset).
+	elapsed := time.Duration(0)
+	if !info.UpdatedAt.IsZero() {
+		elapsed = time.Since(info.UpdatedAt)
+	}
+	resetNote := func(reset time.Duration) string {
+		if reset <= 0 {
+			return ""
+		}
+		if remaining := reset - elapsed; remaining > 0 {
+			return fmt.Sprintf(" (reset in %s)", roundDuration(remaining))
+		}
+		return " (已重置)"
+	}
 	var sb strings.Builder
 	sb.WriteString("=== Rate Limit ===\n")
 	if info.RequestsLimit > 0 {
-		fmt.Fprintf(&sb, "Requests: %d / %d", info.RequestsRemaining, info.RequestsLimit)
-		if info.RequestsReset > 0 {
-			fmt.Fprintf(&sb, " (reset in %s)", roundDuration(info.RequestsReset))
-		}
-		sb.WriteString("\n")
+		fmt.Fprintf(&sb, "Requests: %d / %d%s\n", info.RequestsRemaining, info.RequestsLimit, resetNote(info.RequestsReset))
 	}
 	if info.TokensLimit > 0 {
-		fmt.Fprintf(&sb, "Tokens: %d / %d", info.TokensRemaining, info.TokensLimit)
-		if info.TokensReset > 0 {
-			fmt.Fprintf(&sb, " (reset in %s)", roundDuration(info.TokensReset))
-		}
-		sb.WriteString("\n")
+		fmt.Fprintf(&sb, "Tokens: %d / %d%s\n", info.TokensRemaining, info.TokensLimit, resetNote(info.TokensReset))
 	}
 	if !info.UpdatedAt.IsZero() {
 		fmt.Fprintf(&sb, "Updated: %s", info.UpdatedAt.Format(time.RFC3339))

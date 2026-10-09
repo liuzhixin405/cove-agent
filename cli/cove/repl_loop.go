@@ -83,13 +83,49 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 		return complete(input, allCommands, skillDescs)
 
 	})
+	images := newImageInput(&fe.attachedFiles)
+	defer images.close()
 	configureRemoteReader := func(reader *repl.LineReader) {
+		fe.choose = reader.ShowChoices
+		reader.SetPanelSource(func(selected int) ([]string, int) {
+			return agentMapLines(eng.AgentActivities(), selected, tasks.IsRunning(), time.Now())
+		})
+		reader.SetPanelWake(eng.AgentActivityWake())
+		reader.SetImageInputHooks(func(text string) bool {
+			cwd, err := os.Getwd()
+			if err != nil || !images.paste(text, cwd) {
+				return false
+			}
+			reader.SetInputStatus(images.summary())
+			return true
+		}, func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := images.pasteClipboard(ctx); err != nil {
+				fe.print("粘贴图片失败: " + err.Error())
+				return
+			}
+			reader.SetInputStatus(images.summary())
+		}, func() {
+			if len(fe.attachedFiles) > 0 {
+				fe.attachedFiles = fe.attachedFiles[:len(fe.attachedFiles)-1]
+				images.prune()
+				reader.SetInputStatus(images.summary())
+			}
+		})
 		reader.SetOwnerEventHook(fe.remoteWake, func() {
 			fe.pollRemote()
+			reader.RefreshPanel()
 			if tasks.IsRunning() {
 				reader.SetPrompt(repl.PromptRunning())
+				reader.SetInteractionState("执行中")
 			} else {
+				state := "空闲"
+				if tasks.PendingFailed() != nil {
+					state = "已停止"
+				}
 				reader.SetPrompt(repl.Prompt())
+				reader.SetInteractionState(state)
 			}
 		})
 	}
@@ -176,6 +212,8 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 	}
 
 	for {
+		images.prune()
+		reader.SetInputStatus(images.summary())
 		// Dynamic prompt: show ⚡ when a background task is running.
 		if tasks.IsRunning() {
 			reader.SetPrompt(repl.PromptRunning())
@@ -279,7 +317,10 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 		// its lines; the shell does the same now.
 		input = strings.TrimSpace(input)
 		if input == "" {
-			continue
+			if len(fe.attachedFiles) == 0 {
+				continue
+			}
+			input = "请分析这些附件。"
 		}
 
 		if fe.takeHistoryPick(input, func(in string) {
@@ -412,14 +453,6 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 
 			}
 
-			// Auto-clear attachments after sending (avoids resending images every turn)
-
-			if len(fe.attachedFiles) > 0 {
-
-				fe.attachedFiles = nil
-
-			}
-
 			// The same request sent again into a fresh session (after a
 			// restart, typically) continues the unfinished session it started,
 			// instead of opening one more copy of it in /history.
@@ -444,8 +477,12 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 			if hint := outsideCwdHint(userMsg.Content, currentProjectDir()); hint != "" {
 				repl.PrintAbove(hint + "\r\n")
 			}
-			if msg := tasks.SubmitWithFeedback(userMsg); msg != "" {
+			msg, accepted := tasks.submitWithFeedback(userMsg)
+			if msg != "" {
 				repl.PrintAbove(msg + "\r\n")
+			}
+			if accepted {
+				fe.attachedFiles = nil
 			}
 
 			// Don't block: tasks run in the background, user can type again

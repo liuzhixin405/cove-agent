@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,15 @@ func init() {
 		defer timer.Stop()
 		<-timer.C
 		os.Exit(8)
+	}
+	if mode == "runner-stdin" {
+		stdin, _ := io.ReadAll(os.Stdin)
+		data, err := json.Marshal(map[string]any{"args": os.Args[1:], "stdin": string(stdin)})
+		if err != nil {
+			os.Exit(11)
+		}
+		_, _ = os.Stdout.Write(data)
+		os.Exit(0)
 	}
 	if mode != "runner" {
 		os.Exit(9)
@@ -343,5 +353,83 @@ func TestDirtyWorkspaceUsesCommittedHEADOnly(t *testing.T) {
 	}
 	if data, err := os.ReadFile(tracked); err != nil || string(data) != "user uncommitted content\n" {
 		t.Fatalf("original changed: %q %v", data, err)
+	}
+}
+
+// A spec prompt may be 64 KiB but Windows caps a command line at 32767
+// characters, so a long prompt travels on the child's stdin (which `cove -p`
+// appends to the prompt argument) instead of failing every attempt with
+// "The filename or extension is too long".
+func TestLongPromptTravelsOnStdin(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := t.TempDir()
+	runner := CommandRunner{Executable: executable, Prepare: func(string, float64, Spec) ([]string, func(), error) {
+		return []string{"COVE_AUTOMATION_TEST_CHILD=runner-stdin"}, nil, nil
+	}}
+	spec := testSpec()
+	spec.Prompt = strings.Repeat("长提示 long prompt ", 3000) // ~60 KiB
+	check, err := runner.Run(context.Background(), work, spec, .25)
+	if err != nil || check.ExitCode != 0 {
+		t.Fatalf("check=%+v err=%v", check, err)
+	}
+	var echoed struct {
+		Args  []string `json:"args"`
+		Stdin string   `json:"stdin"`
+	}
+	if err := json.Unmarshal([]byte(check.Output), &echoed); err != nil {
+		t.Fatal(err)
+	}
+	if echoed.Stdin != spec.Prompt {
+		t.Fatalf("stdin carried %d bytes, want the %d-byte prompt", len(echoed.Stdin), len(spec.Prompt))
+	}
+	for _, arg := range echoed.Args {
+		if len(arg) > maxArgPrompt {
+			t.Fatalf("prompt still on the command line (%d bytes)", len(arg))
+		}
+	}
+	if echoed.Args[len(echoed.Args)-2] != "-p" || !strings.Contains(echoed.Args[len(echoed.Args)-1], "isolated worktree") {
+		t.Fatalf("args=%v", echoed.Args)
+	}
+}
+
+// A worker that crashed leaves a running claim; once its lease is over the
+// result is uncertain, and /automations remove must not be blocked by it
+// until some unrelated run/tick happens to convert it.
+func TestRemoveConvertsExpiredClaimToUncertain(t *testing.T) {
+	store := testStore(t)
+	spec := testSpec()
+	if err := store.Add(spec, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	past := time.Now().UTC().Add(-3 * time.Hour)
+	if _, _, err := store.claim(spec.ID, "manual", "", "", past); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Remove(spec.ID); err != nil {
+		t.Fatalf("expired claim blocked removal: %v", err)
+	}
+	state, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Specs) != 0 || len(state.Results) != 1 || state.Results[0].State != "uncertain" {
+		t.Fatalf("state=%+v", state)
+	}
+	// A live claim still blocks removal (the uncertain result must be
+	// reviewed before the task may be claimed again, as documented).
+	if err := store.Review(state.Results[0].ID, "rejected"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Add(spec, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := store.claim(spec.ID, "manual", "", "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Remove(spec.ID); err == nil {
+		t.Fatal("removed an automation with a live running claim")
 	}
 }

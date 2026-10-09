@@ -3,14 +3,90 @@ package tool
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
+	"image"
+	"image/png"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/liuzhixin405/cove-agent/internal/api"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
+
+func TestReadReturnsNativeImage(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "screen.png")
+	var original bytes.Buffer
+	if err := png.Encode(&original, image.NewRGBA(image.Rect(0, 0, 16, 8))); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, original.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := NewReadTool().Call(context.Background(), Input{"filePath": path}, Context{Cwd: dir})
+	if err != nil || result.IsError {
+		t.Fatalf("image read failed: result=%+v err=%v", result, err)
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload struct {
+		Parts []api.MessagePart `json:"parts"`
+	}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if len(payload.Parts) != 1 || payload.Parts[0].Type != "image" || payload.Parts[0].MimeType != "image/png" || payload.Parts[0].FileName != "screen.png" {
+		t.Fatalf("image block missing: %+v", payload.Parts)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload.Parts[0].Data)
+	if err != nil || !bytes.Equal(decoded, original.Bytes()) {
+		t.Fatalf("image pixels changed: %v", err)
+	}
+	if strings.Contains(result.Data, payload.Parts[0].Data) {
+		t.Fatal("image encoded into plain text")
+	}
+}
+
+func TestReadImageLimits(t *testing.T) {
+	for _, scenario := range []string{"bytes", "dimensions"} {
+		t.Run(scenario, func(t *testing.T) {
+			width := 16
+			if scenario == "dimensions" {
+				width = 4097
+			}
+			var raw bytes.Buffer
+			if err := png.Encode(&raw, image.NewRGBA(image.Rect(0, 0, width, 8))); err != nil {
+				t.Fatal(err)
+			}
+			data := raw.Bytes()
+			if scenario == "bytes" {
+				data = append(data, make([]byte, 5*1024*1024+1-len(data))...)
+			}
+			dir := t.TempDir()
+			path := filepath.Join(dir, "large.png")
+			if err := os.WriteFile(path, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := NewReadTool().Call(context.Background(), Input{"filePath": path}, Context{Cwd: dir})
+			if err != nil || !result.IsError || len(result.Parts) != 0 {
+				t.Fatalf("oversized image was not refused: result=%+v err=%v", result, err)
+			}
+			limit := "5 MiB"
+			if scenario == "dimensions" {
+				limit = "4096-pixel"
+			}
+			if !strings.Contains(result.Data, limit) {
+				t.Fatalf("missing limit explanation: %q", result.Data)
+			}
+		})
+	}
+}
 
 func TestReadRefusesBinaryFiles(t *testing.T) {
 	dir := t.TempDir()
@@ -20,7 +96,7 @@ func TestReadRefusesBinaryFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	res, _ := NewReadTool().Call(context.Background(), Input{"filePath": path}, Context{Cwd: dir})
-	if !res.IsError || !strings.Contains(res.Data, "binary") {
+	if !res.IsError || len(res.Parts) != 0 || !strings.Contains(res.Data, "binary") {
 		t.Fatalf("read of a PNG = %q, want a binary-file error", res.Data[:min(len(res.Data), 120)])
 	}
 }

@@ -161,8 +161,14 @@ func TestCurlAllowlist(t *testing.T) {
 		"wget -qO- https://example.com",
 		"wget -q -O - https://example.com",
 	} {
-		if !c.AutoApproveLineFor(cmd, ShellPOSIX) {
-			t.Errorf("AutoApproveLineFor(%q, posix) = false, want true", cmd)
+		// Rated a read-only fetch, but a fetch is egress: auto mode keeps
+		// asking (the manual's rule), since the URL or a header carries
+		// whatever the shell expands into it.
+		if c.ClassifyLineFor(cmd, ShellPOSIX) != CatSafe {
+			t.Errorf("ClassifyLineFor(%q, posix) != CatSafe", cmd)
+		}
+		if c.AutoApproveLineFor(cmd, ShellPOSIX) {
+			t.Errorf("AutoApproveLineFor(%q, posix) = true, want false: network fetches ask in auto mode", cmd)
 		}
 	}
 }
@@ -193,8 +199,10 @@ func TestPowerShellCurlAliasAllowlist(t *testing.T) {
 		"curl -Uri https://example.com -UseBasicParsing",
 		"wget -uri https://example.com",
 	} {
-		if !c.AutoApproveLineFor(cmd, ShellPowerShell) {
-			t.Errorf("AutoApproveLineFor(%q, powershell) = false, want true", cmd)
+		// pwsh 6+ has no curl/wget aliases ("wget URL" is GNU wget writing
+		// a file), and a fetch is egress either way: never auto-approved.
+		if c.AutoApproveLineFor(cmd, ShellPowerShell) {
+			t.Errorf("AutoApproveLineFor(%q, powershell) = true, want false", cmd)
 		}
 	}
 }

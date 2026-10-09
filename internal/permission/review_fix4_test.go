@@ -307,10 +307,14 @@ func TestRound4EverydayBaseline(t *testing.T) {
 			t.Errorf("%q not read-only (cat %v)", cmd, c.ClassifyLineFor(cmd, ShellPOSIX))
 		}
 	}
-	for _, cmd := range []string{"go test ./...", "make test", "npm test", "curl -s https://example.com"} {
+	for _, cmd := range []string{"go test ./...", "make test", "npm test"} {
 		if !c.AutoApproveLineFor(cmd, ShellPOSIX) {
 			t.Errorf("%q not auto-approved (cat %v)", cmd, c.ClassifyLineFor(cmd, ShellPOSIX))
 		}
+	}
+	// A fetch stays a confirmation in auto mode (the manual's table).
+	if c.AutoApproveLineFor("curl -s https://example.com", ShellPOSIX) {
+		t.Error("curl auto-approved in auto mode")
 	}
 	// A brace expansion is not a literal argument: it makes several words.
 	for _, cmd := range []string{"git log {--output=x,HEAD}", "cat {a,b}.txt", "ls {1..3}"} {

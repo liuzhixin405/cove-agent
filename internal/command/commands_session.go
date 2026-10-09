@@ -42,7 +42,7 @@ func (c *StatusCmd) Execute(ctx context.Context, in Input) (Output, error) {
 	messageCount := 0
 	costSummary := ""
 	if in.Engine != nil {
-		messageCount = len(in.Engine.Messages())
+		messageCount = in.Engine.MessageCount()
 		if tracker := in.Engine.CostTracker(); tracker != nil {
 			costSummary = strings.TrimSpace(tracker.Summary())
 		}
@@ -62,9 +62,13 @@ func (c *StatsCmd) Execute(ctx context.Context, in Input) (Output, error) {
 	if in.Engine == nil {
 		return Output{Message: "会话统计不可用"}, nil
 	}
-	msgCount := len(in.Engine.Messages())
+	msgCount := in.Engine.MessageCount()
 	return Output{Message: fmt.Sprintf("消息数: %d\n费用: %s", msgCount, in.Engine.CostTracker().Summary())}, nil
 }
+
+// MutatesEngine: /export walks the live message history, which only the turn
+// goroutine may touch while a task runs.
+func (c *ExportCmd) MutatesEngine([]string) bool { return true }
 
 func (c *ExportCmd) Name() string        { return "export" }
 func (c *ExportCmd) Aliases() []string   { return nil }

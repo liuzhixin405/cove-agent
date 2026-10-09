@@ -28,9 +28,7 @@ var dreamWorkerProvider = func(profile string) (api.Provider, string, error) {
 		log.Warnf("config load: %v", err)
 	}
 	pc := cfg.EffectiveProvider()
-	prov := api.DetectProvider(cfg.Model, api.ProviderConfig{
-		Name: pc.Name, APIKey: pc.APIKey, APIKeys: pc.APIKeys, BaseURL: pc.BaseURL,
-	})
+	prov := api.DetectProvider(cfg.Model, providerAPIConfig(pc))
 	model := cfg.ModelFast
 	if model == "" {
 		model = cfg.Model

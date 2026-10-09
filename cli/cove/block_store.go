@@ -61,7 +61,9 @@ const keybindingHelp = `输入快捷键
   ↑ ↓              历史记录（提问时在选项间切换）    Ctrl+R   搜索历史
   ← →  Home End    移动光标      Ctrl+← →  Alt+B/F   按词移动
   Ctrl+A / Ctrl+E  行首 / 行尾   Ctrl+U / Ctrl+K     删到行首 / 行尾
-  Ctrl+W / Alt+⌫   删除前一个词  Tab                 补全命令、参数、@路径
+  Ctrl+W / Alt+⌫   删除前一个词（输入为空时 Alt+⌫ 移除最后一个附件）
+  Tab              补全命令、参数、@路径；输入为空时 Tab / Shift+Tab 切换 Agent 面板焦点
+  Alt+M            展开/收起 Agent 面板          Alt+V   粘贴剪贴板图片（Windows）
   Esc              清空输入；输入为空时中断当前任务（COVE_ESC_INTERRUPT=0 关闭）
   Ctrl+C           中断当前任务  Ctrl+D              空行时退出
   Ctrl+L           清屏

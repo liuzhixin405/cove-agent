@@ -68,7 +68,9 @@ Save a specification such as this outside the original project:
 `/automations add <file> session` binds the task to the active session; standalone
 ticks/events intentionally skip session-bound tasks. `every_seconds: 0` disables
 scheduling, not manual/event execution. `enabled: false` disables all execution.
-An interval must be at least 60 seconds. Replace a spec by removing it and
+An interval must be at least 60 seconds. A prompt longer than 24 KiB is passed
+to the worker on stdin (`cove -p` appends piped input to the prompt), since
+Windows caps a command line at 32767 characters. Replace a spec by removing it and
 adding a new spec; this retains previous inbox results. Remove cannot stop a
 running task. Ctrl+C cancels the current foreground worker.
 
@@ -109,8 +111,9 @@ No events are monitored implicitly.
   not a successful silently truncated patch.
 - States are running, succeeded, failed, interrupted and uncertain, independent
   of pending/accepted/rejected review. Cancellation/timeouts are interrupted,
-  never silently retried. Expired claims become uncertain on the next command or
-  Recover call. Unknown outcomes block further runs until explicitly reviewed;
+  never silently retried. Expired claims become uncertain on the next command (every
+  /automations and /inbox command recovers them first; remove converts an
+  expired claim instead of refusing) or Recover call. Unknown outcomes block further runs until explicitly reviewed;
   they are not treated as safe failures. Inbox state is retained after removal.
 - A crash during terminal persistence leaves the prior running claim, ultimately
   uncertain. Inspect artifacts and review before scheduling again. Crash-created
@@ -120,6 +123,8 @@ No events are monitored implicitly.
   and network. Windows jobs and Unix process groups bound normal descendant
   processes, not a security sandbox. Run only trusted projects and commands;
   do not assume filesystem/network/process escape prevention.
+- A result's runner output is in `checks[0].output` (with the command and
+  exit code); `output` is no longer duplicated.
 - Results contain outputs and patches that may contain secrets; state uses
   owner-only file permissions where supported. Private worker configs contain
   the provider credentials during execution and are deleted on normal return;

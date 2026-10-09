@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -42,6 +43,7 @@ type Manager struct {
 	plugins     map[string]*Entry
 	dir         string
 	marketplace *Marketplace
+	installing  map[string]bool
 	mu          sync.RWMutex
 }
 
@@ -128,72 +130,99 @@ func (m *Manager) recordPluginError(name string, err error) {
 }
 
 func (m *Manager) Install(name string, url string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	return m.InstallContext(context.Background(), name, url)
+}
 
-	// The name becomes a directory that is cloned into and RemoveAll'd on
-	// failure, so it has to be a single safe path element before it is joined.
-	// "../../../.ssh" previously redirected both of those outside m.dir.
+func (m *Manager) InstallContext(ctx context.Context, name string, url string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	pluginDir, err := pluginDirFor(m.dir, name)
 	if err != nil {
 		return err
 	}
+	m.mu.Lock()
+	if m.installing[name] {
+		m.mu.Unlock()
+		return fmt.Errorf("plugin %s installation already in progress", name)
+	}
+	if _, err := os.Stat(pluginDir); err == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("plugin %s already installed", name)
+	}
+	if _, err := os.Stat(pluginDir + ".disabled"); err == nil {
+		m.mu.Unlock()
+		return fmt.Errorf("plugin %s already installed", name)
+	}
+	if m.installing == nil {
+		m.installing = make(map[string]bool)
+	}
+	m.installing[name] = true
+	m.mu.Unlock()
+	defer func() {
+		m.mu.Lock()
+		delete(m.installing, name)
+		m.mu.Unlock()
+	}()
+	if err := os.MkdirAll(m.dir, 0755); err != nil {
+		return err
+	}
+	stagingDir, err := os.MkdirTemp(filepath.Dir(m.dir), ".cove-plugin-install-")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(stagingDir)
+	if url != "" {
+		if err := cloneRepoContext(ctx, url, stagingDir); err != nil {
+			return err
+		}
+		ensureManifest(stagingDir)
+	} else {
+		manifest := Manifest{Name: name, Version: "0.1.0", Description: fmt.Sprintf("Plugin: %s", name)}
+		data, err := json.MarshalIndent(manifest, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encode manifest: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(stagingDir, "manifest.json"), data, 0644); err != nil {
+			return fmt.Errorf("write manifest: %w", err)
+		}
+	}
+	data, err := os.ReadFile(filepath.Join(stagingDir, "manifest.json"))
+	if err != nil {
+		return fmt.Errorf("cloned repo has no readable manifest.json or .claude-plugin/plugin.json: %w", err)
+	}
+	var manifest Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return fmt.Errorf("parse manifest: %w", err)
+	}
+	if manifest.Name == "" {
+		manifest.Name = name
+	}
+	var commitSHA string
+	if url != "" {
+		commitSHA = getGitSHAContext(ctx, stagingDir)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if _, err := os.Stat(pluginDir); err == nil {
 		return fmt.Errorf("plugin %s already installed", name)
 	}
 	if _, err := os.Stat(pluginDir + ".disabled"); err == nil {
 		return fmt.Errorf("plugin %s already installed", name)
 	}
-
-	// Any URL the user gave is cloned; git itself decides whether it is a
-	// repository. This used to require a .git suffix or one of a few known
-	// hosts, and any other URL (a self-hosted Gitea, a local path) was
-	// silently dropped in favour of an empty scaffold reported as installed.
-	if url != "" {
-		if err := cloneRepo(url, pluginDir); err != nil {
+	if err := os.Rename(stagingDir, pluginDir); err != nil {
+		return fmt.Errorf("commit plugin: %w", err)
+	}
+	if url != "" && m.marketplace != nil {
+		if err := m.marketplace.recordInstall(name, url, pluginDir, commitSHA); err != nil {
 			_ = os.RemoveAll(pluginDir)
-			return err
+			return fmt.Errorf("save lockfile: %w", err)
 		}
-		// Generate manifest.json from .claude-plugin/plugin.json if the repo uses
-		// the Claude plugin format instead of a native manifest.json.
-		ensureManifest(pluginDir)
-		// Validate manifest
-		if _, err := os.Stat(filepath.Join(pluginDir, "manifest.json")); os.IsNotExist(err) {
-			_ = os.RemoveAll(pluginDir)
-			return fmt.Errorf("cloned repo has no manifest.json or .claude-plugin/plugin.json — not a valid plugin")
-		}
-		// Without a lock entry `/plugin update` answered "not tracked" for
-		// every plugin installed from a URL: only marketplace installs wrote one.
-		if m.marketplace != nil {
-			if err := m.marketplace.recordInstall(name, url, pluginDir); err != nil {
-				return fmt.Errorf("save lockfile: %w", err)
-			}
-		}
-		return m.loadPluginLocked(name)
 	}
-
-	// Local scaffold (legacy fallback)
-	if err := os.MkdirAll(pluginDir, 0755); err != nil {
-		return err
-	}
-
-	defaultManifest := Manifest{
-		Name:        name,
-		Version:     "0.1.0",
-		Description: fmt.Sprintf("Plugin: %s", name),
-	}
-	data, err := json.MarshalIndent(defaultManifest, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode manifest: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(pluginDir, "manifest.json"), data, 0644); err != nil {
-		return fmt.Errorf("write manifest: %w", err)
-	}
-	m.plugins[name] = &Entry{
-		Manifest: defaultManifest,
-		Dir:      pluginDir,
-		State:    Enabled,
-	}
+	m.plugins[manifest.Name] = &Entry{Manifest: manifest, Dir: pluginDir, State: Enabled}
 	return nil
 }
 
@@ -488,19 +517,30 @@ func (m *Manager) MarketplaceSearch(query string) string {
 
 // MarketplaceRefresh updates the marketplace index.
 func (m *Manager) MarketplaceRefresh() error {
+	return m.MarketplaceRefreshContext(context.Background())
+}
+
+func (m *Manager) MarketplaceRefreshContext(ctx context.Context) error {
 	if m.marketplace == nil {
 		return fmt.Errorf("marketplace 未初始化")
 	}
-	return m.marketplace.Refresh()
+	return m.marketplace.RefreshContext(ctx)
 }
 
 // MarketplaceUpdate updates one or all plugins.
 func (m *Manager) MarketplaceUpdate(name string) (string, error) {
+	return m.MarketplaceUpdateContext(context.Background(), name)
+}
+
+func (m *Manager) MarketplaceUpdateContext(ctx context.Context, name string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if m.marketplace == nil {
 		return "", fmt.Errorf("marketplace 未初始化")
 	}
 	if name != "" {
-		if err := m.marketplace.Update(name); err != nil {
+		if err := m.marketplace.UpdateContext(ctx, name); err != nil {
 			return "", err
 		}
 		lock, ok := m.marketplace.LockInfo(name)
@@ -510,7 +550,7 @@ func (m *Manager) MarketplaceUpdate(name string) (string, error) {
 		return fmt.Sprintf("✓ %s 已更新到 %s (%s)", name, lock.Version, shortSHA(lock.CommitSHA)), nil
 	}
 	// Update all
-	updated, errs := m.marketplace.UpdateAll()
+	updated, errs := m.marketplace.UpdateAllContext(ctx)
 	var sb strings.Builder
 	if len(updated) > 0 {
 		fmt.Fprintf(&sb, "✓ 已更新 %d 个插件: %s\n", len(updated), strings.Join(updated, ", "))
@@ -542,13 +582,17 @@ func (m *Manager) Marketplace() *Marketplace {
 
 // MarketplaceInstall installs a plugin from the marketplace by name.
 func (m *Manager) MarketplaceInstall(name string) error {
+	return m.MarketplaceInstallContext(context.Background(), name)
+}
+
+func (m *Manager) MarketplaceInstallContext(ctx context.Context, name string) error {
 	if m.marketplace == nil {
 		return fmt.Errorf("marketplace 未初始化")
 	}
 	// The index lookup ignores case and installs into the entry's own
 	// directory name; reloading the name as typed ("Foo" for entry "foo")
 	// failed after a successful install on a case-sensitive file system.
-	installed, err := m.marketplace.installFromMarketplace(name)
+	installed, err := m.marketplace.installFromMarketplaceContext(ctx, name)
 	if err != nil {
 		return err
 	}

@@ -149,10 +149,12 @@ func withPinned(t *testing.T, lr *LineReader, w, h int) {
 	consoleMu.Lock()
 	streamingActive = true
 	pinned, pinRows, pinCols = true, h, w
+	pinPanelRows = 0
 	consoleMu.Unlock()
 	t.Cleanup(func() {
 		consoleMu.Lock()
 		pinned, pinRows, pinCols = false, 0, 0
+		pinPanelRows = 0
 		consoleMu.Unlock()
 	})
 }
@@ -182,6 +184,74 @@ func TestPinnedRedrawSavesAndRestoresTheCursor(t *testing.T) {
 	}
 	if strings.Contains(out, "已排队") {
 		t.Errorf("queue note shown with nothing queued: %q", out)
+	}
+}
+
+func TestAgentPanelPinnedRowsAndRelease(t *testing.T) {
+	restore := captureStdout(t)
+	reader := New(nil)
+	reader.panelLines = []string{"Agent Map", "agent-one", "details"}
+	withPinned(t, reader, 80, 50)
+	consoleMu.Lock()
+	pinPanelRows = 3
+	consoleMu.Unlock()
+	reader.redraw([]rune("draft"), 2)
+	consoleMu.Lock()
+	unpinLocked()
+	consoleMu.Unlock()
+	output := restore()
+	if !strings.Contains(output, "\x1b[46;1H\x1b[2KAgent Map") || !strings.Contains(output, unpinSequenceReserved(50, 5)) {
+		t.Fatalf("panel rows not reserved or cleared: %q", output)
+	}
+	if string(reader.renderBuf) != "draft" || reader.renderCursor != 2 {
+		t.Fatal("pinned panel changed draft or cursor")
+	}
+	assertNoBareLF(t, output)
+}
+
+func TestAgentPanelSmallTerminalLeavesStreamRoom(t *testing.T) {
+	reader := New(nil)
+	reader.panelLines = make([]string, panelMaxRows)
+	if reader.panelRows(8) != 3 || reader.panelRows(4) != 0 {
+		t.Fatal("panel did not respect terminal height")
+	}
+	sequence, row := pinSequenceReserved(cursorPos{row: 8, col: 1}, 8, false, 5)
+	if row != 3 || !strings.Contains(sequence, "\x1b[1;3r") {
+		t.Fatalf("panel left no safe stream region: %q, %d", sequence, row)
+	}
+}
+
+func TestPinnedAgentHintVisibility(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		available bool
+		open      bool
+		wantHint  bool
+	}{
+		{name: "closed", available: true, wantHint: true},
+		{name: "open", available: true, open: true},
+		{name: "unavailable"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			restore := captureStdout(t)
+			reader := New(nil)
+			if test.available {
+				reader.SetPanelSource(func(int) ([]string, int) { return nil, 0 })
+			}
+			reader.panelOpen = test.open
+			withPinned(t, reader, 80, 50)
+			reader.redraw(nil, 0)
+			output := restore()
+			if got := strings.Contains(output, "Alt+M 查看 Agent"); got != test.wantHint {
+				t.Fatalf("Agent hint visible = %v, want %v: %q", got, test.wantHint, output)
+			}
+			if !strings.Contains(output, "输入指引，回车送入当前任务") {
+				t.Fatalf("running input guidance missing: %q", output)
+			}
+			if strings.Contains(reader.placeholder, "Alt+M") {
+				t.Fatal("Agent hint was added to the idle placeholder")
+			}
+		})
 	}
 }
 

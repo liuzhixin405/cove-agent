@@ -71,10 +71,20 @@ func (m *Manager) addDirectory(dir, source string) {
 	defer m.mu.Unlock()
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
-		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+		isDir := e.IsDir()
+		if !isDir && e.Type()&os.ModeSymlink != 0 {
+			// A linked skill directory (~/dotfiles/skills/x -> ~/.cove/skills/x)
+			// was skipped silently: DirEntry.IsDir is false for the link.
+			// loadSkillFile still refuses project skills that resolve
+			// outside the project.
+			if info, err := os.Stat(filepath.Join(dir, e.Name())); err == nil && info.IsDir() {
+				isDir = true
+			}
+		}
+		if isDir && !strings.HasPrefix(e.Name(), ".") {
 			m.loadSkillFile(filepath.Join(dir, e.Name(), "SKILL.md"), source, dir)
 		}
-		if strings.HasSuffix(e.Name(), ".md") && !e.IsDir() {
+		if strings.HasSuffix(e.Name(), ".md") && !isDir {
 			m.loadSkillFile(filepath.Join(dir, e.Name()), source, dir)
 		}
 	}

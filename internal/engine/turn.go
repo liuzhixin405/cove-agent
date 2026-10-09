@@ -241,6 +241,36 @@ func looksLikeTask(msg string) bool {
 // it", "改成 tabs") that belongs to the task already in progress.
 const followUpMaxRunes = 40
 
+func (e *Engine) hasImageMessages() bool {
+	for _, message := range e.messages {
+		for _, part := range message.Parts {
+			if part.Type == "image" && part.Data != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (e *Engine) imageCompatibleModel(model string) string {
+	if !e.hasImageMessages() || api.IsVisionCapableModel(model) {
+		return model
+	}
+	candidates := []string{e.config.ModelFast, e.config.Model}
+	if e.modelRouter != nil {
+		candidates = []string{e.modelRouter.FastModel(), e.modelRouter.DefaultModel()}
+	}
+	for _, candidate := range candidates {
+		if candidate != "" && api.IsVisionCapableModel(candidate) {
+			return candidate
+		}
+	}
+	if api.NormalizeProviderName(e.config.Provider.Name) == "deepseek" {
+		return "deepseek-flash"
+	}
+	return model
+}
+
 // keepPremiumForFollowUp keeps a short follow-up on the premium model when the
 // previous turn ran there. The router scores each message alone, so a terse
 // "继续" in the middle of a refactor used to be sent to the fast model —
@@ -263,6 +293,9 @@ func (e *Engine) escalate(model, why string) string {
 	}
 	fast, premium := e.modelRouter.FastModel(), e.modelRouter.DefaultModel()
 	if fast == "" || model != fast || premium == "" || premium == fast {
+		return model
+	}
+	if e.hasImageMessages() && !api.IsVisionCapableModel(premium) {
 		return model
 	}
 	e.engineOutput(fmt.Sprintf("  \x1b[2m(%s，本轮后续改用 %s)\x1b[0m", why, premium))
@@ -587,9 +620,23 @@ func (e *Engine) verifyTrusted(g *VerifyGate) bool {
 // blocks are bound to the exact prefix they were produced under; after that
 // prefix is rewritten (masking, compaction) the API rejects them, and the
 // documented recovery is to drop them all once, at the rewrite.
+// stripThinkingBlocks drops the thinking blocks of every assistant message
+// but the last one. Anthropic ignores thinking blocks from earlier turns
+// (they are safe to drop after the history was rewritten by masking or
+// compaction) but requires the last assistant turn's blocks, unmodified,
+// when the next message carries that turn's tool results; dropping them
+// too made the follow-up request fail with 400 when thinking was on.
 func stripThinkingBlocks(msgs []api.Message) {
+	last := -1
 	for i := range msgs {
-		msgs[i].ThinkingBlocks = nil
+		if msgs[i].Role == "assistant" {
+			last = i
+		}
+	}
+	for i := range msgs {
+		if i != last {
+			msgs[i].ThinkingBlocks = nil
+		}
 	}
 }
 

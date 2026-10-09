@@ -45,7 +45,7 @@ go build -tags chromedp -o cove.exe ./cli/cove
 /acceptance
 ```
 
-无标签或 Chrome 不可用时，状态为 unverified，不会假绿。本地服务要由操作员先启动，并显式允许 loopback；JSON 不能自行开放内网访问。
+无标签或 Chrome 不可用时，状态为 unverified，不会假绿。本地服务要由操作员先启动，并显式允许 loopback（`localhost` 会依次尝试 `127.0.0.1` 与 `::1`）；JSON 不能自行开放内网访问。子资源域名解析失败记为 `network_unavailable`，安全拒绝与无效工作流记为 unverified，都不算产品验收失败。
 
 ```json
 {"url":"http://127.0.0.1:3000","fixtures":{"reference":"fixture-42"},"steps":[{"action":"fill","selector":"#name","fixture":"reference"},{"action":"click","selector":"#submit"},{"action":"assert_text","selector":"#result","text":"Confirmed fixture-42"},{"action":"assert_visible","selector":"#result"}]}
@@ -70,7 +70,7 @@ fixtures 只用非敏感测试值，不接受密码输入，敏感页面截图�
 /race select <run-id> a
 ```
 
-run 立即返回 ID，两个独立 worktree 使用同一显式 argv 验证器；模型自评不能决定通过。报告包括耗时、验证结果、补丁字节与哈希；没有结构化成本证据则 cost 为 null/unverified。仅通过候选可 select，应用前检查项目、分支、commit、干净状态、验证器一致性与补丁哈希；应用后旧验收失效。退出会取消 worker 并有界清理 worktree。状态复核不是针对外部编辑器的原子 CAS。
+run 立即返回 ID，两个独立 worktree 使用同一显式 argv 验证器；模型自评不能决定通过。候选子进程继承当前 profile 的 provider/model，只覆盖预算、权限模式与迭代上限。捕获补丁前会清掉 worktree 里被 gitignore 的文件（构建缓存、`node_modules` 等），它们不进入补丁，验证器也看不到；验证器需要的依赖必须能在干净检出上自行准备。报告包括耗时、验证结果、补丁字节与哈希；没有结构化成本证据则 cost 为 null/unverified。仅通过候选可 select（总超时或取消的 run 里已完整通过验证的候选也可以），应用前检查项目、分支、commit、干净状态、验证器一致性与补丁哈希；应用后旧验收失效。退出会取消 worker 并有界清理 worktree。状态复核不是针对外部编辑器的原子 CAS。
 
 ## 跨设备监督与审批
 
@@ -84,7 +84,7 @@ run 立即返回 ID，两个独立 worktree 使用同一显式 argv 验证器；
 
 远程可查看任务摘要、排队和引导状态，发送 steer/cancel/pause，以及当前待审批工具的 approve/deny。pause 只暂停队列，cancel 不撤销已发生的副作用。本地审批仍可用，远程批准不保存规则、不改变权限模式。
 
-请求 ID 防重放，scope 绑定会话、项目、任务与状态版本。审批额外绑定工具、实际输入摘要、有效期和单次消费；本地答案、取消、状态漂移、停服与退出都撤销 pending。HTTP 线程仅入队，真实 REPL 所在线程复核并执行，不需要按 Enter 才处理。
+请求 ID 防重放，scope 绑定会话、项目、任务与状态版本。审批额外绑定工具、实际输入摘要、有效期和单次消费；本地答案、取消、状态漂移、停服与退出都撤销 pending。远程 cancel、停服与退出会拒绝本地待答的授权提示；状态漂移（本地插入指引、队列变化）与远程有效期到期只撤销远程审批，本地提示继续按自己的超时等待。HTTP 线程仅入队，真实 REPL 所在线程复核并执行，不需要按 Enter 才处理。
 
 API 与不把 token 放进参数/聊天记录的 PowerShell 客户端例子见 [远程协议说明](../../internal/remote/README.md)。当前首版是认证 API，不包含手机原生监督界面；已有 gomobile 聊天 Provider 不等于此活跃 CLI 服务。
 

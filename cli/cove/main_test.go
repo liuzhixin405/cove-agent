@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -135,6 +136,51 @@ func TestApplyProviderConfigChangeReloadsProviderForAPIKey(t *testing.T) {
 	}
 }
 
+type filesAPIConfigReloader struct {
+	stubProviderReloader
+	configs []api.ProviderConfig
+}
+
+func (reloader *filesAPIConfigReloader) ReloadProviderConfig(cfg api.ProviderConfig, model string) error {
+	reloader.configs = append(reloader.configs, cfg)
+	return nil
+}
+
+func TestApplyProviderConfigChangeReloadsImageFilesAPI(t *testing.T) {
+	reloader := &filesAPIConfigReloader{}
+	cfg := &config.Config{Model: "deepseek-flash", Provider: config.ProviderConfig{Name: "deepseek", APIKey: "key"}}
+	for index, enabled := range []bool{true, false} {
+		if err := applyProviderConfigChange(cfg, reloader, func() error {
+			value := enabled
+			cfg.Provider.ImageFilesAPI = &value
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if len(reloader.configs) != index+1 || reloader.configs[index].ImageFilesAPI != enabled {
+			t.Fatalf("Files API toggle not reloaded: %+v", reloader.configs)
+		}
+	}
+	if len(reloader.calls) != 0 {
+		t.Fatal("full configuration was reduced to legacy reload fields")
+	}
+}
+
+func TestProviderAPIConfigPreservesFields(t *testing.T) {
+	enabled, disabled := true, false
+	for _, flag := range []*bool{nil, &enabled, &disabled} {
+		source := config.ProviderConfig{
+			Name: "deepseek", APIKey: "primary-key", APIKeys: []string{"primary-key", "backup-key"},
+			BaseURL: "https://example.invalid/v1", ImageFilesAPI: flag,
+		}
+		got := providerAPIConfig(source)
+		if got.Name != source.Name || got.APIKey != source.APIKey || got.BaseURL != source.BaseURL ||
+			!slices.Equal(got.APIKeys, source.APIKeys) || got.ImageFilesAPI != source.ImageFilesEnabled() {
+			t.Fatal("provider configuration fields were lost or changed")
+		}
+	}
+}
+
 func TestApplyProviderConfigChangeReturnsReloadError(t *testing.T) {
 	wantErr := errors.New("reload failed")
 	reloader := &stubProviderReloader{err: wantErr}
@@ -146,6 +192,72 @@ func TestApplyProviderConfigChangeReturnsReloadError(t *testing.T) {
 	})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("expected reload error %v, got %v", wantErr, err)
+	}
+}
+
+func TestApplyProviderConfigChangeRestoresOnFailure(t *testing.T) {
+	wantErr := errors.New("reload failed")
+	enabled := false
+	cfg := &config.Config{Model: "deepseek-flash", Provider: config.ProviderConfig{
+		Name: "deepseek", APIKey: "old", APIKeys: []string{"old"}, ImageFilesAPI: &enabled,
+	}}
+	err := applyProviderConfigChange(cfg, &stubProviderReloader{err: wantErr}, func() error {
+		cfg.Model = "deepseek-v4-pro"
+		cfg.Provider.APIKey = "new"
+		cfg.Provider.APIKeys[0] = "new"
+		*cfg.Provider.ImageFilesAPI = true
+		return nil
+	})
+	if !errors.Is(err, wantErr) || cfg.Model != "deepseek-flash" || cfg.Provider.APIKey != "old" ||
+		cfg.Provider.APIKeys[0] != "old" || cfg.Provider.ImageFilesEnabled() {
+		t.Fatal("failed reload changed live configuration")
+	}
+}
+
+func TestApplyProviderConfigChangeReloadsAPIKeys(t *testing.T) {
+	reloader := &filesAPIConfigReloader{}
+	cfg := &config.Config{Model: "deepseek-flash", Provider: config.ProviderConfig{
+		Name: "deepseek", APIKey: "primary", APIKeys: []string{"backup"},
+	}}
+	if err := applyProviderConfigChange(cfg, reloader, func() error {
+		cfg.Provider.APIKeys[0] = "replacement"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(reloader.configs) != 1 || reloader.configs[0].APIKeys[0] != "replacement" {
+		t.Fatal("key list change did not reload the provider")
+	}
+}
+
+func TestApplyProviderConfigChangePersistenceFailureRestoresProvider(t *testing.T) {
+	wantErr := errors.New("save failed")
+	reloader := &filesAPIConfigReloader{}
+	cfg := &config.Config{Model: "deepseek-flash", Provider: config.ProviderConfig{Name: "deepseek", APIKey: "old"}}
+	err := applyProviderConfigChange(cfg, reloader, func() error {
+		cfg.Provider.APIKey = "new"
+		return nil
+	}, func() error {
+		if len(reloader.configs) != 1 || reloader.configs[0].APIKey != "new" {
+			t.Fatal("save ran before provider reload")
+		}
+		return wantErr
+	})
+	if !errors.Is(err, wantErr) || cfg.Provider.APIKey != "old" || len(reloader.configs) != 2 || reloader.configs[1].APIKey != "old" {
+		t.Fatal("save failure did not restore configuration and provider")
+	}
+}
+
+func TestApplyProviderConfigChangeReloadFailureDoesNotSave(t *testing.T) {
+	wantErr := errors.New("reload failed")
+	cfg := &config.Config{Model: "deepseek-flash", Provider: config.ProviderConfig{Name: "deepseek", APIKey: "old"}}
+	saved := false
+	err := applyProviderConfigChange(cfg, &stubProviderReloader{err: wantErr}, func() error {
+		cfg.Provider.APIKey = "new"
+		return nil
+	}, func() error { saved = true; return nil })
+	if !errors.Is(err, wantErr) || saved || cfg.Provider.APIKey != "old" {
+		t.Fatal("failed reload persisted candidate configuration")
 	}
 }
 

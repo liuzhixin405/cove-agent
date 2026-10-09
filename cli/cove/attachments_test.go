@@ -2,17 +2,24 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"hash/crc32"
 	"image"
 	"image/color"
+	"image/jpeg"
 	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/liuzhixin405/cove-agent/internal/api"
+	"github.com/liuzhixin405/cove-agent/internal/repl"
+	"github.com/liuzhixin405/cove-agent/internal/session"
 )
 
 func TestBuildUserMessageParsesInlineAttachments(t *testing.T) {
@@ -61,12 +68,12 @@ func TestBuildUserMessageBuildsImagePart(t *testing.T) {
 		t.Fatalf("encode png: %v", err)
 	}
 
-	msg, warnings, err := buildUserMessage("看图", dir, []string{imgPath}, "deepseek-v4-pro")
+	msg, warnings, err := buildUserMessage("看图", dir, []string{imgPath}, "deepseek-flash")
 	if err != nil {
 		t.Fatalf("buildUserMessage returned error: %v", err)
 	}
 	if len(warnings) > 0 {
-		t.Logf("warnings (expected none for vision model): %v", warnings)
+		t.Fatalf("unexpected warnings for vision model: %v", warnings)
 	}
 	if len(msg.Parts) != 1 {
 		t.Fatalf("expected 1 part, got %d", len(msg.Parts))
@@ -75,13 +82,61 @@ func TestBuildUserMessageBuildsImagePart(t *testing.T) {
 	if part.Type != "image" {
 		t.Fatalf("part type = %q, want image", part.Type)
 	}
-	// After processing, it should be JPEG
-	if part.MimeType != "image/jpeg" {
-		t.Fatalf("mime = %q, want image/jpeg (images are converted to JPEG)", part.MimeType)
+	if part.MimeType != "image/png" {
+		t.Fatalf("mime = %q, want image/png", part.MimeType)
 	}
-	// Verify it's valid base64
-	if _, err := base64.StdEncoding.DecodeString(part.Data); err != nil {
+	decoded, err := base64.StdEncoding.DecodeString(part.Data)
+	if err != nil {
 		t.Fatalf("invalid base64: %v", err)
+	}
+	original, err := os.ReadFile(imgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decoded, original) {
+		t.Fatal("image attachment was re-encoded")
+	}
+}
+
+func TestBuildImagePartPreservesFlashScreenshot(t *testing.T) {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, image.NewRGBA(image.Rect(0, 0, 2400, 100))); err != nil {
+		t.Fatal(err)
+	}
+	part, _, warning, err := buildImagePart("screen.png", "screen.png", buf.Bytes(), "image/png", "deepseek-flash")
+	if err != nil || warning != "" {
+		t.Fatalf("buildImagePart: warning=%q err=%v", warning, err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(part.Data)
+	if err != nil || part.MimeType != "image/png" || !bytes.Equal(decoded, buf.Bytes()) {
+		t.Fatalf("original screenshot not preserved: mime=%q err=%v", part.MimeType, err)
+	}
+}
+
+func TestBuildImagePartRejectsInvalidImage(t *testing.T) {
+	if _, _, _, err := buildImagePart("bad.png", "bad.png", []byte("not an image"), "image/png", "deepseek-flash"); err == nil {
+		t.Fatal("invalid image was sent as raw data")
+	}
+}
+
+func TestBuildImagePartPreservesWebP(t *testing.T) {
+	raw, err := base64.StdEncoding.DecodeString("UklGRrIBAABXRUJQVlA4TKUBAAAvSsAYAA8w//M///MfeJAkbXvaSG7m8Q3GfYSBJekwQztm/IcZlgwnmWImn2BK7aFmBtnVir6q//8VOkFE/xm4baTIu8c48ArEo6+B3zFKYln3pqClSCKX0begFTAXFOLXHSyF8cCNcZEG4OywuA4KVVfJCiArU7GAgJI8+lJP/OKMT/fBAjevg1cYB7YVkFuWga2lyPi5I0HFy5YTpWIHg0RZpkniRVW9odHAKOwosWuOGdxIyn2OvaCDvhg/we6TwadPBPbqBV58MsLmMJ8yZnOWk8SRz4N+QoyPL+MnamzMvcE1rHNEr91F9GKZPVUcS9w7PhhH36suB9qPeYb/oLk6cuTiJ0wOK3m5h1cKjW6EVZCYMK7dxcKCBdgP9HkKr9gkAO2P8GKZGWVdIAatQa+1IDpt6qyorVwdy01xdW8Jkfk6xjEXmVQQ+HQdFr6OKhIN34dXWq0+0qr6EJSCeeVLH9+gvGTLyqM65PQ44ihzlTXxQKjKbAvshXgir7Lil9w4L2bvMycmjQcqXaMCO6BlY28i+FOLzbfI1vEqxAhotocAAA==")
+	if err != nil {
+		t.Fatal(err)
+	}
+	part, _, warning, err := buildImagePart("image.webp", "image.webp", raw, "image/webp", "deepseek-flash")
+	if err != nil || warning != "" {
+		t.Fatalf("WebP rejected: warning=%q err=%v", warning, err)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(part.Data)
+	if err != nil || part.MimeType != "image/webp" || !bytes.Equal(decoded, raw) {
+		t.Fatalf("WebP not preserved: mime=%q err=%v", part.MimeType, err)
+	}
+}
+
+func TestPreferredDeepSeekVisionModel(t *testing.T) {
+	if got := preferredVisionModelForProvider("deepseek", "deepseek-v4-pro"); got != "deepseek-flash" {
+		t.Fatalf("vision model = %q, want deepseek-flash", got)
 	}
 }
 
@@ -99,9 +154,12 @@ func TestBuildUserMessageWarnsNonVisionModel(t *testing.T) {
 	}
 	f.Close()
 
-	_, warnings, err := buildUserMessage("看图", dir, []string{imgPath}, "deepseek-reasoner")
+	msg, warnings, err := buildUserMessage("看图", dir, []string{imgPath}, "deepseek-reasoner")
 	if err != nil {
 		t.Fatalf("buildUserMessage returned error: %v", err)
+	}
+	if len(msg.Parts) != 1 || msg.Parts[0].Type != "image" || msg.Parts[0].Data == "" {
+		t.Fatal("non-vision attachment discarded image before model routing")
 	}
 	found := false
 	for _, w := range warnings {
@@ -172,6 +230,175 @@ func TestSplitQuotedFieldsSupportsSpacesInPaths(t *testing.T) {
 	want := []string{"screen shot.png", "logs/app.log", "notes final.txt"}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("fields = %#v, want %#v", got, want)
+	}
+}
+
+func TestImageInputPasteOnlyConsumesImages(t *testing.T) {
+	dir := t.TempDir()
+	var data bytes.Buffer
+	if err := png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 12, 8))); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "screen shot.png")
+	if err := os.WriteFile(path, data.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		text string
+		want bool
+	}{
+		{path, true},
+		{`"` + path + `"`, true},
+		{`'` + path + `' '` + path + `'`, true},
+		{`"screen shot.png"`, true},
+		{`"` + path + `" please analyze`, false},
+		{`"` + path + `" "missing.png"`, false},
+		{"```\n" + path + "\n```", false},
+		{"", false},
+	} {
+		var paths []string
+		input := newImageInput(&paths)
+		if got := input.paste(tc.text, dir); got != tc.want {
+			t.Fatalf("paste %q = %v, want %v", tc.text, got, tc.want)
+		}
+		if tc.want && (len(paths) != 1 || paths[0] != path || !strings.Contains(input.summary(), "12x8")) {
+			t.Fatalf("paths=%v summary=%q", paths, input.summary())
+		}
+		if !tc.want && len(paths) != 0 {
+			t.Fatal("rejected paste partially attached files")
+		}
+	}
+}
+
+func TestImageInputClipboardValidationAndCleanup(t *testing.T) {
+	var paths []string
+	input := newImageInput(&paths)
+	t.Cleanup(input.close)
+	var data bytes.Buffer
+	if err := png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 12, 8))); err != nil {
+		t.Fatal(err)
+	}
+	input.clipboard = func(context.Context) ([]byte, error) { return data.Bytes(), nil }
+	for repeat := 0; repeat < 2; repeat++ {
+		if err := input.pasteClipboard(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(paths) != 1 {
+		t.Fatalf("clipboard duplicate paths=%v", paths)
+	}
+	path := paths[0]
+	msg, _, err := buildUserMessage("look", "", paths, "deepseek-flash")
+	if err != nil || len(msg.Parts) != 1 || msg.Parts[0].Type != "image" {
+		t.Fatalf("clipboard message parts=%d err=%v", len(msg.Parts), err)
+	}
+	input.clipboard = func(context.Context) ([]byte, error) { return []byte("invalid"), nil }
+	if err := input.pasteClipboard(context.Background()); err == nil || len(paths) != 1 {
+		t.Fatal("invalid clipboard changed pending attachments")
+	}
+	input.prune()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatal("pending clipboard image was deleted")
+	}
+	paths = nil
+	input.prune()
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("unused clipboard image remains: %v", err)
+	}
+}
+
+func BenchmarkImageInputClipboardReuse(b *testing.B) {
+	var paths []string
+	input := newImageInput(&paths)
+	b.Cleanup(input.close)
+	var data bytes.Buffer
+	if err := png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 1024, 768))); err != nil {
+		b.Fatal(err)
+	}
+	input.clipboard = func(context.Context) ([]byte, error) { return data.Bytes(), nil }
+	ctx := context.Background()
+	if err := input.pasteClipboard(ctx); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for iteration := 0; iteration < b.N; iteration++ {
+		if err := input.pasteClipboard(ctx); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func TestImageInputClipboardRejectsUnsafeData(t *testing.T) {
+	var pngData, jpegData bytes.Buffer
+	picture := image.NewRGBA(image.Rect(0, 0, 12, 8))
+	if err := png.Encode(&pngData, picture); err != nil {
+		t.Fatal(err)
+	}
+	if err := jpeg.Encode(&jpegData, picture, nil); err != nil {
+		t.Fatal(err)
+	}
+	unsafeData := append([]byte(nil), pngData.Bytes()...)
+	binary.BigEndian.PutUint32(unsafeData[16:20], 65536)
+	binary.BigEndian.PutUint32(unsafeData[20:24], 65536)
+	binary.BigEndian.PutUint32(unsafeData[29:33], crc32.ChecksumIEEE(unsafeData[12:29]))
+	for _, raw := range [][]byte{jpegData.Bytes(), unsafeData} {
+		var paths []string
+		input := newImageInput(&paths)
+		input.clipboard = func(context.Context) ([]byte, error) { return raw, nil }
+		if err := input.pasteClipboard(context.Background()); err == nil || len(paths) != 0 || input.tempDir != "" {
+			t.Fatalf("unsafe clipboard accepted: err=%v attachments=%d", err, len(paths))
+		}
+	}
+	var paths []string
+	input := newImageInput(&paths)
+	t.Cleanup(input.close)
+	input.clipboard = func(context.Context) ([]byte, error) { return pngData.Bytes(), nil }
+	if err := input.pasteClipboard(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(paths[0]); err != nil {
+		t.Fatal(err)
+	}
+	if err := input.pasteClipboard(context.Background()); err == nil || len(paths) != 1 {
+		t.Fatalf("missing cached file accepted: err=%v attachments=%d", err, len(paths))
+	}
+}
+
+func TestImageInputCanceledClipboardDoesNotRead(t *testing.T) {
+	var paths []string
+	input := newImageInput(&paths)
+	called := false
+	input.clipboard = func(context.Context) ([]byte, error) { called = true; return nil, nil }
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := input.pasteClipboard(ctx); !errors.Is(err, context.Canceled) || called || len(paths) != 0 || input.tempDir != "" {
+		t.Fatalf("err=%v called=%v paths=%v temp=%q", err, called, paths, input.tempDir)
+	}
+}
+
+func TestImageInputSubmitReportsQueueRejection(t *testing.T) {
+	t.Cleanup(func() { repl.SetQueuedCount(0) })
+	dir := t.TempDir()
+	blocked := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(blocked, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := newREPLTaskRunner(nil)
+	runner.queueStore = session.NewQueueStore(filepath.Join(blocked, "queues"))
+	runner.queueSession = "previous"
+	runner.queueID = "test"
+	runner.queue = []api.Message{{Role: "user", Content: "earlier"}}
+	runner.paused = true
+	feedback, accepted := runner.submitWithFeedback(api.Message{Role: "user", Content: "image"})
+	if accepted || !strings.Contains(feedback, "未接收") || len(runner.queue) != 1 {
+		t.Fatalf("accepted=%v feedback=%q queue=%d", accepted, feedback, len(runner.queue))
+	}
+	runner.queueStore = nil
+	runner.persistenceError = ""
+	feedback, accepted = runner.submitWithFeedback(api.Message{Role: "user", Content: "image"})
+	if !accepted || !strings.Contains(feedback, "已排队") || len(runner.queue) != 2 {
+		t.Fatalf("accepted=%v feedback=%q queue=%d", accepted, feedback, len(runner.queue))
 	}
 }
 
@@ -357,6 +584,9 @@ func TestDecodeImageRejectsDeclaredBomb(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "图片过大") {
 		t.Fatalf("expected a size refusal, got: %v", err)
+	}
+	if _, _, _, err := buildImagePart("bomb.png", "bomb.png", raw, "image/png", "deepseek-flash"); err == nil {
+		t.Fatal("attachment bypassed the dimension refusal")
 	}
 }
 

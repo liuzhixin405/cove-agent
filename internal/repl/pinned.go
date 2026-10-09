@@ -39,6 +39,7 @@ var (
 	// it was set up for. All three are guarded by consoleMu.
 	pinned           bool
 	pinRows, pinCols int
+	pinPanelRows     int
 	// cprCh carries a cursor position report (row, column) from the key loop
 	// to queryCursorRow; cprMu lets one query at a time own the reply, so
 	// two callers racing for it cannot take the other's answer for a
@@ -112,7 +113,7 @@ const (
 	cprTimeout = 300 * time.Millisecond
 	// pinnedPlaceholder is shown on the empty pinned row: the hint that
 	// typing during a task is possible and what happens to the text.
-	pinnedPlaceholder = "任务运行中，可直接输入指引，回车后送入当前任务"
+	pinnedPlaceholder = "输入指引，回车送入当前任务"
 )
 
 // queuedCount is the number of tasks waiting behind the running one and
@@ -223,7 +224,11 @@ func promptVisibleWidth(p string) int {
 // lands on the region's last row. It returns the row the cursor ends up on.
 // Newlines are \r\n: the terminal is in raw mode.
 func pinSequence(pos cursorPos, h int, separator bool) (string, int) {
-	bottom := h - pinnedReserve
+	return pinSequenceReserved(pos, h, separator, pinnedReserve)
+}
+
+func pinSequenceReserved(pos cursorPos, h int, separator bool, reserve int) (string, int) {
+	bottom := h - reserve
 	var sb strings.Builder
 	row, col := pos.row, pos.col
 	if col < 1 {
@@ -254,7 +259,17 @@ func pinSequence(pos cursorPos, h int, separator bool) (string, int) {
 // resets the scroll margins without moving the stream's cursor; DECSTBM
 // homes the cursor, hence DECSC/DECRC around it.
 func unpinSequence(h int) string {
-	return fmt.Sprintf("\x1b7\x1b[%d;1H\x1b[2K\x1b[%d;1H\x1b[2K\x1b[r\x1b8", h-1, h)
+	return unpinSequenceReserved(h, pinnedReserve)
+}
+
+func unpinSequenceReserved(h, reserve int) string {
+	var output strings.Builder
+	output.WriteString("\x1b7")
+	for row := h - reserve + 1; row <= h; row++ {
+		fmt.Fprintf(&output, "\x1b[%d;1H\x1b[2K", row)
+	}
+	output.WriteString("\x1b[r\x1b8")
+	return output.String()
 }
 
 // pinnedInputLine renders the pinned row: prompt, the visible window of the
@@ -358,12 +373,19 @@ func pinAtCursor(separator bool) {
 		fallback()
 		return
 	}
-	seq, _ := pinSequence(pos, h, separator)
+	// pinned is set before the reserved rows are measured: the candidate
+	// block pads itself to a fixed height only while pinned, so measuring
+	// it unpinned stored the natural height, drawPinnedLocked then saw the
+	// padded one, unpinned and pinned again - an unpin/cursor-query/repin
+	// loop for as long as a candidate list was open.
+	pinned = true
+	pinPanelRows = lr.panelRows(h)
+	seq, _ := pinSequenceReserved(pos, h, separator, pinnedReserve+pinPanelRows)
 	termPrint(seq)
 	if separator {
 		streamMidLine = false
 	}
-	pinned, pinRows, pinCols = true, h, w
+	pinRows, pinCols = h, w
 	lr.drawPinnedLocked()
 }
 
@@ -408,8 +430,9 @@ func unpinLocked() {
 	if !pinned {
 		return
 	}
-	termPrint(unpinSequence(pinRows))
+	termPrint(unpinSequenceReserved(pinRows, pinnedReserve+pinPanelRows))
 	pinned = false
+	pinPanelRows = 0
 }
 
 // drawPinnedLocked draws the reserved rows — a dim rule on the row above the
@@ -428,10 +451,31 @@ func (lr *LineReader) drawPinnedLocked() {
 	}
 	var sb strings.Builder
 	sb.WriteString("\x1b7")
-	fmt.Fprintf(&sb, "\x1b[%d;1H\x1b[2K\x1b[2m%s\x1b[0m", h-1, strings.Repeat("─", w-1))
+	rows := lr.displayRowsLocked()
+	if len(rows) > pinPanelRows {
+		rows = rows[:pinPanelRows]
+	}
+	for index := 0; index < pinPanelRows; index++ {
+		line := ""
+		if index < len(rows) {
+			line = rows[index]
+		}
+		text, _ := truncateRunesByCells([]rune(line), w-1)
+		fmt.Fprintf(&sb, "\x1b[%d;1H\x1b[2K%s", h-pinnedReserve-pinPanelRows+1+index, string(text))
+	}
+	separator := strings.Repeat("─", w-1)
+	if text := lr.statusLineLocked(); text != "" {
+		status, _ := truncateRunesByCells([]rune(text), w-1)
+		separator = string(status)
+	}
+	fmt.Fprintf(&sb, "\x1b[%d;1H\x1b[2K\x1b[2m%s\x1b[0m", h-1, separator)
 	fmt.Fprintf(&sb, "\x1b[%d;1H\x1b[2K", h)
 	p := PromptRunning()
-	line := pinnedInputLine(p, promptVisibleWidth(p), lr.renderBuf, lr.renderCursor, w, pinnedPlaceholder)
+	placeholder := pinnedPlaceholder
+	if lr.panelSource != nil && !lr.panelOpen {
+		placeholder = "Alt+M 查看 Agent；" + placeholder
+	}
+	line := pinnedInputLine(p, promptVisibleWidth(p), lr.renderBuf, lr.renderCursor, w, placeholder)
 	sb.WriteString(line)
 	if note := pinnedNote(steerCount.Load(), queuedCount.Load()); note != "" {
 		nw := promptVisibleWidth(note)
@@ -452,15 +496,32 @@ func (lr *LineReader) drawPinnedLocked() {
 // where the cursor is; ReadLine's key loop relays the answer). It reports
 // whether it did so. Callers hold consoleMu.
 func (lr *LineReader) repinIfResizedLocked(w, h int) bool {
-	if !pinned || h == pinRows {
+	if !pinned || h == pinRows && lr.panelRows(h) == pinPanelRows {
+		pinCols = w
+		repinStreak = 0
+		return false
+	}
+	// A repin that leads straight to another repin is a measurement that
+	// disagrees with itself; after a few rounds keep the current reservation
+	// and draw into it (clipped) rather than flicker and spend cursor
+	// queries until pinning is disabled for the session.
+	if repinStreak >= maxRepinStreak {
 		pinCols = w
 		return false
 	}
-	termPrint(unpinSequence(pinRows))
+	repinStreak++
+	termPrint(unpinSequenceReserved(pinRows, pinnedReserve+pinPanelRows))
 	pinned = false
+	pinPanelRows = 0
 	pinRows, pinCols = 0, 0
 	if lr.reading && streamingActive {
 		startPin(pinIfStreaming)
 	}
 	return true
 }
+
+// repinStreak counts consecutive repins without a stable draw in between;
+// maxRepinStreak is where drawPinnedLocked stops repinning and clips instead.
+var repinStreak int
+
+const maxRepinStreak = 3

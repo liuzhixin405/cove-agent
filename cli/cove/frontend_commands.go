@@ -68,6 +68,7 @@ type frontend struct {
 	// in the REPL, synchronously in headless).
 	print   func(string)
 	enqueue func(api.Message)
+	choose  func(string, []repl.Choice) bool
 }
 
 func (fe *frontend) interactive() bool { return fe.tasks != nil }
@@ -174,7 +175,7 @@ var helpCategories = []string{catModel, catSession, catTasks, catSystem}
 // reg the registry fe dispatches through.
 func (fe *frontend) install(reg *command.Registry) *command.Registry {
 	fe.reg = reg
-	for _, commands := range [][]command.Command{fe.automationCommands(), fe.browserVerificationCommands(), fe.raceCommands(), fe.remoteCommands()} {
+	for _, commands := range [][]command.Command{fe.automationCommands(), fe.browserVerificationCommands(), fe.raceCommands(), fe.remoteCommands(), fe.agentMapCommands()} {
 		for _, entry := range commands {
 			reg.Register(entry)
 		}
@@ -196,6 +197,17 @@ func (fe *frontend) install(reg *command.Registry) *command.Registry {
 		}
 	}
 	session := func(ctx context.Context, in command.Input) bool {
+		all := strings.EqualFold(strings.TrimSpace(in.Raw), "/history all")
+		if (strings.TrimSpace(in.Raw) == "/history" || all) && fe.interactive() && !fe.running() && fe.choose != nil {
+			title := "当前项目会话"
+			if all {
+				title = "所有项目会话"
+			}
+			if fe.choose(title, historyPickerChoices(fe.eng, all)) {
+				fe.historyPickPending = false
+				return true
+			}
+		}
 		return handleSessionCommand(in.Raw, fe.eng, &fe.historyPickPending)
 	}
 
@@ -247,7 +259,7 @@ func (fe *frontend) install(reg *command.Registry) *command.Registry {
 			mutates: historyArgsResume,
 			base:    base("history"), run: session},
 		{name: "resume", desc: "恢复已保存的会话", category: catSession, mutates: withArgs, base: base("resume"), run: session},
-		{name: "export", desc: "导出当前会话为 Markdown", category: catSession, base: base("export"), run: session},
+		{name: "export", desc: "导出当前会话为 Markdown", category: catSession, mutates: always, base: base("export"), run: session},
 		{name: "continue", desc: "从中断处继续上一轮", category: catSession,
 			run: func(ctx context.Context, in command.Input) bool {
 				if fe.tasks != nil && fe.tasks.Snapshot().Paused {

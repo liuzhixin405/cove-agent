@@ -98,7 +98,7 @@ func todoWrittenSince(msgs []api.Message) bool {
 // one; "" when there is no other.
 func (e *Engine) fallbackModel(model string) string {
 	for _, m := range []string{e.config.ModelFast, e.config.Model} {
-		if m != "" && m != model {
+		if m != "" && m != model && (!e.hasImageMessages() || api.IsVisionCapableModel(m)) {
 			return m
 		}
 	}

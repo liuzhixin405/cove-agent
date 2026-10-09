@@ -406,10 +406,11 @@ func (e *Engine) invalidateAcceptance(command string) {
 		return
 	}
 	e.acceptance = report
-	invalidateBrowserReports(e.acceptance, "workspace may have changed; verify again")
+	changed := invalidateBrowserReports(e.acceptance, "workspace may have changed; verify again")
 	for index := range e.acceptance.Regression {
 		if e.acceptance.Regression[index].Status == "passed" {
 			e.acceptance.Regression[index].Status, e.acceptance.Regression[index].Reason = "unverified", "workspace may have changed; verify again"
+			changed = true
 		}
 	}
 	for index := range e.acceptance.Checks {
@@ -417,18 +418,28 @@ func (e *Engine) invalidateAcceptance(command string) {
 		if check.Status == "passed" && (command == "" || normalizeCommand(check.Command) == command) {
 			check.Status, check.Result = "unverified", nil
 			check.Reason = "校验后工作区可能已修改或出现新失败证据，需要重新校验"
+			changed = true
 		}
 	}
-	err = saveAcceptance(cloneAcceptance(e.acceptance))
+	// Every write/edit in a turn comes through here; without passing
+	// evidence to downgrade there is nothing to persist, and each save is a
+	// JSON encode plus fsync and rename under acceptanceMu.
+	if changed {
+		err = saveAcceptance(cloneAcceptance(e.acceptance))
+	}
 }
 
-func invalidateBrowserReports(report *AcceptanceReport, reason string) {
+// invalidateBrowserReports downgrades passing browser evidence and reports
+// whether any was.
+func invalidateBrowserReports(report *AcceptanceReport, reason string) (changed bool) {
 	for index := range report.Browser {
 		evidence := &report.Browser[index]
 		if evidence.Status == browser.StatusPass {
 			evidence.Status, evidence.Reason = browser.StatusUnverified, reason
+			changed = true
 		}
 	}
+	return changed
 }
 
 func (e *Engine) invalidateSavedAcceptance() {

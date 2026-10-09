@@ -13,6 +13,11 @@ type CLIRunner struct {
 	Executable      func() (string, error)
 	PrefixArgs      []string
 	ConfigDirectory string
+	// Profile is the profile the parent process runs with (its --profile);
+	// empty means the config file's active_profile. The candidate's private
+	// race-budget profile is built on top of it so provider, api_key and model
+	// keep applying to the child.
+	Profile string
 }
 
 func (r CLIRunner) Run(ctx context.Context, request Request) Execution {
@@ -52,8 +57,26 @@ func (r CLIRunner) Run(ctx context.Context, request Request) Execution {
 		}
 	}
 	settings["max_budget_usd"] = request.BudgetUSD
+	// Start from the profile the parent runs with: replacing the whole
+	// "profiles" map used to drop that profile's provider/api_key/model, so
+	// both candidates ran against the base provider (often with no key).
+	budgetProfile := map[string]any{}
+	baseName := r.Profile
+	if baseName == "" {
+		baseName, _ = settings["active_profile"].(string)
+	}
+	if profiles, ok := settings["profiles"].(map[string]any); ok && baseName != "" {
+		if base, ok := profiles[baseName].(map[string]any); ok {
+			for key, value := range base {
+				budgetProfile[key] = value
+			}
+		}
+	}
+	budgetProfile["max_budget_usd"] = request.BudgetUSD
+	budgetProfile["permission_mode"] = "auto"
+	budgetProfile["max_iterations"] = 12
 	settings["active_profile"] = "race-budget"
-	settings["profiles"] = map[string]any{"race-budget": map[string]any{"max_budget_usd": request.BudgetUSD, "permission_mode": "auto", "max_iterations": 12}}
+	settings["profiles"] = map[string]any{"race-budget": budgetProfile}
 	delete(settings, "mcp_servers")
 	delete(settings, "memory_embedding")
 	data, err := json.Marshal(settings)

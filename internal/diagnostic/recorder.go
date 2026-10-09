@@ -107,7 +107,9 @@ func record(ev RuntimeEvent) {
 			_ = os.Rename(p, p+".1")
 		}
 		if line, err := json.Marshal(ev); err == nil {
-			if f, ferr := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); ferr == nil {
+			// Tool failure output and provider error bodies land here:
+			// private, like trace.jsonl and the input history.
+			if f, ferr := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); ferr == nil {
 				_, _ = f.Write(append(line, '\n'))
 				_ = f.Close()
 			}

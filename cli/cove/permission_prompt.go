@@ -128,7 +128,11 @@ func askToolPermissionExternal(eng permissionRuleAdder, toolName string, input m
 		}
 	}
 
-	answer, ok := repl.AskWith(repl.AskSpec{Text: text, Accepts: permissionAnswerAccepted, Hint: permissionAnswerHint,
+	preview := []string{"审批: " + toolName, "操作: " + permissionPromptDescription(input, reason), options}
+	if canRemember {
+		preview = append(preview, "记住范围: "+what)
+	}
+	answer, ok := repl.AskWith(repl.AskSpec{Text: text, Title: "等待授权", Preview: preview, Accepts: permissionAnswerAccepted, Hint: permissionAnswerHint,
 		Timeout: permissionPromptTimeout, Keys: keys, External: external})
 	if !ok {
 		termui.PrintAbove(termui.PromptContentIndent + termui.Styled(termui.Dim, "授权超时，已拒绝 "+toolName) + "\n")

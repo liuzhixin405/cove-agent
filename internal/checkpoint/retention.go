@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"context"
+	"github.com/liuzhixin405/cove-agent/internal/proctree"
 	"os"
 	"os/exec"
 	"strings"
@@ -46,7 +47,12 @@ var (
 func defaultRunGC(storeDir string) {
 	ctx, cancel := context.WithTimeout(context.Background(), gcTimeout)
 	defer cancel()
-	out, err := gcCommand(ctx, storeDir).CombinedOutput()
+	cmd := gcCommand(ctx, storeDir)
+	// git gc runs repack/pack-objects as children that hold the pipes;
+	// killing only gc left CombinedOutput waiting for them, with
+	// m.maintaining stuck at true (no more trims for this Manager).
+	proctree.Configure(ctx, cmd, 5*time.Second)
+	out, err := cmd.CombinedOutput()
 	switch {
 	case ctx.Err() != nil:
 		log.Warnf("[checkpoint] git gc killed after %v", gcTimeout)
@@ -109,13 +115,16 @@ func (m *Manager) scheduleMaintenanceLocked() {
 		return
 	}
 	m.maintaining = true
-	m.maintWG.Add(1)
-	go m.maintain()
+	m.maintDone = make(chan struct{})
+	go m.maintain(m.maintDone)
 }
 
-// maintain runs queued trims and gcs under m.mu until none is left.
-func (m *Manager) maintain() {
-	defer m.maintWG.Done()
+// maintain runs queued trims and gcs under m.mu until none is left, then
+// closes done. (A WaitGroup here let a Create's Add race a WaitMaintenance
+// that was just waking up: "WaitGroup is reused before previous Wait has
+// returned", once regression_verify started sharing the engine's Manager.)
+func (m *Manager) maintain(done chan struct{}) {
+	defer close(done)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for m.pendingTrim || m.pendingGC {
@@ -139,4 +148,11 @@ func (m *Manager) maintain() {
 }
 
 // WaitMaintenance waits for background trimming and gc (tests, shutdown).
-func (m *Manager) WaitMaintenance() { m.maintWG.Wait() }
+func (m *Manager) WaitMaintenance() {
+	m.mu.Lock()
+	done, maintaining := m.maintDone, m.maintaining
+	m.mu.Unlock()
+	if maintaining && done != nil {
+		<-done
+	}
+}

@@ -5,21 +5,85 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
 	"github.com/liuzhixin405/cove-agent/internal/checkpoint"
 	"github.com/liuzhixin405/cove-agent/internal/config"
+	"github.com/liuzhixin405/cove-agent/internal/delegate"
 	"github.com/liuzhixin405/cove-agent/internal/memory"
+	"github.com/liuzhixin405/cove-agent/internal/repl"
 	"github.com/liuzhixin405/cove-agent/internal/tool"
 )
 
 func TestParallelWorkflowCommandsUseRealFrontendRegistry(t *testing.T) {
 	registry := (&frontend{}).install(registerAllCommands())
-	for _, name := range []string{"automations", "inbox", "browser-verify", "race", "remote"} {
+	for _, name := range []string{"automations", "inbox", "browser-verify", "race", "remote", "agents"} {
 		entry, exists := registry.Find(name)
 		if !exists || entry.Help() == "" {
 			t.Fatalf("missing real frontend command: %s", name)
 		}
+	}
+}
+
+func TestFrontendHistoryPickerKeepsHeadlessTextPath(t *testing.T) {
+	history := setupProjectHistory(t)
+	called := false
+	fe := &frontend{eng: history.eng, tasks: &replTaskRunner{}, print: func(string) {}}
+	fe.choose = func(title string, choices []repl.Choice) bool {
+		called = true
+		if title != "当前项目会话" || len(choices) != 1 || choices[0].Value != "/resume sess-a" {
+			t.Errorf("incorrect history picker: %q %+v", title, choices)
+		}
+		return true
+	}
+	fe.install(registerAllCommands())
+	if !fe.dispatch("/history") || !called || fe.historyPickPending {
+		t.Fatal("interactive history did not open the picker")
+	}
+	called = false
+	fe.tasks = nil
+	if !fe.dispatch("/history") || called || !strings.Contains(history.out.String(), titleA) || !fe.historyPickPending {
+		t.Fatal("headless history lost its text-and-number path")
+	}
+}
+
+func TestAgentMapShowsSelectedActivityAndFixedDuration(t *testing.T) {
+	start := time.Unix(100, 0)
+	entries := []delegate.Activity{
+		{Event: delegate.Event{TaskID: "one", Stage: "tool", Model: "m", Task: "find parser"}, Started: start, LastStep: "read parser.go"},
+		{Event: delegate.Event{TaskID: "two", Stage: "model"}, Started: start},
+		{Event: delegate.Event{TaskID: "three", Stage: "waiting"}, Started: start},
+		{Event: delegate.Event{TaskID: "four", Stage: "finished", Success: true, Model: "m", Task: "done\x1b[2J\ntext"}, Started: start, Ended: start.Add(2 * time.Second)},
+	}
+	lines, count := agentMapLines(entries, 3, true, start.Add(20*time.Second))
+	if count != 4 || len(lines) != 8 || !strings.Contains(lines[0], "活跃 3") || !strings.Contains(lines[1], "执行中") ||
+		!strings.Contains(lines[2], "> |- four") || !strings.Contains(lines[5], "[4/4]") || !strings.Contains(lines[5], "2s") {
+		t.Fatalf("incorrect selected activity: %v", lines)
+	}
+	for _, line := range lines {
+		if strings.ContainsAny(line, "\x1b\n\r") {
+			t.Fatal("agent map retained terminal control characters")
+		}
+	}
+	if agentActivityLabel(entries[2]) != "等待授权或输入" {
+		t.Fatal("waiting agent did not have a distinct status")
+	}
+	empty, count := agentMapLines(nil, 0, false, start)
+	if count != 0 || len(empty) != 8 || !strings.Contains(empty[2], "暂无") {
+		t.Fatal("empty map has an unstable layout")
+	}
+}
+
+func TestAgentMapCommandIsReadOnlyAndDispatches(t *testing.T) {
+	output := captureOut(t)
+	fe, notices := headlessFrontend(t)
+	if commandMutatesEngine("/agents") || !fe.dispatch("/agents") {
+		t.Fatal("agent map is not a registered read-only command")
+	}
+	text := strings.Join(*notices, "\n") + output.String()
+	if !strings.Contains(text, "Agent Map") || !strings.Contains(text, "暂无子 agent") {
+		t.Fatalf("agent map did not render its snapshot: %q", text)
 	}
 }
 

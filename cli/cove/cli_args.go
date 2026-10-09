@@ -180,6 +180,9 @@ func parseCLIArgs(args []string) (cliOptions, error) {
 		}
 	}
 
+	if len(opts.attachments) > 0 && !opts.printMode {
+		return opts, fmt.Errorf("--image/--file 只能与 -p 一起使用（交互模式请在输入中用 @路径 或 /attach 添加附件）")
+	}
 	if opts.maxTurnsSet && !opts.printMode {
 		// The interactive shell asks at the cap instead (config
 		// max_iterations sets its window).

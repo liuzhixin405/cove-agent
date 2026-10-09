@@ -20,6 +20,9 @@ var permAccepts func(string) bool
 
 var permHint string
 
+var permTitle string
+var permPreview []string
+
 // SetPromptInput registers the channel a waiting prompt reads its answer
 // from, with the test for what counts as an answer and the hint to show for
 // a line that does not. Only answers are relayed: the person may be typing
@@ -31,6 +34,7 @@ func SetPromptInput(ch chan<- string, accepts func(string) bool, hint string) {
 	permInputCh = ch
 	permAccepts = accepts
 	permHint = hint
+	permTitle, permPreview = "", nil
 	permKeys, permOptions, permOptionIdx = "", nil, -1
 }
 
@@ -84,6 +88,7 @@ func TakePermInputCh() chan<- string {
 func clearPromptLocked() {
 	permInputCh, permAccepts, permHint = nil, nil, ""
 	permKeys, permOptions, permOptionIdx = "", nil, -1
+	permTitle, permPreview = "", nil
 }
 
 // permKeys are the keys that answer the waiting prompt on their own, pressed
@@ -141,6 +146,8 @@ func (lr *LineReader) cycleOption(buf *[]rune, cursor *int, dir int) bool {
 // AskSpec is a prompt for AskWith.
 type AskSpec struct {
 	Text    string
+	Title   string
+	Preview []string
 	Accepts func(string) bool // nil: any non-empty line
 	Hint    string
 	Timeout time.Duration
@@ -165,6 +172,8 @@ func AskWith(s AskSpec) (answer string, ok bool) {
 	SetPromptInput(ch, s.Accepts, s.Hint)
 	consoleMu.Lock()
 	permKeys, permOptions, permOptionIdx = s.Keys, s.Options, -1
+	permTitle = s.Title
+	permPreview = append([]string(nil), s.Preview[:min(len(s.Preview), panelMaxRows)]...)
 	consoleMu.Unlock()
 	var external <-chan ExternalAnswer
 	if s.External != nil {
@@ -196,8 +205,8 @@ func AskWith(s AskSpec) (answer string, ok bool) {
 		}
 	case <-timer.C:
 	}
-	EndPromptInput()
 	ClearPermInputCh()
+	EndPromptInput()
 	return answer, ok
 }
 

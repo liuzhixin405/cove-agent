@@ -20,6 +20,7 @@ type CostTrackerView interface {
 
 type EngineView interface {
 	Messages() []api.Message
+	MessageCount() int
 	LoadMessages([]api.Message)
 	SetSystemOverride(prompt string)
 	SystemPrompt() string

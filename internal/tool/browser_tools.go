@@ -1,12 +1,14 @@
 package tool
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/liuzhixin405/cove-agent/internal/browser"
@@ -26,7 +28,7 @@ func NewBrowserTool() Tool {
 	return &BrowserTool{
 		baseTool: baseTool{def: Def{
 			Name:        "browser",
-			Description: "Drive a headless browser. action=navigate renders a page (executing JavaScript) and returns text/markdown/html; action=screenshot saves a PNG of the page. Falls back to HTTP fetch when headless Chrome is unavailable.",
+			Description: "Drive a headless browser. action=navigate renders a page (executing JavaScript) and returns text/markdown/html; action=screenshot saves a PNG and returns native image content within the preview limits. Falls back to HTTP fetch when headless Chrome is unavailable.",
 			InputSchema: json.RawMessage(`{
 				"type":"object",
 				"properties":{
@@ -95,7 +97,11 @@ func (t *BrowserTool) Call(ctx context.Context, input Input, tctx Context) (Resu
 		if !t.br.ChromeAvailable() {
 			mode = "http"
 		}
-		header := fmt.Sprintf("URL: %s\nStatus: %d\nFormat: %s\nMode: %s\n\n", res.URL, res.StatusCode, res.Format, mode)
+		status := "unknown"
+		if res.StatusCode > 0 {
+			status = strconv.Itoa(res.StatusCode)
+		}
+		header := fmt.Sprintf("URL: %s\nStatus: %s\nFormat: %s\nMode: %s\n\n", res.URL, status, res.Format, mode)
 		return Result{Data: header + res.Content}, nil
 
 	case "screenshot", "capture":
@@ -113,11 +119,21 @@ func (t *BrowserTool) Call(ctx context.Context, input Input, tctx Context) (Resu
 		if err := saveScreenshot(out, png); err != nil {
 			return Result{Data: "Error writing screenshot: " + err.Error(), IsError: true}, nil
 		}
-		return Result{Data: fmt.Sprintf("Saved screenshot (%d bytes) to %s", len(png), out)}, nil
+		return savedScreenshotResult(out, png), nil
 
 	default:
 		return Result{Data: "Error: unknown action " + action + " (use navigate or screenshot)", IsError: true}, nil
 	}
+}
+
+func savedScreenshotResult(out string, png []byte) Result {
+	summary := fmt.Sprintf("Saved screenshot (%d bytes) to %s", len(png), out)
+	result := readImageResult(out, bytes.NewReader(png))
+	if result.IsError {
+		return Result{Data: summary + "\nImage preview unavailable: " + strings.TrimPrefix(result.Data, "Error: ")}
+	}
+	result.Data = summary
+	return result
 }
 
 func (t *BrowserTool) Validate(input Input) string {

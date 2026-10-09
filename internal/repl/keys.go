@@ -47,8 +47,26 @@ func (lr *LineReader) handleEscape(buf *[]rune, cursor *int) error {
 	case 'f', 'F':
 		*cursor = wordRight(*buf, *cursor)
 		lr.redraw(*buf, *cursor)
+	case 'v', 'V':
+		if lr.imageClipboard != nil {
+			lr.imageClipboard()
+			lr.redraw(*buf, *cursor)
+		} else {
+			_ = lr.rawReader.UnreadRune()
+		}
+	case 'm', 'M':
+		if lr.togglePanel() {
+			lr.redraw(*buf, *cursor)
+		} else {
+			_ = lr.rawReader.UnreadRune()
+		}
 	case 127, 8:
 		// Alt+Backspace deletes the word before the cursor.
+		if len(*buf) == 0 && lr.imageRemove != nil {
+			lr.imageRemove()
+			lr.redraw(*buf, *cursor)
+			return nil
+		}
 		*buf, *cursor = deleteWordBack(*buf, *cursor)
 		lr.refresh(*buf, *cursor)
 	default:
@@ -128,10 +146,22 @@ func (lr *LineReader) applyKey(buf *[]rune, cursor *int, params string, final ru
 		// answer to queryCursorPos; SS3 R (F3) has no parameters.
 		deliverCursorReport(params)
 	case 'A':
+		if lr.moveChoice(-1) {
+			return
+		}
+		if lr.panelHasFocus() && lr.movePanel(-1) {
+			return
+		}
 		if !lr.cycleOption(buf, cursor, -1) {
 			lr.historyUp(buf, cursor)
 		}
 	case 'B':
+		if lr.moveChoice(1) {
+			return
+		}
+		if lr.panelHasFocus() && lr.movePanel(1) {
+			return
+		}
 		if !lr.cycleOption(buf, cursor, 1) {
 			lr.historyDown(buf, cursor)
 		}
@@ -140,7 +170,7 @@ func (lr *LineReader) applyKey(buf *[]rune, cursor *int, params string, final ru
 			*cursor = wordRight(*buf, *cursor)
 			lr.redraw(*buf, *cursor)
 		} else if *cursor < len(*buf) {
-			*cursor = *cursor + 1
+			*cursor = clusterRight(*buf, *cursor)
 			lr.redraw(*buf, *cursor)
 		}
 	case 'D':
@@ -148,12 +178,19 @@ func (lr *LineReader) applyKey(buf *[]rune, cursor *int, params string, final ru
 			*cursor = wordLeft(*buf, *cursor)
 			lr.redraw(*buf, *cursor)
 		} else if *cursor > 0 {
-			*cursor = *cursor - 1
+			*cursor = clusterLeft(*buf, *cursor)
 			lr.redraw(*buf, *cursor)
 		}
 	case 'H':
 		*cursor = 0
 		lr.redraw(*buf, *cursor)
+	case 'Z':
+		// Like Tab: only an empty input hands focus to the Agent panel (the
+		// help and the design doc say "空输入 Tab 或 Shift+Tab"); with a
+		// draft, Shift+Tab still brings focus back from the panel.
+		if (len(*buf) == 0 || lr.panelHasFocus()) && lr.togglePanelFocus() {
+			lr.redraw(*buf, *cursor)
+		}
 	case 'F':
 		*cursor = len(*buf)
 		lr.redraw(*buf, *cursor)
@@ -167,8 +204,8 @@ func (lr *LineReader) applyKey(buf *[]rune, cursor *int, params string, final ru
 			lr.redraw(*buf, *cursor)
 		case 3:
 			if *cursor < len(*buf) {
-				copy((*buf)[*cursor:], (*buf)[*cursor+1:])
-				*buf = (*buf)[:len(*buf)-1]
+				end := clusterRight(*buf, *cursor)
+				*buf = append((*buf)[:*cursor], (*buf)[end:]...)
 				lr.redraw(*buf, *cursor)
 			}
 		}
@@ -204,6 +241,9 @@ func (lr *LineReader) readBracketedPaste(buf *[]rune, cursor *int) error {
 				return err
 			}
 			if final == '~' && csiKey(params) == 201 {
+				if lr.imagePaste != nil && lr.imagePaste(string(pasted)) {
+					pasted = nil
+				}
 				return nil
 			}
 			// A cursor report can land in the middle of a paste; it was
@@ -244,4 +284,33 @@ func insertRunes(buf []rune, cursor int, rs []rune) ([]rune, int) {
 	copy(buf[cursor+len(rs):], buf[cursor:len(buf)-len(rs)])
 	copy(buf[cursor:], rs)
 	return buf, cursor + len(rs)
+}
+
+// clusterLeft and clusterRight step over a whole grapheme cluster (an emoji
+// with its VS16, ZWJ sequence or skin tone, a letter with combining marks).
+// Moving and deleting by rune left the cursor inside a cluster: the terminal
+// placed it a cell off, the next character typed glued itself to a stray
+// U+FE0F, and Backspace on ⚠️ removed only the invisible selector.
+func clusterLeft(buf []rune, cursor int) int {
+	if cursor <= 0 {
+		return 0
+	}
+	_, cont := cellWidths(buf)
+	i := cursor - 1
+	for i > 0 && cont[i] {
+		i--
+	}
+	return i
+}
+
+func clusterRight(buf []rune, cursor int) int {
+	if cursor >= len(buf) {
+		return len(buf)
+	}
+	_, cont := cellWidths(buf)
+	i := cursor + 1
+	for i < len(buf) && cont[i] {
+		i++
+	}
+	return i
 }

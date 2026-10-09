@@ -112,3 +112,20 @@ func TestBreakStaleLeavesUnreadableLock(t *testing.T) {
 		t.Fatalf("moved: %v", m)
 	}
 }
+
+// Acquire with no wait (the automation job lock) used to break a stale lock
+// and then report a timeout in the same call: the first run/tick after a
+// worker crash always failed and only the next one got the lock.
+func TestAcquireTakesTheLockItJustBrokeWithoutWaiting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "job.lock")
+	writeLock(t, path, "crashed", time.Now().Add(-3*time.Hour))
+	release, err := Acquire(path, 0, 2*time.Hour)
+	if err != nil {
+		t.Fatalf("Acquire after a stale lock: %v", err)
+	}
+	defer release()
+	data, err := os.ReadFile(path)
+	if err != nil || strings.Contains(string(data), "token crashed\n") {
+		t.Fatalf("lock not taken over: %q %v", data, err)
+	}
+}

@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+
+	"github.com/liuzhixin405/cove-agent/internal/api"
 )
 
 type Input = map[string]any
 
 type Result struct {
-	Data        string `json:"data"`
-	IsError     bool   `json:"is_error"`
-	ShouldRetry bool   `json:"should_retry"`
+	Data        string            `json:"data"`
+	IsError     bool              `json:"is_error"`
+	ShouldRetry bool              `json:"should_retry"`
+	Parts       []api.MessagePart `json:"parts,omitempty"`
 }
 
 type PermissionDecision struct {
@@ -56,6 +59,7 @@ type Runtime struct {
 	mu            sync.Mutex
 	PlanMode      bool
 	WorktreeDir   string
+	WorktreeMain  string
 	Tasks         map[string]*TaskRecord
 	Teams         map[string]*TeamRecord
 	Messages      []MessageRecord
@@ -96,6 +100,21 @@ func (r *Runtime) IsPlanMode() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.PlanMode
+}
+
+// SetWorktreeMain records the project directory the active worktree was
+// entered from, so exit_worktree can run git there (git refuses to remove
+// the worktree it is run from).
+func (r *Runtime) SetWorktreeMain(dir string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.WorktreeMain = dir
+}
+
+func (r *Runtime) GetWorktreeMain() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.WorktreeMain
 }
 
 // SetWorktreeDir records the active worktree path ("" when none).

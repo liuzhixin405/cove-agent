@@ -4,16 +4,25 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
+	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/liuzhixin405/cove-agent/internal/api"
 	"github.com/liuzhixin405/cove-agent/internal/textutil"
+	_ "golang.org/x/image/webp"
 )
 
 type ReadTool struct{ baseTool }
@@ -21,7 +30,7 @@ type ReadTool struct{ baseTool }
 func NewReadTool() Tool {
 	return &ReadTool{baseTool{def: Def{
 		Name: "read", Aliases: []string{"Read"},
-		Description: "Read a file or directory from the filesystem. Returns contents with line numbers for files, or directory listing.",
+		Description: "Read a file or directory from the filesystem. Returns text with line numbers, native image content for PNG/JPEG/GIF/WebP (up to 5 MiB and 4096 pixels per side), or a directory listing.",
 		InputSchema: json.RawMessage(`{
 			"type":"object",
 			"properties":{
@@ -128,6 +137,13 @@ func (t *ReadTool) readFileStream(path string, offset, limit int, files *FileTra
 		return nil
 	}
 	sample, _ := br.Peek(8192)
+	switch http.DetectContentType(sample) {
+	case "image/png", "image/jpeg", "image/gif", "image/webp":
+		if _, err := f.Seek(0, io.SeekStart); err != nil {
+			return Result{Data: "Error: " + err.Error(), IsError: true}, nil
+		}
+		return readImageResult(path, f), nil
+	}
 	kind := sniffText(sample)
 
 	totalLines := 0
@@ -214,6 +230,29 @@ func (t *ReadTool) readFileStream(path string, offset, limit int, files *FileTra
 	}
 
 	return Result{Data: strings.TrimRight(result, "\n")}, nil
+}
+
+func readImageResult(path string, reader io.Reader) Result {
+	const maxBytes = 5 * 1024 * 1024
+	const maxDim = 4096
+	raw, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return Result{Data: "Error: " + err.Error(), IsError: true}
+	}
+	if len(raw) > maxBytes {
+		return Result{Data: "Error: image exceeds the 5 MiB read limit; resize it or attach it with /attach", IsError: true}
+	}
+	configuration, format, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return Result{Data: "Error: invalid binary image: " + err.Error(), IsError: true}
+	}
+	if configuration.Width <= 0 || configuration.Height <= 0 || configuration.Width > maxDim || configuration.Height > maxDim {
+		return Result{Data: fmt.Sprintf("Error: image dimensions %dx%d exceed the 4096-pixel read limit; resize it or attach it with /attach", configuration.Width, configuration.Height), IsError: true}
+	}
+	return Result{
+		Data:  fmt.Sprintf("Image: %s (%s, %dx%d)", path, format, configuration.Width, configuration.Height),
+		Parts: []api.MessagePart{{Type: "image", MimeType: "image/" + format, Data: base64.StdEncoding.EncodeToString(raw), FileName: filepath.Base(path)}},
+	}
 }
 
 // errBinaryContent is a NUL byte found past the sniffed start of a file.

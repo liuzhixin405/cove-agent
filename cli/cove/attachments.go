@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"image"
 	"image/color"
-	"image/gif"
+	_ "image/gif"
 	"image/jpeg"
-	"image/png"
+	_ "image/png"
 	"mime"
 	"net/http"
 	"os"
@@ -20,15 +20,17 @@ import (
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
 	"github.com/liuzhixin405/cove-agent/internal/textutil"
+	_ "golang.org/x/image/webp"
 )
 
 // Image processing limits (align with upstream API best practices)
 const (
-	maxImageDim    = 1568             // max pixels on longest side
-	maxImageBytes  = 5 * 1024 * 1024  // 5MB target after compression
-	maxRawImage    = 32 * 1024 * 1024 // 32MB raw file read limit
-	jpegQuality    = 85
-	minJPEGQuality = 20
+	maxImageDim      = 1568 // max pixels on longest side
+	maxFlashImageDim = 4096
+	maxImageBytes    = 5 * 1024 * 1024  // 5MB target after compression
+	maxRawImage      = 32 * 1024 * 1024 // 32MB raw file read limit
+	jpegQuality      = 85
+	minJPEGQuality   = 20
 	// maxDecodePixels caps the decoded pixel count. The 32MB raw limit says
 	// nothing about the decoded size: a highly compressible PNG a few hundred
 	// KB on disk can declare 60000x60000, and image decoders allocate
@@ -350,7 +352,13 @@ func buildAttachmentPart(cwd, rawPath, model string) (api.MessagePart, string, s
 	mimeType := detectMimeType(absPath, data)
 
 	if strings.HasPrefix(mimeType, "image/") {
-		return buildImagePart(name, absPath, data, mimeType, model)
+		// Only a decodable raster image is a vision part. SVG, ICO, BMP,
+		// TIFF and AVIF all carry an image/* MIME type by extension and used
+		// to be refused as "unsupported image format", dropping the whole
+		// message; they are sent as text (SVG) or binary attachments instead.
+		if _, _, err := validatedImageConfig(data); err == nil {
+			return buildImagePart(name, absPath, data, mimeType, model)
+		}
 	}
 
 	return buildTextPart(name, absPath, data, mimeType)
@@ -361,26 +369,16 @@ func buildImagePart(name, absPath string, raw []byte, mimeType, model string) (a
 	// Check if model supports vision
 	warning := ""
 	if model != "" && !api.IsVisionCapableModel(model) {
-		warning = fmt.Sprintf("⚠ 当前模型 %s %s，已自动降级为文本提示。建议切换到视觉模型 (如 deepseek-v4-flash / gpt-4o / claude-sonnet-4)", model, nonVisionImageWarning)
-		return api.MessagePart{
-			Type:     "text",
-			MimeType: "text/plain",
-			FileName: name,
-			Text:     fmt.Sprintf("[已挂载图片 %s，但当前模型 %s 可能不支持视觉输入，图片内容未发送。请切换视觉模型后重试。]", name, model),
-		}, absPath, warning, nil
+		warning = fmt.Sprintf("⚠ 当前模型 %s %s，将尝试切换视觉模型；无法切换时不会发送图片。建议使用 deepseek-flash / gpt-4o / claude-sonnet-4", model, nonVisionImageWarning)
 	}
 
-	// Process image: resize + compress
-	processed, finalMime, err := processImage(raw)
+	originalDim := maxImageDim
+	if strings.Contains(strings.ToLower(model), "deepseek") && api.IsVisionCapableModel(model) {
+		originalDim = maxFlashImageDim
+	}
+	processed, finalMime, err := processImageWithLimit(raw, originalDim)
 	if err != nil {
-		// If processing fails, fall back to raw data (but still enforce size limit)
-		if len(raw) > maxImageBytes {
-			return api.MessagePart{}, "", "", fmt.Errorf(
-				"图片过大且无法压缩 (%.1fMB > 5MB): %s\n  提示: 请手动缩小图片后再挂载，或用截图工具截取更小的区域",
-				float64(len(raw))/(1024*1024), name)
-		}
-		processed = raw
-		finalMime = mimeType
+		return api.MessagePart{}, "", "", fmt.Errorf("处理图片失败 %s: %w", name, err)
 	}
 
 	// Final size check
@@ -440,11 +438,20 @@ func buildTextPart(name, absPath string, data []byte, mimeType string) (api.Mess
 // Image processing
 // ---------------------------------------------------------------------------
 
-// processImage decodes, resizes, and re-encodes an image for API submission.
-// Returns (processed bytes, mime type, error).
-// Falls back to original data if decoding fails.
 func processImage(raw []byte) ([]byte, string, error) {
-	img, err := decodeImage(raw)
+	return processImageWithLimit(raw, maxImageDim)
+}
+
+func processImageWithLimit(raw []byte, originalDim int) ([]byte, string, error) {
+	cfg, format, err := validatedImageConfig(raw)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(raw) <= maxImageBytes && cfg.Width <= originalDim && cfg.Height <= originalDim {
+		mimeType := "image/" + format
+		return raw, mimeType, nil
+	}
+	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
 		return nil, "", fmt.Errorf("decode image: %w", err)
 	}
@@ -456,8 +463,10 @@ func processImage(raw []byte) ([]byte, string, error) {
 	if h > w {
 		longest = h
 	}
-	if longest > maxImageDim {
-		img = resizeImage(img, w, h, maxImageDim)
+	if longest > originalDim {
+		// originalDim is the model's limit (4096 for Flash): a 3000px image
+		// over the byte budget only needs re-encoding, not a 1568px resize.
+		img = resizeImage(img, w, h, originalDim)
 	}
 
 	// Encode as JPEG with quality compression
@@ -476,32 +485,32 @@ func processImage(raw []byte) ([]byte, string, error) {
 // drive the decoder's up-front width*height allocation and take the process
 // down with it, long before processImage's maxImageDim resize ever ran.
 func decodeImage(raw []byte) (image.Image, error) {
+	if _, _, err := validatedImageConfig(raw); err != nil {
+		return nil, err
+	}
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	return img, err
+}
+
+func validatedImageConfig(raw []byte) (image.Config, string, error) {
 	cfg, format, err := image.DecodeConfig(bytes.NewReader(raw))
 	if err != nil {
-		return nil, fmt.Errorf("unsupported image format (支持: PNG, JPEG, GIF)")
+		return image.Config{}, "", fmt.Errorf("unsupported image format (支持: PNG, JPEG, GIF, WebP): %w", err)
 	}
 	switch format {
-	case "png", "jpeg", "gif":
+	case "png", "jpeg", "gif", "webp":
 	default:
-		return nil, fmt.Errorf("unsupported image format %q (支持: PNG, JPEG, GIF)", format)
+		return image.Config{}, "", fmt.Errorf("unsupported image format %q (支持: PNG, JPEG, GIF, WebP)", format)
 	}
 	if cfg.Width <= 0 || cfg.Height <= 0 {
-		return nil, fmt.Errorf("image reports invalid dimensions %dx%d", cfg.Width, cfg.Height)
+		return image.Config{}, "", fmt.Errorf("image reports invalid dimensions %dx%d", cfg.Width, cfg.Height)
 	}
 	if int64(cfg.Width)*int64(cfg.Height) > maxDecodePixels {
-		return nil, fmt.Errorf(
+		return image.Config{}, "", fmt.Errorf(
 			"图片过大: %dx%d (%d 像素) 超过 %d 像素上限，请先缩小尺寸",
 			cfg.Width, cfg.Height, int64(cfg.Width)*int64(cfg.Height), int64(maxDecodePixels))
 	}
-
-	switch format {
-	case "png":
-		return png.Decode(bytes.NewReader(raw))
-	case "jpeg":
-		return jpeg.Decode(bytes.NewReader(raw))
-	default:
-		return gif.Decode(bytes.NewReader(raw))
-	}
+	return cfg, format, nil
 }
 
 // resizeImage scales an image down so its longest side <= maxDim,

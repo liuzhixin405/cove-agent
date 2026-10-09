@@ -45,7 +45,10 @@ func (e *Engine) setRequestOverhead(systemPrompt string, tools []api.ToolDef) {
 // prompt size plus an estimate of the messages appended since, or — with no
 // usable report — an estimate of everything a request sends.
 func (e *Engine) updateTokenCount() {
-	defer func() { e.contextTokens.Store(int64(e.totalTokens)) }()
+	defer func() {
+		e.contextTokens.Store(int64(e.totalTokens))
+		e.messageCount.Store(int64(len(e.messages)))
+	}()
 	if e.lastInputTokens > 0 && e.usageMsgCount <= len(e.messages) {
 		e.totalTokens = e.lastInputTokens + countTokens(e.messages[e.usageMsgCount:])
 		return
@@ -80,6 +83,15 @@ func countTokens(msgs []api.Message) int {
 		n += token.Estimate(m.ReasoningContent)
 		for _, p := range m.Parts {
 			n += token.Estimate(p.Text)
+			switch p.Type {
+			case "image":
+				// Anthropic bills about (w*h)/750 tokens, 1600 at the
+				// size cove sends; counting 0 let twenty screenshots hide
+				// 30k tokens from the compaction trigger.
+				n += imagePartTokens
+			case "file":
+				n += token.Estimate(p.Data)
+			}
 		}
 		for _, tb := range m.ThinkingBlocks {
 			n += token.Estimate(string(tb))
@@ -113,3 +125,7 @@ func estimateToolDefs(tools []api.ToolDef) int {
 
 // compactionSafetyMargin is the room kept free beyond the reply's MaxTokens.
 var compactionSafetyMargin = api.CompactionSafetyMarginFor
+
+// imagePartTokens is the estimate for one image part (the provider's charge
+// for an image at cove's maximum dimensions).
+const imagePartTokens = 1600

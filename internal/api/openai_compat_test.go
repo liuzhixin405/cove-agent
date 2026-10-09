@@ -257,6 +257,90 @@ func TestOpenAICompatConvertMessagesSupportsImageParts(t *testing.T) {
 	}
 }
 
+func TestOpenAICompatToolImagesFollowToolResults(t *testing.T) {
+	provider := &openAICompatProvider{}
+	messages := provider.convertMessages([]Message{
+		{Role: "user", Content: "inspect screenshots"},
+		{Role: "assistant", ToolCalls: []ToolCall{{ID: "read-1", Name: "read", Input: map[string]any{}}, {ID: "read-2", Name: "read", Input: map[string]any{}}}},
+		{Role: "tool", ToolCallID: "read-1", Content: "Image: first.png"},
+		{Role: "tool", ToolCallID: "read-2", Content: "Image: second.png"},
+		{Role: "user", Synthetic: true, Content: "Tool image results", Parts: []MessagePart{{Type: "image", MimeType: "image/png", Data: "Zmlyc3Q="}, {Type: "image", MimeType: "image/png", Data: "c2Vjb25k"}}},
+	})
+	raw, err := json.Marshal(messages)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire []oaiMsg
+	if err := json.Unmarshal(raw, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if len(wire) != 5 || wire[2].Role != "tool" || wire[2].ToolCallID != "read-1" || wire[3].Role != "tool" || wire[3].ToolCallID != "read-2" || wire[4].Role != "user" {
+		t.Fatalf("tool-image order changed: %s", raw)
+	}
+	blocks, _ := wire[4].Content.([]any)
+	if len(blocks) != 3 {
+		t.Fatalf("image blocks=%d, want text and two images", len(blocks))
+	}
+	for index, expected := range []string{"data:image/png;base64,Zmlyc3Q=", "data:image/png;base64,c2Vjb25k"} {
+		block, _ := blocks[index+1].(map[string]any)
+		imageURL, _ := block["image_url"].(map[string]any)
+		if block["type"] != "image_url" || imageURL["url"] != expected {
+			t.Fatalf("image %d changed: %+v", index, block)
+		}
+	}
+}
+
+func TestDeepSeekFlashSendsNativeImage(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "chat"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var body oaiReq
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode request: %v", err)
+				}
+				if body.Model != "deepseek-flash" || len(body.Messages) != 1 {
+					t.Errorf("unexpected request: %+v", body)
+					return
+				}
+				blocks, _ := body.Messages[0].Content.([]any)
+				if body.Messages[0].Role != "user" || len(blocks) != 2 {
+					t.Errorf("expected user text and image: %+v", body.Messages[0])
+					return
+				}
+				block, _ := blocks[1].(map[string]any)
+				imageURL, _ := block["image_url"].(map[string]any)
+				if block["type"] != "image_url" || imageURL["url"] != "data:image/png;base64,cGl4ZWxz" {
+					t.Errorf("image payload changed: %+v", block)
+				}
+				if stream {
+					w.Header().Set("Content-Type", "text/event-stream")
+					_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+				} else {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = io.WriteString(w, `{"model":"deepseek-flash","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+				}
+			}))
+			defer server.Close()
+			provider := &openAICompatProvider{apiKey: "test-key", baseURL: server.URL, client: server.Client()}
+			request := ChatRequest{Model: "deepseek-flash", MaxTokens: 32, Messages: []Message{{Role: "user", Content: "see image", Parts: []MessagePart{{Type: "image", MimeType: "image/png", Data: "cGl4ZWxz"}}}}}
+			var response *ChatResponse
+			var err error
+			if stream {
+				response, err = provider.ChatStream(context.Background(), request, func(StreamEvent) {})
+			} else {
+				response, err = provider.Chat(context.Background(), request)
+			}
+			if err != nil || response == nil || response.Content != "ok" {
+				t.Fatalf("response=%+v err=%v", response, err)
+			}
+		})
+	}
+}
+
 func TestOpenAICompatChatDowngradesImageForNonVisionModel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
@@ -300,6 +384,21 @@ func TestOpenAICompatChatDowngradesImageForNonVisionModel(t *testing.T) {
 
 func TestOpenAICompatChatReportsImageUnsupportedError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body oaiReq
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		foundImage := false
+		for _, message := range body.Messages {
+			blocks, _ := message.Content.([]any)
+			for _, rawBlock := range blocks {
+				block, _ := rawBlock.(map[string]any)
+				foundImage = foundImage || block["type"] == "image_url"
+			}
+		}
+		if body.Model != "deepseek-flash" || !foundImage {
+			t.Errorf("expected Flash image request, got %+v", body)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"error":{"message":"Failed to deserialize: unknown variant `+"`image_url`"+`, expected `+"`text`"+`"}}`)
@@ -308,7 +407,7 @@ func TestOpenAICompatChatReportsImageUnsupportedError(t *testing.T) {
 
 	p := &openAICompatProvider{apiKey: "test-key", baseURL: server.URL, client: server.Client()}
 	_, err := p.Chat(context.Background(), ChatRequest{
-		Model:     "deepseek-v4-pro",
+		Model:     "deepseek-flash",
 		MaxTokens: 32,
 		Messages: []Message{{
 			Role:  "user",

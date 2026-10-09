@@ -125,6 +125,20 @@ func TestHistoryListsOnlyCurrentProject(t *testing.T) {
 	assertListed(t, h.out.String(), []string{titleA, "/history all"}, []string{titleB, titleOld})
 }
 
+func TestHistoryPickerUsesProjectScopeAndStableSessionID(t *testing.T) {
+	h := setupProjectHistory(t)
+	choices := historyPickerChoices(h.eng, false)
+	if len(choices) != 1 || choices[0].Value != "/resume sess-a" || choices[0].Label != titleA {
+		t.Fatalf("project choices = %+v", choices)
+	}
+	if !strings.Contains(choices[0].Preview, h.dirA) || !strings.Contains(choices[0].Description, "2 条") {
+		t.Fatalf("session preview is incomplete: %+v", choices[0])
+	}
+	if all := historyPickerChoices(h.eng, true); len(all) != 3 {
+		t.Fatalf("all-project choices = %+v", all)
+	}
+}
+
 func TestHistoryAllListsEveryProject(t *testing.T) {
 	h := setupProjectHistory(t)
 

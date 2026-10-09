@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/liuzhixin405/cove-agent/internal/api"
 	"github.com/liuzhixin405/cove-agent/internal/command"
 	"github.com/liuzhixin405/cove-agent/internal/engine"
 	"github.com/liuzhixin405/cove-agent/internal/remote"
@@ -277,6 +278,17 @@ func (c *remoteCommand) permissionAnswer(eng *engine.Engine, toolName string, in
 		select {
 		case permit := <-delivery:
 			if permit == nil {
+				// The remote side can no longer answer this prompt (scope
+				// drifted: a local steer, a queue change, a remote pause;
+				// or the 5-minute remote TTL ran out). That is not a
+				// denial: the local prompt keeps waiting on its own
+				// timeout. Cancel, stop and exit deny through their own
+				// paths (denyPendingPermissionPrompt, ownerDone).
+				return
+			}
+			if !permit.Approved() {
+				// A remote deny is a deny, not a validation failure the
+				// prompt would report as a timeout.
 				answers <- repl.ExternalAnswer{Answer: "n"}
 				return
 			}
@@ -352,13 +364,21 @@ func (r *replTaskRunner) remoteSnapshotLocked(session, project string) remote.Sn
 	if r.eng != nil {
 		pending, _ = r.eng.PendingSteer()
 	}
+	// The version covers what the remote side acts on; attachments go in by
+	// size and name, not by their base64 payload: this runs on every 250 ms
+	// heartbeat (several times), and marshalling a 5 MB image each time
+	// kept the REPL thread busy while the user typed.
+	queue := make([]messageFingerprint, 0, len(r.queue))
+	for _, msg := range r.queue {
+		queue = append(queue, fingerprintMessage(msg))
+	}
 	state, _ := json.Marshal(struct {
-		Current                  any
+		Current                  messageFingerprint
 		Start                    time.Time
 		Running, Paused, Closing bool
-		Queue                    any
+		Queue                    []messageFingerprint
 		Pending                  string
-	}{r.current, r.currentStart, r.running, r.paused, r.closing, r.queue, pending})
+	}{fingerprintMessage(r.current), r.currentStart, r.running, r.paused, r.closing, queue, pending})
 	digest := sha256.Sum256(state)
 	taskDigest := sha256.Sum256([]byte(r.currentStart.String()))
 	task := ""
@@ -430,4 +450,24 @@ func (fe *frontend) applyRemote(action remote.Action) error {
 		return errors.New("unsupported runner action")
 	}
 	return nil
+}
+
+// messageFingerprint is what of a queued or running message takes part in the
+// remote scope version: its text and the identity of its attachments.
+type messageFingerprint struct {
+	Role, Content string
+	Parts         []partFingerprint `json:",omitempty"`
+}
+
+type partFingerprint struct {
+	Type, MimeType, FileName, Text string
+	Bytes                          int
+}
+
+func fingerprintMessage(msg api.Message) messageFingerprint {
+	fp := messageFingerprint{Role: msg.Role, Content: msg.Content}
+	for _, part := range msg.Parts {
+		fp.Parts = append(fp.Parts, partFingerprint{Type: part.Type, MimeType: part.MimeType, FileName: part.FileName, Text: part.Text, Bytes: len(part.Data)})
+	}
+	return fp
 }

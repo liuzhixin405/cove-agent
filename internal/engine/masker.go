@@ -237,7 +237,7 @@ func (m *ToolOutputMasker) maskOldOutputs(history []api.Message) (*MaskingResult
 	}
 
 	// ── Pass 3: mask prunable tool outputs ──
-	if err := os.MkdirAll(m.outputDir, 0755); err != nil {
+	if err := os.MkdirAll(m.outputDir, 0700); err != nil {
 		log.Warnf("masker: cannot create output dir: %v", err)
 		return &MaskingResult{}, history
 	}
@@ -262,7 +262,7 @@ func (m *ToolOutputMasker) maskOldOutputs(history []api.Message) (*MaskingResult
 		filename := fmt.Sprintf("output_%s_%s.txt", hex.EncodeToString(sum[:8]), name)
 		filePath := filepath.Join(m.outputDir, filename)
 
-		if err := os.WriteFile(filePath, []byte(newHistory[i].Content), 0644); err != nil {
+		if err := os.WriteFile(filePath, []byte(newHistory[i].Content), 0600); err != nil {
 			log.Warnf("masker: write failed: %v", err)
 			continue
 		}

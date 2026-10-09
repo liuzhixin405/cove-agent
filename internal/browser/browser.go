@@ -12,18 +12,18 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"net/http"
 	"net/url"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/liuzhixin405/cove-agent/internal/safeurl"
 	"github.com/liuzhixin405/cove-agent/internal/textutil"
+	"golang.org/x/net/html"
 )
 
 // ErrChromeUnavailable is returned by headless rendering when the binary was
@@ -133,8 +133,11 @@ func (b *Browser) FetchRendered(ctx context.Context, rawURL, format string) (*Fe
 		content = textutil.ClipBytes(content, outputLimit, "\n... [truncated from "+strconv.Itoa(len(htmlContent))+" bytes]")
 	}
 	return &FetchResult{
-		URL:        rawURL,
-		StatusCode: 200,
+		URL: rawURL,
+		// The headless render does not observe the document response, so
+		// the status is unknown (0): reporting 200 made an error page look
+		// like a successful fetch to the model.
+		StatusCode: 0,
 		Content:    strings.TrimSpace(content),
 		Format:     format,
 	}, nil
@@ -286,78 +289,171 @@ func trimPartialTrailingRune(s string) string {
 	return s
 }
 
-// — HTML conversion (copied from tool/webfetch.go to keep browser self-contained) —
-
-var (
-	reScript     = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
-	reStyle      = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
-	reTag        = regexp.MustCompile(`(?is)<[^>]+>`)
-	reHeading1   = regexp.MustCompile(`(?is)<h1[^>]*>(.*?)</h1>`)
-	reHeading2   = regexp.MustCompile(`(?is)<h2[^>]*>(.*?)</h2>`)
-	reHeading3   = regexp.MustCompile(`(?is)<h3[^>]*>(.*?)</h3>`)
-	reHeading4   = regexp.MustCompile(`(?is)<h4[^>]*>(.*?)</h4>`)
-	reHeading5   = regexp.MustCompile(`(?is)<h5[^>]*>(.*?)</h5>`)
-	reHeading6   = regexp.MustCompile(`(?is)<h6[^>]*>(.*?)</h6>`)
-	rePre        = regexp.MustCompile(`(?is)<pre[^>]*>(.*?)</pre>`)
-	reCode       = regexp.MustCompile(`(?is)<code[^>]*>(.*?)</code>`)
-	reAnchor     = regexp.MustCompile(`(?is)<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`)
-	reListItem   = regexp.MustCompile(`(?is)<li[^>]*>(.*?)</li>`)
-	reBlockBreak = regexp.MustCompile(`(?is)</?(p|div|section|article|br|hr|ul|ol|table|tr|td|th|blockquote)[^>]*>`)
-	reMultiNL    = regexp.MustCompile(`\n{3,}`)
-	reMultiSpace = regexp.MustCompile(`[ \t]+`)
-)
-
 // HTMLToText strips HTML tags and returns plain text.
 func HTMLToText(s string) string {
-	s = reScript.ReplaceAllString(s, " ")
-	s = reStyle.ReplaceAllString(s, " ")
-	s = reBlockBreak.ReplaceAllString(s, "\n")
-	s = reTag.ReplaceAllString(s, " ")
-	s = html.UnescapeString(s)
-
-	lines := strings.Split(s, "\n")
-	for i := range lines {
-		lines[i] = strings.TrimSpace(reMultiSpace.ReplaceAllString(lines[i], " "))
-	}
-	s = strings.Join(lines, "\n")
-	s = reMultiNL.ReplaceAllString(s, "\n\n")
-	return strings.TrimSpace(s)
+	return convertHTML(s, false)
 }
 
 // HTMLToMarkdown converts HTML to a readable Markdown representation.
 func HTMLToMarkdown(s string) string {
-	s = reScript.ReplaceAllString(s, "\n")
-	s = reStyle.ReplaceAllString(s, "\n")
-	s = rePre.ReplaceAllStringFunc(s, func(m string) string {
-		inner := rePre.FindStringSubmatch(m)
-		if len(inner) > 1 {
-			return "\n```\n" + HTMLToText(inner[1]) + "\n```\n"
-		}
-		return m
-	})
-	s = reHeading1.ReplaceAllString(s, "\n# $1\n")
-	s = reHeading2.ReplaceAllString(s, "\n## $1\n")
-	s = reHeading3.ReplaceAllString(s, "\n### $1\n")
-	s = reHeading4.ReplaceAllString(s, "\n#### $1\n")
-	s = reHeading5.ReplaceAllString(s, "\n##### $1\n")
-	s = reHeading6.ReplaceAllString(s, "\n###### $1\n")
-	s = reAnchor.ReplaceAllString(s, "[$2]($1)")
-	s = reCode.ReplaceAllString(s, "`$1`")
-	s = reListItem.ReplaceAllString(s, "\n- $1")
-	s = reBlockBreak.ReplaceAllString(s, "\n")
-	s = reTag.ReplaceAllString(s, " ")
-	s = html.UnescapeString(s)
+	return convertHTML(s, true)
+}
 
-	lines := strings.Split(s, "\n")
-	for i := range lines {
-		line := strings.TrimSpace(reMultiSpace.ReplaceAllString(lines[i], " "))
-		if strings.HasPrefix(line, "- ") {
-			lines[i] = line
-		} else {
-			lines[i] = strings.TrimSpace(line)
+type htmlTextWriter struct {
+	strings.Builder
+	space bool
+	lines int
+}
+
+func (writer *htmlTextWriter) flushSpace() {
+	if writer.Len() > 0 {
+		if writer.lines > 0 {
+			writer.WriteString(strings.Repeat("\n", min(writer.lines, 2)))
+		} else if writer.space {
+			writer.WriteByte(' ')
 		}
 	}
-	s = strings.Join(lines, "\n")
-	s = reMultiNL.ReplaceAllString(s, "\n\n")
-	return strings.TrimSpace(s)
+	writer.space, writer.lines = false, 0
+}
+
+func (writer *htmlTextWriter) text(text string) {
+	for _, value := range text {
+		switch {
+		case value == '\n' || value == '\r':
+			writer.lines = min(writer.lines+1, 2)
+		case unicode.IsSpace(value):
+			writer.space = true
+		default:
+			writer.flushSpace()
+			writer.WriteRune(value)
+		}
+	}
+}
+
+func (writer *htmlTextWriter) codeBlock(code string) {
+	longest, run := 0, 0
+	for _, value := range code {
+		if value == '`' {
+			run++
+			longest = max(longest, run)
+		} else {
+			run = 0
+		}
+	}
+	fence := strings.Repeat("`", max(3, longest+1))
+	writer.lines = max(writer.lines, 2)
+	writer.flushSpace()
+	writer.WriteString(fence + "\n")
+	writer.WriteString(code)
+	if !strings.HasSuffix(code, "\n") {
+		writer.WriteByte('\n')
+	}
+	writer.WriteString(fence)
+	writer.lines = 2
+}
+
+func convertHTML(source string, markdown bool) string {
+	tokenizer := html.NewTokenizer(strings.NewReader(source))
+	var writer htmlTextWriter
+	var code strings.Builder
+	var anchors []string
+	skipped := ""
+	inPre := false
+	for {
+		kind := tokenizer.Next()
+		if kind == html.ErrorToken {
+			if inPre {
+				writer.codeBlock(code.String())
+			}
+			return strings.TrimSpace(writer.String())
+		}
+		if kind == html.TextToken {
+			if skipped == "" {
+				text := string(tokenizer.Text())
+				if inPre {
+					code.WriteString(text)
+				} else {
+					writer.text(text)
+				}
+			}
+			continue
+		}
+		if kind != html.StartTagToken && kind != html.EndTagToken && kind != html.SelfClosingTagToken {
+			continue
+		}
+		token := tokenizer.Token()
+		ending := kind == html.EndTagToken
+		if skipped != "" {
+			if ending && token.Data == skipped {
+				skipped = ""
+			}
+			continue
+		}
+		if token.Data == "script" || token.Data == "style" {
+			if !ending {
+				skipped = token.Data
+				writer.space = true
+			}
+			continue
+		}
+		if inPre {
+			if ending && token.Data == "pre" {
+				writer.codeBlock(code.String())
+				code.Reset()
+				inPre = false
+			}
+			continue
+		}
+		if markdown {
+			switch token.Data {
+			case "pre":
+				if !ending {
+					inPre = true
+				}
+				continue
+			case "h1", "h2", "h3", "h4", "h5", "h6":
+				writer.lines = min(writer.lines+1, 2)
+				if !ending {
+					writer.text(strings.Repeat("#", int(token.Data[1]-'0')) + " ")
+				}
+				continue
+			case "li":
+				if !ending {
+					writer.lines = min(writer.lines+1, 2)
+					writer.text("- ")
+				}
+				continue
+			case "code":
+				writer.text("`")
+				continue
+			case "a":
+				if !ending {
+					href := ""
+					for _, attribute := range token.Attr {
+						if attribute.Key == "href" {
+							href = attribute.Val
+							break
+						}
+					}
+					anchors = append(anchors, href)
+					if href != "" {
+						writer.text("[")
+					}
+				} else if len(anchors) > 0 {
+					href := anchors[len(anchors)-1]
+					anchors = anchors[:len(anchors)-1]
+					if href != "" {
+						writer.text("](" + href + ")")
+					}
+				}
+				continue
+			}
+		}
+		switch token.Data {
+		case "p", "div", "section", "article", "br", "hr", "ul", "ol", "table", "tr", "td", "th", "blockquote":
+			writer.lines = min(writer.lines+1, 2)
+		default:
+			writer.space = true
+		}
+	}
 }

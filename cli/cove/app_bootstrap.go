@@ -37,6 +37,13 @@ type appBootstrap struct {
 	toolReg   *tool.Registry
 }
 
+func providerAPIConfig(provider config.ProviderConfig) api.ProviderConfig {
+	return api.ProviderConfig{
+		Name: provider.Name, APIKey: provider.APIKey, APIKeys: provider.APIKeys, BaseURL: provider.BaseURL,
+		ImageFilesAPI: provider.ImageFilesEnabled(),
+	}
+}
+
 // bootstrapApp builds the session. interactive says whether someone can
 // answer the question tool (main's mode branch: not -p, interactive shell).
 func bootstrapApp(debugMode bool, profileName, recordDir, replayDir string, interactive bool) (*appBootstrap, error) {
@@ -122,17 +129,15 @@ func bootstrapApp(debugMode bool, profileName, recordDir, replayDir string, inte
 	toolReg := registerAllTools(mcpPool, cfg, interactive)
 	phase("tools")
 	eng, err := engine.New(engine.Config{
-		Model:          cfg.Model,
-		ModelFast:      cfg.ModelFast,
-		PermissionMode: cfg.PermissionMode, // engine.New falls back to default for an invalid mode
-		MaxBudget:      cfg.MaxBudgetUsd,
-		Debug:          debugMode || cfg.Debug,
-		RecordingDir:   recordDir,
-		ReplayDir:      replayDir,
-		Tools:          toolReg.All(),
-		Provider: api.ProviderConfig{
-			Name: pc.Name, APIKey: pc.APIKey, APIKeys: pc.APIKeys, BaseURL: pc.BaseURL,
-		},
+		Model:              cfg.Model,
+		ModelFast:          cfg.ModelFast,
+		PermissionMode:     cfg.PermissionMode, // engine.New falls back to default for an invalid mode
+		MaxBudget:          cfg.MaxBudgetUsd,
+		Debug:              debugMode || cfg.Debug,
+		RecordingDir:       recordDir,
+		ReplayDir:          replayDir,
+		Tools:              toolReg.All(),
+		Provider:           providerAPIConfig(pc),
 		MemoryStore:        memStore,
 		SkillManager:       skillMgr,
 		HookManager:        hookMgr,

@@ -42,5 +42,5 @@ func renameRootFile(root *os.Root, from, to string) error {
 	if attrs&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
 		return fmt.Errorf("rooted replacement requires a regular destination")
 	}
-	return replaceFileWFlags(toName, fromName, 0)
+	return replaceFileWFlags(toName, fromName, replacefileIgnoreMergeErrors|replacefileIgnoreACLErrors)
 }

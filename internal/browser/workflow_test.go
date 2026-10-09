@@ -72,7 +72,7 @@ func TestWorkflowBoundsAndTrustedLoopback(t *testing.T) {
 		}
 	}
 	report, err := browser.Run(context.Background(), Workflow{URL: "http://127.0.0.1", Steps: []WorkflowStep{{Action: "click", Selector: "button"}}}, RunOptions{EvidenceDir: t.TempDir()})
-	if err == nil || report.Status != StatusFail || report.Reason != "invalid_workflow" {
+	if err == nil || report.Status != StatusUnverified || report.Reason != "invalid_workflow" {
 		t.Fatalf("invalid workflow outcome: %+v %v", report, err)
 	}
 }

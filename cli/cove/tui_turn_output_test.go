@@ -206,6 +206,52 @@ func TestToolOutputStartHeadsAndIndentsTheLiveOutput(t *testing.T) {
 	}
 }
 
+func TestCompactToolProgressIsBoundedAndResetsPerCommand(t *testing.T) {
+	buf := captureTurnOutput(t)
+	printer := newTurnPrinter()
+	printer.compactTools = true
+	printer.toolOutputStart("bash", "first")
+	printer.toolProgress("bash", strings.Repeat("log-line\n", 100))
+	printer.toolProgress("bash", "hidden continuation\n")
+	printer.toolOutputStart("bash", "second")
+	printer.toolProgress("bash", "second result\n")
+	printer.stop()
+	output := buf.String()
+	if strings.Count(output, "log-line") != toolPreviewLines || strings.Count(output, "后续实时输出已折叠") != 1 {
+		t.Fatalf("live preview was not bounded: %q", output)
+	}
+	if strings.Contains(output, "hidden continuation") || !strings.Contains(output, "second result") {
+		t.Fatal("preview did not suppress the remainder or reset for the next command")
+	}
+}
+
+func TestCompactToolProgressBoundsSplitLongLines(t *testing.T) {
+	buf := captureTurnOutput(t)
+	printer := newTurnPrinter()
+	printer.compactTools = true
+	printer.toolOutputStart("bash", "long line")
+	for range 100 {
+		printer.toolProgress("bash", "日志日志")
+	}
+	printer.stop()
+	output := buf.String()
+	if strings.Count(output, "日志") != toolPreviewCells/4 || strings.Count(output, "后续实时输出已折叠") != 1 {
+		t.Fatalf("split long line escaped the preview bound: %q", output)
+	}
+}
+
+func TestNonCompactToolProgressKeepsCompleteLiveOutput(t *testing.T) {
+	buf := captureTurnOutput(t)
+	printer := newTurnPrinter()
+	printer.toolOutputStart("bash", "headless output")
+	printer.toolProgress("bash", strings.Repeat("log-line\n", 100))
+	printer.stop()
+	output := buf.String()
+	if strings.Count(output, "log-line") != 100 || strings.Contains(output, "后续实时输出已折叠") {
+		t.Fatal("non-interactive live output was folded")
+	}
+}
+
 // A provider error body is echoed in "Request failed: ..."; it is untrusted.
 func TestRequestFailureMessageIsSanitised(t *testing.T) {
 	buf := captureTurnOutput(t)

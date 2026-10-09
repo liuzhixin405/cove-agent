@@ -45,7 +45,7 @@ func TestRegressionToolRunsRealOverlayWithoutRestoringWorkspace(t *testing.T) {
 	write("code.go", fixed)
 	write("code_test.go", "package example\nimport \"testing\"\nfunc TestRegression(t *testing.T) { if Value() != 2 { t.Fatal(\"original bug\") } }\n")
 	input := tool.Input{"baseline": baseline, "files": []string{"code.go"}, "package": ".", "run": "^TestRegression$"}
-	evidence, err := runRegression(context.Background(), input, dir)
+	evidence, err := runRegression(context.Background(), input, dir, nil)
 	if err != nil || evidence.Status != "passed" || evidence.Before.ExitCode != 1 || evidence.After.ExitCode != 0 || len(evidence.Tests) != 1 || evidence.Tests[0] != "example/TestRegression" {
 		t.Fatalf("evidence = %+v, %v", evidence, err)
 	}
@@ -54,7 +54,7 @@ func TestRegressionToolRunsRealOverlayWithoutRestoringWorkspace(t *testing.T) {
 		t.Fatal("workspace source was restored")
 	}
 	input["run"] = "^TestDoesNotExist$"
-	evidence, err = runRegression(context.Background(), input, dir)
+	evidence, err = runRegression(context.Background(), input, dir, nil)
 	if err != nil || evidence.Status == "passed" {
 		t.Fatalf("no tests counted as proof: %+v %v", evidence, err)
 	}
@@ -63,13 +63,13 @@ func TestRegressionToolRunsRealOverlayWithoutRestoringWorkspace(t *testing.T) {
 	}
 	write("code_test.go", "package example\nimport (\"testing\"; \"os\")\nfunc TestMutation(t *testing.T) { if err := os.WriteFile(\"test-side-effect.txt\", []byte(\"changed\"), 0600); err != nil { t.Fatal(err) }; if Value() != 2 { t.Fatal(\"original bug\") } }\n")
 	input["run"] = "^TestMutation$"
-	evidence, err = runRegression(context.Background(), input, dir)
+	evidence, err = runRegression(context.Background(), input, dir, nil)
 	if err != nil || evidence.Status != "unverified" || !strings.Contains(evidence.Reason, "workspace changed") {
 		t.Fatalf("workspace drift accepted: %+v %v", evidence, err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := runRegression(ctx, input, dir); err == nil {
+	if _, err := runRegression(ctx, input, dir, nil); err == nil {
 		t.Fatal("cancelled execution accepted")
 	}
 	verifier := &regressionTool{}

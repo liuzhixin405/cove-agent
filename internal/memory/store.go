@@ -823,6 +823,10 @@ func (s *Store) save(name, content string, source *ProvenanceSource, appendTo st
 	err := fsatomic.WriteFile(filepath.Join(dir, name), []byte(content), 0644)
 	if err == nil {
 		s.invalidateCache()
+		// Only the record of the content now on disk is read back; the ones
+		// of earlier revisions (each carrying the whole source history)
+		// used to pile up under .provenance for as long as the memory lived.
+		pruneProvenance(dir, name, content)
 	}
 	return err
 }

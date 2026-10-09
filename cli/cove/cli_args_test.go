@@ -121,7 +121,12 @@ func TestParseCLIArgsActionsStopParsing(t *testing.T) {
 }
 
 func TestParseCLIArgsFlags(t *testing.T) {
-	opts, err := parseCLIArgs([]string{"-d", "--no-auto", "--no-tui", "--dump-system-prompt", "--profile", "work", "--record", "rec", "--replay", "rep", "--file", "a.go", "--image", "b.png"})
+	// --image/--file belong to -p: without it they were silently dropped
+	// (the interactive session never read them), now they are refused.
+	if _, err := parseCLIArgs([]string{"--image", "b.png"}); err == nil || !strings.Contains(err.Error(), "-p") {
+		t.Fatalf("--image without -p: err=%v, want a refusal naming -p", err)
+	}
+	opts, err := parseCLIArgs([]string{"-d", "--no-auto", "--no-tui", "--dump-system-prompt", "--profile", "work", "--record", "rec", "--replay", "rep", "--file", "a.go", "--image", "b.png", "-p", "hi"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -30,14 +31,56 @@ type LineReader struct {
 	completionBase string
 	completionList []string
 	completionIdx  int
+	choices        []Choice
+	choiceIndex    int
+	choiceTitle    string
+	choiceSearch   bool
+	choiceQuery    string
 	activeHint     string
 	// drawnRows and cursorRow describe a multi-row input drawn below the
 	// output (redrawMultiLocked): how many rows it takes and which one the
 	// cursor is on, so the next redraw or erase can go back to its top.
-	drawnRows int
-	cursorRow int
-	ownerWake func() <-chan struct{}
-	ownerPoll func()
+	drawnRows        int
+	cursorRow        int
+	ownerWake        func() <-chan struct{}
+	ownerPoll        func()
+	imagePaste       func(string) bool
+	imageClipboard   func()
+	imageRemove      func()
+	inputStatus      string
+	interactionState string
+	lastStatus       string
+	panelSource      func(int) ([]string, int)
+	panelOpen        bool
+	panelFocused     bool
+	panelIndex       int
+	panelCount       int
+	panelLines       []string
+	panelWake        <-chan struct{}
+	panelRefreshed   time.Time
+}
+
+// SetImageInputHooks installs owner-thread handlers for image paste events.
+func (lr *LineReader) SetImageInputHooks(paste func(string) bool, clipboard func(), remove func()) {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
+	lr.imagePaste, lr.imageClipboard, lr.imageRemove = paste, clipboard, remove
+	if paste != nil {
+		lr.placeholder = "(图片可拖入；附件用 @路径；/ 查看命令)"
+		if clipboard != nil && runtime.GOOS == "windows" && os.Getenv("SSH_CONNECTION") == "" && os.Getenv("SSH_CLIENT") == "" {
+			lr.placeholder = "(图片可拖入，Alt+V 粘贴；附件用 @路径；/ 查看命令)"
+		}
+	}
+}
+
+// SetInputStatus updates the persistent status row above the input.
+func (lr *LineReader) SetInputStatus(status string) {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
+	lr.inputStatus = status
+	if lr.reading {
+		lr.redrawLocked(lr.renderBuf, lr.renderCursor)
+	}
 }
 
 func (lr *LineReader) SetOwnerEventHook(wake func() <-chan struct{}, poll func()) {
@@ -55,7 +98,7 @@ type inputResult struct {
 }
 
 func (in ownerInput) Read(dst []byte) (int, error) {
-	if in.lr.ownerPoll == nil {
+	if in.lr.ownerPoll == nil && in.lr.panelWake == nil {
 		return in.source.Read(dst)
 	}
 	result := make(chan inputResult, 1)
@@ -76,8 +119,14 @@ func (in ownerInput) Read(dst []byte) (int, error) {
 			return copy(dst, read.data), read.err
 		case <-wake:
 			in.lr.ownerPoll()
+		case <-in.lr.panelWake:
+			in.lr.RefreshPanel()
 		case <-ticker.C:
-			in.lr.ownerPoll()
+			if in.lr.ownerPoll != nil {
+				in.lr.ownerPoll()
+			} else {
+				in.lr.RefreshPanel()
+			}
 		}
 	}
 }
@@ -186,6 +235,7 @@ func (lr *LineReader) editLine() (string, error) {
 
 		switch r {
 		case 3:
+			lr.dismissChoices(&buf, &cursor)
 			consoleMu.Lock()
 			lr.eraseLineLocked()
 			consoleMu.Unlock()
@@ -225,6 +275,13 @@ func (lr *LineReader) editLine() (string, error) {
 				lr.refresh(buf, cursor)
 				continue
 			}
+			if accepted, execute := lr.acceptChoice(&buf, &cursor); accepted {
+				if execute {
+					return lr.submit(buf), nil
+				}
+				lr.redraw(buf, cursor)
+				continue
+			}
 			return lr.submit(buf), nil
 		case 1: // Ctrl+A
 			cursor = 0
@@ -259,17 +316,24 @@ func (lr *LineReader) editLine() (string, error) {
 		case 127, 8:
 			lr.resetCompletionCycle()
 			if cursor > 0 {
-				copy(buf[cursor-1:], buf[cursor:])
-				buf = buf[:len(buf)-1]
-				cursor--
+				start := clusterLeft(buf, cursor)
+				buf = append(buf[:start], buf[cursor:]...)
+				cursor = start
 				lr.refresh(buf, cursor)
 			}
 		case 27:
-			lr.resetCompletionCycle()
 			// A key's escape sequence arrives in one read; an ESC with nothing
 			// behind it is the Esc key. It clears the line, or on an empty
 			// line interrupts the running task.
 			if lr.rawReader.Buffered() == 0 && escInterruptEnabled() {
+				if lr.dismissChoices(&buf, &cursor) {
+					lr.redraw(buf, cursor)
+					continue
+				}
+				if lr.closePanel() {
+					lr.redraw(buf, cursor)
+					continue
+				}
 				if len(buf) > 0 {
 					buf, cursor = nil, 0
 					lr.redraw(buf, cursor)
@@ -290,9 +354,16 @@ func (lr *LineReader) editLine() (string, error) {
 				lr.refresh(buf, cursor)
 				continue
 			}
+			if len(buf) == 0 && lr.togglePanelFocus() {
+				lr.redraw(buf, cursor)
+				continue
+			}
 			lr.complete(&buf, &cursor)
 		default:
 			if r >= 32 {
+				consoleMu.Lock()
+				lr.panelFocused = false
+				consoleMu.Unlock()
 				lr.resetCompletionCycle()
 				buf, cursor = insertRunes(buf, cursor, []rune{r})
 				lr.refresh(buf, cursor)
@@ -306,6 +377,7 @@ func (lr *LineReader) editLine() (string, error) {
 func (lr *LineReader) submit(buf []rune) string {
 	line := string(buf)
 	consoleMu.Lock()
+	lr.choices, lr.choiceSearch = nil, false
 	lr.eraseLineLocked()
 	// 关键点：在按下回车后，先把用户输入的内容打印到终端，使之成为历史可见内容。
 	// 流式输出进行中：输入行钉在底部时，把内容回显到上方的输出流里（先另起一行，
@@ -346,6 +418,8 @@ func (lr *LineReader) endOfInput(buf []rune, err error) (string, error) {
 	if !errors.Is(err, io.EOF) {
 		return "", err
 	}
+	cursor := len(buf)
+	lr.dismissChoices(&buf, &cursor)
 	consoleMu.Lock()
 	lr.eraseLineLocked()
 	if len(buf) == 0 {
@@ -397,15 +471,16 @@ func (lr *LineReader) refresh(buf []rune, cursor int) {
 		return
 	}
 	lr.redraw(buf, cursor)
+	if lr.choiceSearch {
+		return
+	}
 	if lr.completer == nil || len(buf) == 0 || buf[0] != '/' {
 		return
 	}
 	line := string(buf)
 	suggestions := lr.completer(line)
-	if len(suggestions) > 0 && len(suggestions) <= 10 {
+	if len(suggestions) > 0 {
 		lr.showInlineSuggestions(suggestions, lr.promptWidth+cursor)
-	} else if len(suggestions) > 10 {
-		lr.showCommandCountHint(len(suggestions), lr.promptWidth+cursor)
 	}
 }
 
@@ -437,6 +512,7 @@ func (lr *LineReader) redrawLocked(buf []rune, cursor int) {
 	cursor = clampCursor(cursor, len(buf))
 	lr.renderBuf = append(lr.renderBuf[:0], buf...)
 	lr.renderCursor = cursor
+	lr.lastStatus = lr.statusLineLocked()
 	if streamingActive {
 		if pinned {
 			lr.drawPinnedLocked()
@@ -444,13 +520,14 @@ func (lr *LineReader) redrawLocked(buf []rune, cursor int) {
 		return
 	}
 	// Draw on the current line.
-	w, _, err := term.GetSize(int(os.Stdout.Fd()))
+	w, h, err := term.GetSize(int(os.Stdout.Fd()))
 	if err != nil || w < 20 {
 		w = 80
+		h = 24
 	}
 	// A multi-line or long input takes several rows (editing.go).
-	if lr.needsMultiRow(buf, w) {
-		lr.redrawMultiLocked(buf, cursor, w)
+	if len(lr.displayRowsLocked()) > 0 || lr.statusLineLocked() != "" || lr.needsMultiRow(buf, w, h) {
+		lr.redrawMultiLocked(buf, cursor, w, h)
 		return
 	}
 	if lr.drawnRows > 1 {
@@ -518,6 +595,9 @@ func (lr *LineReader) historyDown(buf *[]rune, cursor *int) {
 func (lr *LineReader) fallbackRead() (string, error) {
 	if lr.fallbackReader == nil {
 		lr.fallbackReader = bufio.NewReader(ownerInput{source: os.Stdin, lr: lr})
+	}
+	if lr.inputStatus != "" {
+		termPrint(lr.inputStatus + "\n")
 	}
 	termPrint(lr.prompt)
 	line, err := lr.fallbackReader.ReadString('\n')

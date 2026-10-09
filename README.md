@@ -95,7 +95,7 @@ cove /new "添加一个新的 API 接口并更新 README"
 | `/compact`          | 立即压缩对话历史（打印压缩前后的 token 数）                     |
 | `/new`              | 保存当前会话并开始新会话（清空对话上下文）                      |
 | `/clear`            | 清屏并清空回滚区（别名 `/cls`，快捷键 Ctrl+L）                |
-| `/history`          | 查看和恢复历史会话                                              |
+| `/history`          | 查看和恢复历史会话；交互模式支持搜索选择                          |
 | `/resume [id]`      | 恢复已保存的会话                                                |
 | `/continue`         | 从中断处继续上一轮（已完成的工具步骤不会重做）                  |
 | `/export`           | 导出当前对话                                                    |
@@ -118,6 +118,7 @@ cove /new "添加一个新的 API 接口并更新 README"
 | `/skill <名称>`     | 查看或调用一个技能（别名 `/skills`）                          |
 | `/tools`            | 列出可用工具                                                    |
 | `/tasks`            | 查看运行中/排队任务（TUI）；headless 显示同步执行状态           |
+| `/agents`           | 查看 agent 活动快照；Alt+M 展开实时 Agent Map 面板 |
 | `/tasks saved`      | 列出当前项目持久化队列；显式恢复、删除和排序，重启不自动执行 |
 | `/acceptance`       | 查看最新任务的通过、失败、未验证项与命令执行证据               |
 | `/automations`      | 显式维护任务：定时扫描、去重事件、Git worktree 隔离执行 |

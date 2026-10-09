@@ -151,21 +151,25 @@ func WriteFileRoot(root *os.Root, path string, data []byte, perm os.FileMode) er
 	if err := tmp.Sync(); err != nil {
 		return err
 	}
-	if err := tmp.Chmod(perm); err != nil {
-		return err
-	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
 	err = renameRootFile(root, tmpName, path)
 	for _, delay := range renameBackoff {
 		if err == nil || !retryableRename(err) {
-			return err
+			break
 		}
 		sleep(delay)
 		err = renameRootFile(root, tmpName, path)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	// The mode goes on after the replacement (the temporary file is 0600):
+	// a read-only temporary file (perm 0444) made ReplaceFileW fail on
+	// Windows with access denied, and a 0755 script restored by /undo must
+	// keep its executable bit on POSIX.
+	return root.Chmod(path, perm)
 }
 
 // renameBackoff is the wait before each retry of a failed rename.

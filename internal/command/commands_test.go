@@ -36,6 +36,7 @@ type fakeEngine struct {
 }
 
 func (f *fakeEngine) Messages() []api.Message         { return f.msgs }
+func (f *fakeEngine) MessageCount() int               { return len(f.msgs) }
 func (f *fakeEngine) LoadMessages(msgs []api.Message) { f.loaded = msgs; f.msgs = msgs }
 func (f *fakeEngine) SetSystemOverride(prompt string) { f.override = prompt }
 func (f *fakeEngine) SystemPrompt() string            { return f.override }

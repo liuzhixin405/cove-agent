@@ -88,7 +88,11 @@ func Acquire(path string, wait, stale time.Duration) (release func(), err error)
 				releaseIfOurs(path, token)
 			}, nil
 		}
-		breakStale(path, stale)
+		if breakStale(path, stale) {
+			// The stale lock is gone: take it now instead of sleeping (or,
+			// with wait 0, reporting a timeout the caller must retry past).
+			continue
+		}
 		if !time.Now().Before(deadline) {
 			if lastDenied != nil {
 				return nil, lastDenied
@@ -153,30 +157,33 @@ var beforeStaleRename func()
 // open for reading cannot be removed by its holder (Go opens without
 // FILE_SHARE_DELETE), so contenders reading the lock on every retry made the
 // holder's release fail and the lock stay until the stale age.
-func breakStale(path string, stale time.Duration) {
+func breakStale(path string, stale time.Duration) (removed bool) {
 	info, err := os.Stat(path)
 	if err != nil || time.Since(info.ModTime()) < stale {
-		return
+		return false
 	}
 	body, err := os.ReadFile(path)
 	if err != nil {
-		return
+		return false
 	}
 	again, err := os.Stat(path)
 	if err != nil || time.Since(again.ModTime()) < stale || !again.ModTime().Equal(info.ModTime()) || again.Size() != info.Size() {
-		return // replaced between the stat and the read: not the file judged stale
+		return false // replaced between the stat and the read: not the file judged stale
 	}
 	if beforeStaleRename != nil {
 		beforeStaleRename()
 	}
 	moved := fmt.Sprintf("%s.stale-%s", path, newToken())
 	if err := os.Rename(path, moved); err != nil {
-		return // someone else broke it (or re-created it) first
+		return false // someone else broke it (or re-created it) first
 	}
 	if mb, err := os.ReadFile(moved); err != nil || string(mb) != string(body) {
 		_ = os.Link(moved, path)
+		_ = os.Remove(moved)
+		return false
 	}
 	_ = os.Remove(moved)
+	return true
 }
 
 // releaseIfOurs removes the lock when it still carries token: a lock taken

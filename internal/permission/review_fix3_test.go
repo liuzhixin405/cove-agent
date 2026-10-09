@@ -134,8 +134,9 @@ func TestReadOnlyRefusesProgramRunningAndWritingSpellings(t *testing.T) {
 		{"git -C sub/dir status", ShellPOSIX},
 	} {
 		if tc.cmd == "curl https://example.com" {
-			if !c.AutoApproveLineFor(tc.cmd, tc.kind) {
-				t.Errorf("[%s] %q not auto-approved", tc.kind, tc.cmd)
+			// A fetch is egress: it asks in auto mode too (fourth round).
+			if c.AutoApproveLineFor(tc.cmd, tc.kind) {
+				t.Errorf("[%s] %q auto-approved, want asked", tc.kind, tc.cmd)
 			}
 			continue
 		}

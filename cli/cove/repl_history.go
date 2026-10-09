@@ -15,6 +15,7 @@ import (
 	"github.com/liuzhixin405/cove-agent/internal/api"
 	"github.com/liuzhixin405/cove-agent/internal/cost"
 	"github.com/liuzhixin405/cove-agent/internal/engine"
+	"github.com/liuzhixin405/cove-agent/internal/repl"
 	"github.com/liuzhixin405/cove-agent/internal/session"
 	"github.com/liuzhixin405/cove-agent/internal/termui"
 )
@@ -439,6 +440,37 @@ func handleHistory(eng *engine.Engine, all bool) {
 	if draft != nil {
 		termui.PrintSafe("  中断详情: /history detail interrupted\n\n")
 	}
+}
+
+func historyPickerChoices(eng *engine.Engine, all bool) []repl.Choice {
+	if eng.Store() == nil {
+		return nil
+	}
+	records, _ := listHistoryRecords(eng.Store(), currentProjectDir(), all)
+	choices := make([]repl.Choice, 0, len(records)+1)
+	if draft := projectInterruptedDraft(); draft != nil {
+		choices = append(choices, repl.Choice{
+			Value: "/history detail interrupted", Label: "中断草稿详情",
+			Description: draft.UpdatedAt.Format("01-02 15:04"), Preview: draft.Title,
+		})
+	}
+	for _, record := range records {
+		title := effectiveHistoryTitle(record)
+		if title == "" {
+			title = record.UpdatedAt.Format("01-02 15:04")
+		}
+		description := fmt.Sprintf("%s · %d 轮 / %d 条", record.UpdatedAt.Format("01-02 15:04"), record.UserTurns, record.MessageCount)
+		if all {
+			description += " | " + historyProjectLabel(record)
+		}
+		choices = append(choices, repl.Choice{
+			Value:       "/resume " + record.ID,
+			Label:       title,
+			Description: description,
+			Preview:     record.Cwd + " | " + record.Model,
+		})
+	}
+	return choices
 }
 
 type historyCleanStats struct {

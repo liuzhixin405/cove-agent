@@ -108,6 +108,7 @@ func (e *Engine) enterSession(r *session.Record) {
 // the project) is reset here, so /new and /resume cannot disagree.
 func (e *Engine) resetConversationState() {
 	e.conversation = conversation{}
+	e.agentActivity.Reset()
 	e.systemPrompt = ""
 	// Plan mode the model entered belongs to its conversation; the user's
 	// /mode plan is the permission mode and stays.

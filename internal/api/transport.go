@@ -17,10 +17,11 @@ import (
 // had drifted: a client timeout was retried by one and not the other, and
 // one read SSE lines of any length.
 type endpoint struct {
-	url    string
-	client *http.Client
-	key    func() string
-	pool   *KeyPool
+	url     string
+	client  *http.Client
+	key     func() string
+	pool    *KeyPool
+	prepare func(context.Context, []byte, string) ([]byte, error)
 	// auth sets the provider's authentication and version headers.
 	auth func(h http.Header, key string)
 }
@@ -56,7 +57,15 @@ func (ep endpoint) send(ctx context.Context, data []byte) (*http.Response, error
 	attempts := max(1, ep.pool.size())
 	for i := 1; ; i++ {
 		key := ep.key()
-		req, err := ep.newRequest(ctx, data, key)
+		requestData := data
+		if ep.prepare != nil {
+			var err error
+			requestData, err = ep.prepare(ctx, data, key)
+			if err != nil {
+				return nil, err
+			}
+		}
+		req, err := ep.newRequest(ctx, requestData, key)
 		if err != nil {
 			return nil, err
 		}

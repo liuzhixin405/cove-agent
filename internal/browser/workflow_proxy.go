@@ -30,7 +30,21 @@ func (b *Browser) workflowDial(ctx context.Context, networkName, address string)
 		return nil, err
 	}
 	dialer := net.Dialer{Timeout: 5 * time.Second}
-	return dialer.DialContext(ctx, networkName, net.JoinHostPort(addresses[0].String(), port))
+	// Every address passed the same checks; a host whose AAAA record comes
+	// first on a machine without IPv6 must not make the whole run
+	// network_unavailable.
+	var lastErr error
+	for _, address := range addresses {
+		conn, err := dialer.DialContext(ctx, networkName, net.JoinHostPort(address.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, lastErr
 }
 
 func (b *Browser) startWorkflowProxy(ctx context.Context) (*workflowProxy, error) {

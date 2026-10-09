@@ -31,11 +31,16 @@ var contextWindowPatterns = []contextWindowPattern{
 	{"claude-sonnet", 200000},
 	{"claude-haiku", 200000},
 	{"claude-3", 200000},
+	// GPT-5 and GPT-4.1 families (platform.openai.com/docs/models); o3/o4
+	// moved to 200k. Without entries they fell to the 32k default: history
+	// was compacted at 20k tokens and only 8k output requested.
+	{"gpt-5", 400000},
+	{"gpt-4.1", 1000000},
 	{"gpt-4o", 128000},
 	{"gpt-4-turbo", 128000},
-	{"o1", 128000},
-	{"o3", 128000},
-	{"o4", 128000},
+	{"o1", 200000},
+	{"o3", 200000},
+	{"o4", 200000},
 	// DeepSeek V4: 1M context for both tiers (api-docs.deepseek.com). The
 	// current flash name is "deepseek-flash"; "deepseek-v4-flash" is the
 	// retired alias, still accepted.

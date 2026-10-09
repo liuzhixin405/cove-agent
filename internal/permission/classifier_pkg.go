@@ -21,6 +21,12 @@ func (c *Classifier) classifyBuild(name string, args []string) CmdCategory {
 	}
 	sub := args[0]
 	if name == "go" {
+		// -exec and -toolexec name a program cmd/go runs (around the test
+		// binary, around every tool): `go test -exec 'rm -rf ~'` is not a
+		// build command.
+		if goRunsOtherProgram(args[1:]) {
+			return CatUnknown
+		}
 		switch sub {
 		case "version":
 			return CatSafe
@@ -258,4 +264,19 @@ func (c *Classifier) classifyDocker(args []string) CmdCategory {
 		}
 	}
 	return CatUnknown
+}
+
+// goRunsOtherProgram reports go's -exec/-toolexec options, whose value is a
+// command line cmd/go starts.
+func goRunsOtherProgram(args []string) bool {
+	for _, a := range args {
+		switch {
+		case a == "-exec" || a == "-toolexec" || a == "--exec" || a == "--toolexec":
+			return true
+		case strings.HasPrefix(a, "-exec=") || strings.HasPrefix(a, "-toolexec=") ||
+			strings.HasPrefix(a, "--exec=") || strings.HasPrefix(a, "--toolexec="):
+			return true
+		}
+	}
+	return false
 }

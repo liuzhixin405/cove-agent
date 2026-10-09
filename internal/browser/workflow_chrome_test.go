@@ -150,7 +150,7 @@ func TestWorkflowChromeSensitiveAndSubresource(t *testing.T) {
 				workflow.Steps = append([]WorkflowStep{{Action: "fill", Selector: "#secret", Fixture: "secret"}}, workflow.Steps...)
 			}
 			report, err := New(Config{AllowLocalhost: true}).Run(context.Background(), workflow, RunOptions{EvidenceDir: t.TempDir(), ChromePath: chrome})
-			if err == nil || report.Status != StatusFail || report.Reason != "safety_policy" || len(report.Artifacts) != 0 {
+			if err == nil || report.Status != StatusUnverified || report.Reason != "safety_policy" || len(report.Artifacts) != 0 {
 				t.Fatalf("unsafe workflow: %+v %v", report, err)
 			}
 			data, err := os.ReadFile(filepath.Join(report.EvidenceDir, "report.json"))
@@ -182,7 +182,7 @@ func TestWorkflowChromeTimeoutAndProxyGuard(t *testing.T) {
 	workflow.TimeoutMS = 0
 	workflow.URL += "/redirect"
 	report, err = browser.Run(context.Background(), workflow, RunOptions{EvidenceDir: t.TempDir(), ChromePath: chrome})
-	if err == nil || report.Status != StatusFail || report.Reason != "safety_policy" {
+	if err == nil || report.Status != StatusUnverified || report.Reason != "safety_policy" {
 		t.Fatalf("redirect guard: %+v %v", report, err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

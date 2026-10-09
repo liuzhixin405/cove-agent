@@ -154,8 +154,13 @@ questions, and limit prompts keep their existing behavior.
 The permission callback marshals the actual tool input, requests publication on
 the owner, and waits without holding runner.mu. Remote TTL is the smaller of
 the local prompt timeout and five minutes. Local answers, timeout, drift,
-replacement, cancel and service stop revoke the pending ID; nil delivery means
-denial. With no active listener, the prompt remains local-only.
+replacement, cancel and service stop revoke the pending ID. A remote cancel or
+a service stop delivers a denied permit (the local prompt is refused); drift,
+TTL expiry and replacement deliver nil, which only means the remote side can no
+longer answer: the local prompt keeps waiting on its own timeout (a line typed
+locally while a prompt is open steers the task and moves the scope version; it
+must not refuse the prompt under the user's hands). With no active listener,
+the prompt remains local-only.
 
 At external-answer validation, the callback marshals the current input again.
 The owner verifies the same engine and Hub, re-reads current

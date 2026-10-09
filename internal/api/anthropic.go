@@ -191,7 +191,7 @@ func (p *anthropicProvider) buildRequest(req ChatRequest, stream bool) anthropic
 		Model:     req.Model,
 		MaxTokens: req.MaxTokens,
 		System:    system,
-		Messages:  p.convertMessages(req.Messages),
+		Messages:  p.convertMessages(req.Messages, req.Thinking != "disabled"),
 		Tools:     p.convertTools(req.Tools),
 		Stream:    stream,
 	}
@@ -332,7 +332,11 @@ func (p *anthropicProvider) extractToolCalls(blocks []anthropicContentBlock) []T
 	return calls
 }
 
-func (p *anthropicProvider) convertMessages(in []Message) []anthropicMsg {
+// convertMessages builds the request's message list. withThinking is false
+// for a request made with thinking disabled (the wrap-up summary): thinking
+// blocks kept in the history are then left out, since they are only required
+// (and only accepted) when thinking is on.
+func (p *anthropicProvider) convertMessages(in []Message, withThinking bool) []anthropicMsg {
 	var out []anthropicMsg
 	// appendTurn folds consecutive same-role messages into one turn. The API
 	// has only user and assistant roles: every tool result of one assistant
@@ -369,8 +373,10 @@ func (p *anthropicProvider) convertMessages(in []Message) []anthropicMsg {
 			var blocks []anthropicContentBlock
 			// Thinking first, verbatim, then text, then tool_use: the order
 			// the model produced them in.
-			for _, raw := range m.ThinkingBlocks {
-				blocks = append(blocks, anthropicContentBlock{Raw: raw})
+			if withThinking {
+				for _, raw := range m.ThinkingBlocks {
+					blocks = append(blocks, anthropicContentBlock{Raw: raw})
+				}
 			}
 			if strings.TrimSpace(m.Content) != "" {
 				blocks = append(blocks, anthropicContentBlock{Type: "text", Text: m.Content})

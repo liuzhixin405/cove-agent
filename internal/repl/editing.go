@@ -348,7 +348,18 @@ func layoutInput(prompt string, promptWidth int, buf []rune, cursor, w int) (row
 
 // needsMultiRow reports whether buf is drawn on several rows: it has a
 // newline or does not fit one row, and fits maxInputRows.
-func (lr *LineReader) needsMultiRow(buf []rune, w int) bool {
+// inputRowCap is how many rows the input may take on a terminal h rows
+// high: maxInputRows, but always leaving two rows (status and a line of
+// output) so a 12-row input on a 12-row terminal does not scroll the screen
+// and leave ghost rows the next clear cannot reach.
+func inputRowCap(h int) int {
+	if h <= 0 {
+		return maxInputRows
+	}
+	return max(1, min(maxInputRows, h-2))
+}
+
+func (lr *LineReader) needsMultiRow(buf []rune, w, h int) bool {
 	multi := false
 	width := 0
 	widths, _ := cellWidths(buf)
@@ -363,7 +374,7 @@ func (lr *LineReader) needsMultiRow(buf []rune, w int) bool {
 		return false
 	}
 	rows, _, _ := layoutInput(lr.prompt, lr.promptWidth, buf, len(buf), w)
-	return len(rows) <= maxInputRows
+	return len(rows) <= inputRowCap(h)
 }
 
 // clearRowsLocked erases a multi-row input: up to its first row, then to
@@ -379,18 +390,51 @@ func (lr *LineReader) clearRowsLocked() {
 // redrawMultiLocked draws buf on several rows and puts the cursor on its row
 // by re-printing that row up to it (the terminal's own width rules then
 // place it, as in the one-row editor).
-func (lr *LineReader) redrawMultiLocked(buf []rune, cursor, w int) {
+func (lr *LineReader) redrawMultiLocked(buf []rune, cursor, w, h int) {
 	if lr.drawnRows > 0 {
 		lr.clearRowsLocked()
 	} else {
 		termPrint("\x1b[0m\x1b[?25h\r\x1b[2K")
 	}
 	rows, curRow, curOff := layoutInput(lr.prompt, lr.promptWidth, buf, cursor, w)
+	if len(rows) > inputRowCap(h) {
+		shown := displayRunes(buf)
+		disp, _, _, start := inputDisplayWindow(shown, cursor, w-lr.promptWidth-1)
+		rows = []inputRow{{prefix: lr.prompt, text: disp}}
+		curRow, curOff = 0, cursor-start
+	}
+	if len(buf) == 0 && permInputCh == nil {
+		placeholder := lr.placeholder
+		if lr.choiceSearch {
+			placeholder = "搜索会话"
+		}
+		text, _ := truncateRunesByCells([]rune(placeholder), w-lr.promptWidth-1)
+		rows[0].prefix += "\x1b[90m"
+		rows[0].text = text
+	}
+	if text := lr.statusLineLocked(); text != "" {
+		status, _ := truncateRunesByCells([]rune(text), w-1)
+		rows = append([]inputRow{{prefix: "\x1b[2m", text: status}}, rows...)
+		curRow++
+	}
+	if lines := lr.displayRowsLocked(); len(lines) > 0 {
+		count := lr.panelRows(h)
+		if available := h - len(rows) - 1; count > available {
+			count = max(0, available)
+		}
+		panel := make([]inputRow, 0, count)
+		for _, line := range lines[:count] {
+			text, _ := truncateRunesByCells([]rune(line), w-1)
+			panel = append(panel, inputRow{text: text})
+		}
+		rows = append(panel, rows...)
+		curRow += len(panel)
+	}
 	for i, row := range rows {
 		if i > 0 {
 			termPrint("\r\n")
 		}
-		termPrint(row.prefix + "\x1b[0m" + string(row.text))
+		termPrint("\x1b[0m" + row.prefix + string(row.text) + "\x1b[0m")
 	}
 	if up := len(rows) - 1 - curRow; up > 0 {
 		termPrint(fmt.Sprintf("\x1b[%dA", up))

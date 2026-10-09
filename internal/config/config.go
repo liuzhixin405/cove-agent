@@ -18,10 +18,15 @@ import (
 )
 
 type ProviderConfig struct {
-	Name    string   `json:"name"`
-	APIKey  string   `json:"api_key,omitempty"`
-	APIKeys []string `json:"-"`
-	BaseURL string   `json:"base_url,omitempty"`
+	Name          string   `json:"name"`
+	APIKey        string   `json:"api_key,omitempty"`
+	APIKeys       []string `json:"-"`
+	BaseURL       string   `json:"base_url,omitempty"`
+	ImageFilesAPI *bool    `json:"image_files_api,omitempty"`
+}
+
+func (p ProviderConfig) ImageFilesEnabled() bool {
+	return p.ImageFilesAPI != nil && *p.ImageFilesAPI
 }
 
 // MarshalJSON masks the API key to prevent leakage in logs/display.
@@ -128,9 +133,10 @@ func (p *Profile) rawJSON() (json.RawMessage, error) {
 	}
 	if p.Provider != nil {
 		if m["provider"], err = json.Marshal(rawProvider{
-			Name:    p.Provider.Name,
-			APIKey:  p.Provider.APIKey,
-			BaseURL: p.Provider.BaseURL,
+			Name:          p.Provider.Name,
+			APIKey:        p.Provider.APIKey,
+			BaseURL:       p.Provider.BaseURL,
+			ImageFilesAPI: p.Provider.ImageFilesAPI,
 		}); err != nil {
 			return nil, err
 		}
@@ -648,6 +654,10 @@ func loadProjectOverride(cfg *Config) error {
 	if override.Provider.BaseURL != "" && sensitive("provider.base_url") {
 		cfg.Provider.BaseURL = override.Provider.BaseURL
 	}
+	if override.Provider.ImageFilesAPI != nil && sensitive("provider.image_files_api") {
+		value := *override.Provider.ImageFilesAPI
+		cfg.Provider.ImageFilesAPI = &value
+	}
 	if override.ThinkingTokens > 0 {
 		cfg.ThinkingTokens = override.ThinkingTokens
 	}
@@ -973,6 +983,13 @@ func mergeChanges(dst, base, cur map[string]json.RawMessage) {
 }
 
 func mergeProvider(dst map[string]json.RawMessage, base, cur json.RawMessage, writeAll bool) {
+	// No baseline (Save dropped loadedView["provider"] because the applied
+	// profile was deleted): every field is written, and a field the profile
+	// did not set is removed from disk instead of surviving next to the
+	// profile's name and key (a stale base_url sent the new key elsewhere).
+	if len(base) == 0 {
+		writeAll = true
+	}
 	var disk, was, now map[string]json.RawMessage
 	_ = json.Unmarshal(dst["provider"], &disk)
 	if disk == nil {
@@ -980,7 +997,7 @@ func mergeProvider(dst map[string]json.RawMessage, base, cur json.RawMessage, wr
 	}
 	_ = json.Unmarshal(base, &was)
 	_ = json.Unmarshal(cur, &now)
-	for _, k := range []string{"name", "api_key", "base_url"} {
+	for _, k := range []string{"name", "api_key", "base_url", "image_files_api"} {
 		v, ok := now[k]
 		if !writeAll && bytes.Equal(was[k], v) {
 			continue
@@ -992,6 +1009,18 @@ func mergeProvider(dst map[string]json.RawMessage, base, cur json.RawMessage, wr
 		}
 	}
 	dst["provider"], _ = json.Marshal(disk)
+}
+
+// MarshalRaw is cfg as a config.json to be loaded by another cove process:
+// every field under its JSON name with the API keys in full. json.Marshal(cfg)
+// writes the masked key (ProviderConfig.MarshalJSON is for display), which a
+// child then clears on load and runs without credentials.
+func (c *Config) MarshalRaw() ([]byte, error) {
+	view, err := rawView(c)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(view)
 }
 
 // rawView is cfg as it is written to disk: each field under its JSON name, the
@@ -1008,9 +1037,10 @@ func rawView(cfg *Config) (map[string]json.RawMessage, error) {
 
 	// Re-marshal provider using rawProvider  - no masking MarshalJSON.
 	providerRaw, err := json.Marshal(rawProvider{
-		Name:    cfg.Provider.Name,
-		APIKey:  cfg.Provider.APIKey,
-		BaseURL: cfg.Provider.BaseURL,
+		Name:          cfg.Provider.Name,
+		APIKey:        cfg.Provider.APIKey,
+		BaseURL:       cfg.Provider.BaseURL,
+		ImageFilesAPI: cfg.Provider.ImageFilesAPI,
 	})
 	if err != nil {
 		return nil, err
@@ -1042,9 +1072,10 @@ func rawView(cfg *Config) (map[string]json.RawMessage, error) {
 // rawProvider mirrors ProviderConfig fields without the masking MarshalJSON method.
 // Used by Save to write the full API key to disk.
 type rawProvider struct {
-	Name    string `json:"name"`
-	APIKey  string `json:"api_key,omitempty"`
-	BaseURL string `json:"base_url,omitempty"`
+	Name          string `json:"name"`
+	APIKey        string `json:"api_key,omitempty"`
+	BaseURL       string `json:"base_url,omitempty"`
+	ImageFilesAPI *bool  `json:"image_files_api,omitempty"`
 }
 
 func (c *Config) EffectiveProvider() ProviderConfig {

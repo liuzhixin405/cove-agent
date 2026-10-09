@@ -28,8 +28,8 @@ func handleBuiltinConfigCommand(input string, cfg *config.Config, eng *engine.En
 	case strings.HasPrefix(input, "/model "):
 		if err := applyProviderConfigChange(cfg, eng, func() error {
 			cfg.Model = config.ResolveModelForProvider(strings.TrimPrefix(input, "/model "), cfg.Provider.Name)
-			return config.Save(cfg)
-		}); err != nil {
+			return nil
+		}, func() error { return config.Save(cfg) }); err != nil {
 			outf("模型更新失败: %v\n", err)
 			return true
 		}
@@ -46,8 +46,8 @@ func handleBuiltinConfigCommand(input string, cfg *config.Config, eng *engine.En
 			oldProvider := cfg.EffectiveProvider().Name
 			cfg.Provider.Name = providerName
 			cfg.Model = providerSwitchModel(oldProvider, providerName, cfg.Model)
-			return config.Save(cfg)
-		}); err != nil {
+			return nil
+		}, func() error { return config.Save(cfg) }); err != nil {
 			outf("供应商更新失败: %v\n", err)
 			return true
 		}
@@ -56,8 +56,8 @@ func handleBuiltinConfigCommand(input string, cfg *config.Config, eng *engine.En
 	case strings.HasPrefix(input, "/api-key "):
 		if err := applyProviderConfigChange(cfg, eng, func() error {
 			cfg.Provider.APIKey = strings.TrimSpace(strings.TrimPrefix(input, "/api-key "))
-			return config.Save(cfg)
-		}); err != nil {
+			return nil
+		}, func() error { return config.Save(cfg) }); err != nil {
 			outf("API 密钥更新失败: %v\n", err)
 			return true
 		}
@@ -66,8 +66,8 @@ func handleBuiltinConfigCommand(input string, cfg *config.Config, eng *engine.En
 	case strings.HasPrefix(input, "/base-url "):
 		if err := applyProviderConfigChange(cfg, eng, func() error {
 			cfg.Provider.BaseURL = strings.TrimSpace(strings.TrimPrefix(input, "/base-url "))
-			return config.Save(cfg)
-		}); err != nil {
+			return nil
+		}, func() error { return config.Save(cfg) }); err != nil {
 			outf("Base URL 更新失败: %v\n", err)
 			return true
 		}
@@ -248,11 +248,6 @@ func handleProfileCommand(input string, cfg *config.Config, eng *engine.Engine) 
 			outf("profile %s 不存在\n", name)
 			return
 		}
-		cfg.ActiveProfile = name
-		if err := config.Save(cfg); err != nil {
-			outf("保存 active_profile 失败: %v\n", err)
-			return
-		}
 		loaded, err := config.LoadWithProfile(name)
 		if err != nil {
 			outf("加载 profile 失败: %v\n", err)
@@ -260,8 +255,9 @@ func handleProfileCommand(input string, cfg *config.Config, eng *engine.Engine) 
 		}
 		if err := applyProviderConfigChange(cfg, eng, func() error {
 			*cfg = *loaded
+			cfg.ActiveProfile = name
 			return nil
-		}); err != nil {
+		}, func() error { return config.Save(cfg) }); err != nil {
 			outf("应用 profile 失败: %v\n", err)
 			return
 		}

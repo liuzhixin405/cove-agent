@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"time"
 
@@ -62,6 +63,39 @@ var (
 
 // extractTimeout bounds one turn-end memory extraction.
 const extractTimeout = 30 * time.Second
+
+var errBackgroundBudget = errors.New("background learning skipped: model budget exhausted")
+
+type backgroundBudgetProvider struct {
+	api.Provider
+	overBudget func() bool
+}
+
+func (p *backgroundBudgetProvider) Capabilities() api.Capabilities {
+	return api.CapabilitiesOf(p.Provider)
+}
+
+func (p *backgroundBudgetProvider) Chat(ctx context.Context, request api.ChatRequest) (*api.ChatResponse, error) {
+	if p.overBudget() {
+		return nil, errBackgroundBudget
+	}
+	return p.Provider.Chat(ctx, request)
+}
+
+func (p *backgroundBudgetProvider) ChatStream(ctx context.Context, request api.ChatRequest, handler api.StreamHandler) (*api.ChatResponse, error) {
+	if p.overBudget() {
+		return nil, errBackgroundBudget
+	}
+	return p.Provider.ChatStream(ctx, request, handler)
+}
+
+func (e *Engine) backgroundProvider() api.Provider {
+	return &backgroundBudgetProvider{Provider: e.llm, overBudget: e.backgroundOverBudget}
+}
+
+func (e *Engine) backgroundOverBudget() bool {
+	return e.costTracker != nil && e.costTracker.OverBudget()
+}
 
 // setExtractRunner installs r as the turn-end memory extractor: its finished
 // extractions are recorded in the memory store (so /memory stats and the
@@ -181,7 +215,8 @@ func (e *Engine) runBackgroundWork(job backgroundJob) {
 	}
 
 	extracted := 0
-	if job.learn && e.extractRunner != nil && len(job.msgs) > 0 {
+	canLearn := func() bool { return job.learn && !e.backgroundOverBudget() }
+	if canLearn() && e.extractRunner != nil && len(job.msgs) > 0 {
 		ctx, cancel := context.WithTimeout(context.Background(), extractTimeout)
 		before := e.extractSaved.Load()
 		mems := e.memorySnapshot()
@@ -201,7 +236,7 @@ func (e *Engine) runBackgroundWork(job backgroundJob) {
 		sum.Extra = append(sum.Extra, checkpointHint)
 	}
 	report := e.OnBackgroundSummary
-	if job.learn && e.dreamRunner != nil {
+	if canLearn() && e.dreamRunner != nil {
 		wasRunning := dream.ActiveTask() != nil
 		// The run's own 5-minute bound lives in ExecuteAutoDream's detached
 		// context: this returns as soon as a consolidation is spawned.
@@ -212,7 +247,7 @@ func (e *Engine) runBackgroundWork(job backgroundJob) {
 			sum.DreamChanged = e.dreamGateMoved(sum.DreamStatus, sum.DreamFired)
 		}
 	}
-	if job.learn && len(job.review) > 0 {
+	if canLearn() && len(job.review) > 0 {
 		e.reviewBg.Add(1)
 		releaseWaited()
 		func() {

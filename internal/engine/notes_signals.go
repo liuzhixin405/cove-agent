@@ -23,7 +23,7 @@ const zhNegations = "没未不无你由"
 
 var (
 	decisionPatterns = []signalPattern{
-		{re: regexp.MustCompile(`(?i)(?:use|using|we.ll use|go with|let.s use|switch to|prefer|stick with)\s+(.+?)(?:\.|$)`)},
+		{re: regexp.MustCompile(`(?i)\b(?:use|using|we.ll use|go with|let.s use|switch to|prefer|stick with)\s+(.+?)(?:\.|$)`)},
 		{re: regexp.MustCompile(`(?i)(?:I prefer|I like|I want|let.s go with)\s+(.+?)(?:\.|$)`)},
 		// Chinese: 改用/采用/决定/换成 anywhere but after a negation.
 		{re: regexp.MustCompile(`(?:改用|采用|决定|换成)\s*(.+?)(?:[。！!？?；;\n]|$)`), rejectBefore: zhNegations},
@@ -33,7 +33,7 @@ var (
 		{re: regexp.MustCompile(`(?:^|[，,。；;！!？?\s])用\s*(.+?)(?:[。！!？?；;\n]|$)`), rejectAfter: "户例法途于来以"},
 	}
 	discoveryPatterns = []signalPattern{
-		{re: regexp.MustCompile(`(?i)(?:I found|discovered|the issue is|the reason is|it turns out)\s+(.+?)(?:\.|$)`)},
+		{re: regexp.MustCompile(`(?i)\b(?:I found|discovered|the issue is|the reason is|it turns out)\s+(.+?)(?:\.|$)`)},
 		{re: regexp.MustCompile(`(?i)(?:fixed by|resolved by|solved by)\s+(.+?)(?:\.|$)`)},
 		{re: regexp.MustCompile(`(?:发现|原因是)\s*[:：]?\s*(.+?)(?:[。！!？?；;\n]|$)`), rejectBefore: zhNegations},
 	}

@@ -68,3 +68,48 @@ func TestPluginInstallDerivesNameFromAnyGitURL(t *testing.T) {
 		}
 	}
 }
+
+type contextPluginManager struct {
+	fakePluginManager
+	received context.Context
+}
+
+func (m *contextPluginManager) InstallContext(ctx context.Context, name, url string) error {
+	m.received = ctx
+	return ctx.Err()
+}
+
+func (m *contextPluginManager) MarketplaceInstall(string) error { return nil }
+func (m *contextPluginManager) MarketplaceRefresh() error       { return nil }
+func (m *contextPluginManager) MarketplaceUpdate(string) (string, error) {
+	return "", nil
+}
+func (m *contextPluginManager) MarketplaceInstallContext(ctx context.Context, name string) error {
+	m.received = ctx
+	return ctx.Err()
+}
+func (m *contextPluginManager) MarketplaceRefreshContext(ctx context.Context) error {
+	m.received = ctx
+	return ctx.Err()
+}
+func (m *contextPluginManager) MarketplaceUpdateContext(ctx context.Context, name string) (string, error) {
+	m.received = ctx
+	return "", ctx.Err()
+}
+
+func TestPluginCommandPassesContext(t *testing.T) {
+	for _, args := range [][]string{
+		{"install", "demo", "https://example.test/demo.git"},
+		{"install", "demo"}, {"refresh"}, {"update", "demo"}, {"update"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			manager := &contextPluginManager{}
+			_, _ = NewPluginCmd().Execute(ctx, Input{Args: args, PluginManager: manager})
+			if manager.received != ctx {
+				t.Fatal("plugin command did not pass its context to the manager")
+			}
+		})
+	}
+}

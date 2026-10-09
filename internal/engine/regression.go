@@ -88,7 +88,11 @@ func (t *regressionTool) Call(ctx context.Context, input tool.Input, tctx tool.C
 	if why := t.Validate(input); why != "" {
 		return tool.Result{Data: why, IsError: true}, nil
 	}
-	evidence, err := runRegression(ctx, input, tctx.Cwd)
+	var manager *checkpoint.Manager
+	if t.engine != nil {
+		manager = t.engine.cpMgr
+	}
+	evidence, err := runRegression(ctx, input, tctx.Cwd, manager)
 	if err != nil {
 		return tool.Result{Data: err.Error(), IsError: true}, nil
 	}
@@ -128,6 +132,7 @@ func runRegressionProcess(ctx context.Context, dir, pkg, pattern, overlay string
 	args = append(args, pkg)
 	cmd := exec.CommandContext(ctx, "go", args...)
 	cmd.Dir, cmd.WaitDelay = dir, 3*time.Second
+	tool.ConfigureProcessTreeKill(ctx, cmd)
 	var output regressionOutput
 	var diagnostics regressionOutput
 	cmd.Stdout, cmd.Stderr = &output, &diagnostics
@@ -151,7 +156,11 @@ func runRegressionProcess(ctx context.Context, dir, pkg, pattern, overlay string
 	return result
 }
 
-func runRegression(ctx context.Context, input tool.Input, dir string) (delegate.RegressionEvidence, error) {
+// runRegression verifies with manager when it snapshots dir (the engine's own
+// manager, so its mutex serialises this Create with checkpointBefore on a
+// parallel sub-agent's write: two managers on the same index file raced for
+// index.lock), and with a fresh one otherwise.
+func runRegression(ctx context.Context, input tool.Input, dir string, manager *checkpoint.Manager) (delegate.RegressionEvidence, error) {
 	if err := ctx.Err(); err != nil {
 		return delegate.RegressionEvidence{}, err
 	}
@@ -159,9 +168,15 @@ func runRegression(ctx context.Context, input tool.Input, dir string) (delegate.
 	if err != nil {
 		return delegate.RegressionEvidence{}, err
 	}
-	manager, err := checkpoint.New(dir)
-	if err != nil {
-		return delegate.RegressionEvidence{}, err
+	if manager != nil {
+		if managed, err := filepath.Abs(manager.WorkDir()); err != nil || !strings.EqualFold(filepath.Clean(managed), filepath.Clean(dir)) {
+			manager = nil
+		}
+	}
+	if manager == nil {
+		if manager, err = checkpoint.New(dir); err != nil {
+			return delegate.RegressionEvidence{}, err
+		}
 	}
 	baseline, _ := input["baseline"].(string)
 	files := regressionFiles(input)

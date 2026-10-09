@@ -90,6 +90,43 @@ func TestDisplayMasking(t *testing.T) {
 	}
 }
 
+func TestImageFilesAPIConfigRoundTrip(t *testing.T) {
+	t.Setenv("COVE_CONFIG_DIR", t.TempDir())
+	cfg := DefaultConfig()
+	if err := json.Unmarshal([]byte(`{"name":"deepseek","image_files_api":true}`), &cfg.Provider); err != nil {
+		t.Fatal(err)
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(os.Getenv("COVE_CONFIG_DIR"), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored struct {
+		Provider struct {
+			ImageFilesAPI *bool `json:"image_files_api"`
+		} `json:"provider"`
+	}
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Provider.ImageFilesAPI == nil || !*stored.Provider.ImageFilesAPI {
+		t.Fatal("Files API opt-in lost on save")
+	}
+	profileJSON, err := json.Marshal(cfg.SnapshotProfile())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.Provider.ImageFilesAPI = nil
+	if err := json.Unmarshal(profileJSON, &stored); err != nil {
+		t.Fatal(err)
+	}
+	if stored.Provider.ImageFilesAPI == nil || !*stored.Provider.ImageFilesAPI {
+		t.Fatal("Files API opt-in lost in profile snapshot")
+	}
+}
+
 func TestNormalizeClearsMaskedKey(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Provider.APIKey = "sk-a****cdef"

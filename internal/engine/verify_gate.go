@@ -15,6 +15,7 @@ import (
 
 	"github.com/liuzhixin405/cove-agent/internal/permission"
 	"github.com/liuzhixin405/cove-agent/internal/shell"
+	"github.com/liuzhixin405/cove-agent/internal/tool"
 )
 
 // VerifyResult captures the outcome of running one configured verification
@@ -291,8 +292,11 @@ func runVerifyCommand(ctx context.Context, cmdStr string, workDir string) (outpu
 		cmd.Dir = workDir
 	}
 	cmd.Env = shell.Env(os.Environ())
-	// On timeout only the outer shell is killed; a build child that keeps the
-	// output pipes open would otherwise make Run wait for it indefinitely.
+	// On timeout kill the whole tree (the shell plus the go/npm/dotnet it
+	// started), as the bash tool does; killing only the outer shell left the
+	// build running, holding caches and writing into the workspace. WaitDelay
+	// stays as a backstop for pipes a stray grandchild still holds.
+	tool.ConfigureProcessTreeKill(ctx, cmd)
 	cmd.WaitDelay = 5 * time.Second
 
 	var buf bytes.Buffer

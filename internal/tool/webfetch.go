@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"html"
 	"io"
 	"mime"
 	"net/http"
@@ -16,6 +15,7 @@ import (
 
 	"golang.org/x/text/encoding/htmlindex"
 
+	"github.com/liuzhixin405/cove-agent/internal/browser"
 	"github.com/liuzhixin405/cove-agent/internal/safeurl"
 	"github.com/liuzhixin405/cove-agent/internal/textutil"
 )
@@ -181,74 +181,12 @@ func decodeFetchedCharset(body []byte, contentType string, isHTML bool) (text st
 	return string(body), false
 }
 
-var (
-	reScript     = regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
-	reStyle      = regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
-	reTag        = regexp.MustCompile(`(?is)<[^>]+>`)
-	reHeading1   = regexp.MustCompile(`(?is)<h1[^>]*>(.*?)</h1>`)
-	reHeading2   = regexp.MustCompile(`(?is)<h2[^>]*>(.*?)</h2>`)
-	reHeading3   = regexp.MustCompile(`(?is)<h3[^>]*>(.*?)</h3>`)
-	reHeading4   = regexp.MustCompile(`(?is)<h4[^>]*>(.*?)</h4>`)
-	reHeading5   = regexp.MustCompile(`(?is)<h5[^>]*>(.*?)</h5>`)
-	reHeading6   = regexp.MustCompile(`(?is)<h6[^>]*>(.*?)</h6>`)
-	rePre        = regexp.MustCompile(`(?is)<pre[^>]*>(.*?)</pre>`)
-	reCode       = regexp.MustCompile(`(?is)<code[^>]*>(.*?)</code>`)
-	reAnchor     = regexp.MustCompile(`(?is)<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>`)
-	reListItem   = regexp.MustCompile(`(?is)<li[^>]*>(.*?)</li>`)
-	reBlockBreak = regexp.MustCompile(`(?is)</?(p|div|section|article|br|hr|ul|ol|table|tr|td|th|blockquote)[^>]*>`)
-	reMultiNL    = regexp.MustCompile(`\n{3,}`)
-	reMultiSpace = regexp.MustCompile(`[ \t]+`)
-)
-
 func htmlToText(s string) string {
-	s = reScript.ReplaceAllString(s, " ")
-	s = reStyle.ReplaceAllString(s, " ")
-	s = reBlockBreak.ReplaceAllString(s, "\n")
-	s = reTag.ReplaceAllString(s, " ")
-	s = html.UnescapeString(s)
-
-	lines := strings.Split(s, "\n")
-	for i := range lines {
-		lines[i] = strings.TrimSpace(reMultiSpace.ReplaceAllString(lines[i], " "))
-	}
-	s = strings.Join(lines, "\n")
-	s = reMultiNL.ReplaceAllString(s, "\n\n")
-	return strings.TrimSpace(s)
+	return browser.HTMLToText(s)
 }
 
 func htmlToMarkdown(s string) string {
-	s = reScript.ReplaceAllString(s, "\n")
-	s = reStyle.ReplaceAllString(s, "\n")
-	s = rePre.ReplaceAllStringFunc(s, func(m string) string {
-		inner := rePre.ReplaceAllString(m, "$1")
-		inner = htmlToText(inner)
-		return "\n```\n" + inner + "\n```\n"
-	})
-	s = reHeading1.ReplaceAllString(s, "\n# $1\n")
-	s = reHeading2.ReplaceAllString(s, "\n## $1\n")
-	s = reHeading3.ReplaceAllString(s, "\n### $1\n")
-	s = reHeading4.ReplaceAllString(s, "\n#### $1\n")
-	s = reHeading5.ReplaceAllString(s, "\n##### $1\n")
-	s = reHeading6.ReplaceAllString(s, "\n###### $1\n")
-	s = reAnchor.ReplaceAllString(s, "[$2]($1)")
-	s = reCode.ReplaceAllString(s, "`$1`")
-	s = reListItem.ReplaceAllString(s, "\n- $1")
-	s = reBlockBreak.ReplaceAllString(s, "\n")
-	s = reTag.ReplaceAllString(s, " ")
-	s = html.UnescapeString(s)
-
-	lines := strings.Split(s, "\n")
-	for i := range lines {
-		line := strings.TrimSpace(reMultiSpace.ReplaceAllString(lines[i], " "))
-		if strings.HasPrefix(line, "- ") {
-			lines[i] = line
-		} else {
-			lines[i] = strings.TrimSpace(line)
-		}
-	}
-	s = strings.Join(lines, "\n")
-	s = reMultiNL.ReplaceAllString(s, "\n\n")
-	return strings.TrimSpace(s)
+	return browser.HTMLToMarkdown(s)
 }
 
 func (t *WebFetchTool) CheckPermissions(input Input, tctx Context) PermissionDecision {

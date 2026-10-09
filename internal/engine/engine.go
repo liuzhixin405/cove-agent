@@ -136,6 +136,7 @@ type Engine struct {
 	runtime               *tool.Runtime
 	fileHistory           map[string]bool
 	fileMu                sync.Mutex
+	agentActivity         delegate.ActivityStore
 	steerMu               sync.Mutex
 	pendingSteer          string
 	pendingSteerN         int // Steer calls behind pendingSteer (PendingSteer)
@@ -306,6 +307,8 @@ type Engine struct {
 	// contextTokens mirrors totalTokens and turnModelSnap the model of the
 	// running turn, for ContextUsage from the status line's goroutine.
 	contextTokens atomic.Int64
+	// messageCount mirrors len(messages) for readers off the turn goroutine.
+	messageCount  atomic.Int64
 	turnModelSnap atomic.Value
 	// turnCheckpointed records that this turn created a checkpoint, for the
 	// "/undo" hint of the summary line. Guarded by fileMu.
@@ -498,10 +501,10 @@ func New(config Config) (*Engine, error) {
 	e.backgroundModel = backgroundModel
 
 	// Initialize extract runner (auto memory extraction)
-	e.setExtractRunner(extract.NewRunner(metered, backgroundModel))
+	e.setExtractRunner(extract.NewRunner(e.backgroundProvider(), backgroundModel))
 
 	// Initialize dream runner (periodic memory consolidation)
-	e.dreamRunner = dream.NewRunner(metered, backgroundModel, e.session.ID)
+	e.dreamRunner = dream.NewRunner(e.backgroundProvider(), backgroundModel, e.session.ID)
 
 	// Initialize checkpoint manager (git-based file snapshots)
 	if cpMgr, err := startupCheckpoints(cwd); err == nil {
@@ -587,7 +590,11 @@ func (e *Engine) SetWorkingDir(dir string) {
 func (e *Engine) SetProjectContext(pc *ctxt.ProjectContext) { e.projCtx = pc }
 func (e *Engine) SetSystemOverride(prompt string)           { e.systemOverride = prompt }
 func (e *Engine) ReloadProvider(provider, model, baseURL, apiKey string) error {
-	cfg := api.ProviderConfig{Name: provider, APIKey: apiKey, BaseURL: baseURL}
+	cfg := api.ProviderConfig{Name: provider, APIKey: apiKey, BaseURL: baseURL, ImageFilesAPI: e.config.Provider.ImageFilesAPI}
+	return e.ReloadProviderConfig(cfg, model)
+}
+
+func (e *Engine) ReloadProviderConfig(cfg api.ProviderConfig, model string) error {
 	prov := api.DetectProvider(model, cfg)
 	if err := prov.Validate(); err != nil {
 		return err
@@ -1222,15 +1229,17 @@ func (e *Engine) shouldShowWalkingIndicator(iter int) bool {
 // goroutine (a single call, a serial barrier call, a deferred same-file
 // write). A panicking tool becomes that call's error result, as it already
 // did on the parallel path; before, it took the whole process down.
-func (e *Engine) runToolRecovered(ctx context.Context, tc api.ToolCall) (out string, failed bool) {
+func (e *Engine) runToolRecovered(ctx context.Context, tc api.ToolCall) (out string, failed bool, parts []api.MessagePart) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Warnf("tool %s panicked: %v", tc.Name, r)
 			out = fmt.Sprintf("Error: tool panicked: %v", r)
 			failed = true
+			parts = nil
 		}
 	}()
-	return e.executeTool(ctx, tc)
+	out, failed = e.executeToolWithParts(ctx, tc, &parts)
+	return
 }
 
 // executeTool runs one tool call through the pipeline and returns what the
@@ -1239,6 +1248,10 @@ func (e *Engine) runToolRecovered(ctx context.Context, tc api.ToolCall) (out str
 // tell a failure by an "Error:" or "BLOCKED" prefix, which a guardrail note
 // or any wrapper in front of the text silently defeated.
 func (e *Engine) executeTool(ctx context.Context, tc api.ToolCall) (toolOutput string, failed bool) {
+	return e.executeToolWithParts(ctx, tc, nil)
+}
+
+func (e *Engine) executeToolWithParts(ctx context.Context, tc api.ToolCall, parts *[]api.MessagePart) (toolOutput string, failed bool) {
 	if err := ctx.Err(); err != nil {
 		return "Error: " + err.Error(), true
 	}
@@ -1352,6 +1365,16 @@ func (e *Engine) executeTool(ctx context.Context, tc api.ToolCall) (toolOutput s
 	}
 
 	cwd := e.projectCwd()
+	// Inside a worktree the model entered (worktree tool) every tool runs
+	// there: file tools, glob/grep and the shell. The worktree lives next
+	// to the project (`../<branch>`), so with the project as cwd every read
+	// and edit in it was refused as "outside working directory" and the
+	// tool led nowhere. Checkpoints keep snapshotting the project tree.
+	if e.runtime != nil {
+		if wt := e.runtime.GetWorktreeDir(); wt != "" {
+			cwd = wt
+		}
+	}
 	// Calls dispatched from a model turn were checkpointed as a batch before
 	// any of them started; a sub-agent's calls arrive here one by one.
 	if !checkpointed(ctx) {
@@ -1392,7 +1415,10 @@ func (e *Engine) executeTool(ctx context.Context, tc api.ToolCall) (toolOutput s
 		// producing command isn't mislabeled as "stuck", and surface the
 		// chunk to the UI so the user can see what the command is doing,
 		// under a header naming the command the first time.
-		SetWaiting:       func(waiting bool) { e.pauseActivity(toolAct, waiting) },
+		SetWaiting: func(waiting bool) {
+			e.pauseActivity(toolAct, waiting)
+			delegate.ReportWaiting(ctx, waiting, tc.Name)
+		},
 		OnProgress:       func(chunk string) { onProgress(chunk, false) },
 		OnStderrProgress: func(chunk string) { onProgress(chunk, true) },
 	}
@@ -1429,7 +1455,7 @@ func (e *Engine) executeTool(ctx context.Context, tc api.ToolCall) (toolOutput s
 		return fmt.Sprintf("Error: invalid %s input: %s", tc.Name, errMsg), true
 	}
 
-	if err := e.authorizeToolCall(tc, tctx, func(waiting bool) { e.pauseActivity(toolAct, waiting) }); err != nil {
+	if err := e.authorizeToolCall(tc, tctx, tctx.SetWaiting); err != nil {
 		return "Error: " + err.Error(), true
 	}
 	// Warning-level findings (git push --force, git reset --hard) do not stop
@@ -1540,6 +1566,9 @@ func (e *Engine) executeTool(ctx context.Context, tc api.ToolCall) (toolOutput s
 		// listing thousands of errors); keep the first line and the last
 		// few, where the outcome is.
 		return token.TruncateKeepTail(out, toolOutputLimit(tc.Name, e.currentModel()), errorTailLines), true
+	}
+	if parts != nil {
+		*parts = append([]api.MessagePart(nil), result.Parts...)
 	}
 	return output, false
 }
@@ -1676,22 +1705,25 @@ func (e *Engine) authorizeToolCall(tc api.ToolCall, tctx tool.Context, setWaitin
 	// Pause, prompt and resume under one lock: with the resume outside it, a
 	// parallel call's prompt finishing restarted the spinner over a prompt
 	// that was still open.
-	e.promptMu.Lock()
-	hooks := e.turnHooks()
-	if hooks.PermissionPause != nil {
-		hooks.PermissionPause()
-	}
-	if setWaiting != nil {
-		setWaiting(true)
-	}
-	approved := e.PermissionPrompt(tc.Name, tc.Input, reason)
-	if setWaiting != nil {
-		setWaiting(false)
-	}
-	if hooks.PermissionDone != nil {
-		hooks.PermissionDone()
-	}
-	e.promptMu.Unlock()
+	approved := func() bool {
+		// Deferred: a prompt callback that panics is recovered by the tool
+		// runner and the turn goes on; a lock left held here would block
+		// every later approval and limit prompt for the session.
+		e.promptMu.Lock()
+		defer e.promptMu.Unlock()
+		hooks := e.turnHooks()
+		if hooks.PermissionPause != nil {
+			hooks.PermissionPause()
+		}
+		if setWaiting != nil {
+			setWaiting(true)
+			defer setWaiting(false)
+		}
+		if hooks.PermissionDone != nil {
+			defer hooks.PermissionDone()
+		}
+		return e.PermissionPrompt(tc.Name, tc.Input, reason)
+	}()
 	if !approved {
 		return permissionDenied(tc.Name, "user rejected")
 	}
@@ -1973,10 +2005,6 @@ func (e *Engine) compact(ctx context.Context, threshold int) *CompressResult {
 	if e.compressor == nil {
 		return nil
 	}
-	if e.sessionNotes != nil {
-		e.sessionNotes.AddDecision(fmt.Sprintf("Context compacted at %d tokens, %d messages", e.totalTokens, len(e.messages)))
-	}
-
 	// Use model_fast for compression summaries -- much cheaper than the main model.
 	// Falls back to the main model if model_fast is not configured.
 	tryChat := func(ctx context.Context, req api.ChatRequest) (*api.ChatResponse, error) {
@@ -1995,6 +2023,12 @@ func (e *Engine) compact(ctx context.Context, threshold int) *CompressResult {
 	}()
 	if result.Compressed {
 		e.messages = newMsgs
+		if e.sessionNotes != nil {
+			// Recorded only when something was compacted: a 3-message
+			// /compact or an overflow retry that changed nothing used to
+			// leave a "Context compacted" decision in the notes each time.
+			e.sessionNotes.AddDecision(fmt.Sprintf("Context compacted at %d tokens, %d messages", beforeTokens, beforeMsgs))
+		}
 		// Only a summary or the truncation fallback (fewer messages) replaced
 		// the head of the history; layer-1 trimming alone left the user's
 		// first request there.
@@ -2072,14 +2106,21 @@ func (e *Engine) LoadMessages(msgs []api.Message) {
 	e.updateTokenCount()
 }
 
+// Messages is the live history and belongs to the turn goroutine: callers on
+// the REPL thread must not use it while a task runs (commands that need it
+// are marked MutatesEngine). MessageCount is the safe read-only view.
 func (e *Engine) Messages() []api.Message { return e.messages }
 
+// MessageCount is len(Messages()) as of the last token recount, published
+// atomically so /status and /stats can show it while a turn is running.
+func (e *Engine) MessageCount() int { return int(e.messageCount.Load()) }
+
 func (e *Engine) recordEvent(_ context.Context, eventType string, payload map[string]any) {
+	e.recordingMu.Lock()
+	defer e.recordingMu.Unlock()
 	if !e.recordingEnabled || e.recordingDir == "" {
 		return
 	}
-	e.recordingMu.Lock()
-	defer e.recordingMu.Unlock()
 	if !e.recordingReady {
 		if err := e.writeRecordingMeta(); err != nil {
 			return
@@ -2569,6 +2610,14 @@ func (e *Engine) Output() uiout.Sink {
 	return uiout.Discard
 }
 
+func (e *Engine) AgentActivities() []delegate.Activity {
+	return e.agentActivity.Snapshot()
+}
+
+func (e *Engine) AgentActivityWake() <-chan struct{} {
+	return e.agentActivity.Wake()
+}
+
 // WirePlanExecutor sets up the PlanExecuteFunc on the runtime so the
 // execute_plan tool can decompose and run multi-step plans.
 // It uses the engine's own provider to power sub-agents.
@@ -2600,6 +2649,7 @@ func (e *Engine) WirePlanExecutor() {
 		d.SetContextSource(e.subAgentContext)
 		d.SetContextBudget(subAgentContextBudget)
 		d.SetProgress(func(line string) { e.engineOutput("  \x1b[2m" + line + "\x1b[0m") })
+		d.SetEventSink(e.agentActivity.Update)
 		d.SetFallback(e.fallbackModel)
 		pe := plan.NewPlanExecutor(d, e.runtime)
 		e.runtime.PlanExecuteFunc = func(ctx context.Context, parallel bool) (string, error) {

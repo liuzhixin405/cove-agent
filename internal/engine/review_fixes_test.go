@@ -138,6 +138,27 @@ func TestReloadProviderRetargetsTheRouter(t *testing.T) {
 	}
 }
 
+func TestReloadProviderPreservesAndDisablesImageFilesAPI(t *testing.T) {
+	eng := newPatternEngine(t, &seqProvider{}, func(cfg *Config) {
+		cfg.Provider.Name = "deepseek"
+		cfg.Provider.ImageFilesAPI = true
+	})
+	if err := eng.ReloadProvider("deepseek", "deepseek-flash", "", "sk-test"); err != nil {
+		t.Fatal(err)
+	}
+	if !eng.config.Provider.ImageFilesAPI {
+		t.Fatal("model reload lost Files API opt-in")
+	}
+	cfg := eng.config.Provider
+	cfg.ImageFilesAPI = false
+	if err := eng.ReloadProviderConfig(cfg, "deepseek-flash"); err != nil {
+		t.Fatal(err)
+	}
+	if eng.config.Provider.ImageFilesAPI {
+		t.Fatal("explicit Files API disable was ignored")
+	}
+}
+
 // learningRuntime forwards the remedy's window to the api layer, like the
 // CLI's Runtime does, and keeps its notes.
 type learningRuntime struct{ notes []string }

@@ -52,8 +52,10 @@ func NewSSETransport(sseURL string) (*sseTransport, error) {
 		return nil, fmt.Errorf("sse connect: %w", err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	// No timeout on the long-lived stream itself.
-	resp, err := (&http.Client{}).Do(req)
+	// No timeout on the long-lived stream itself, but the response headers
+	// must arrive: a server that accepts the connection and never answers
+	// used to hang LoadFromConfig (and so startup) and /mcp connect for good.
+	resp, err := (&http.Client{Transport: headerBoundedTransport(sseEndpointTimeout)}).Do(req)
 	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("sse connect: %w", err)
@@ -183,4 +185,16 @@ func (t *sseTransport) Receive(ctx context.Context) (json.RawMessage, error) {
 func (t *sseTransport) Close() error {
 	t.cancel()
 	return nil
+}
+
+// headerBoundedTransport is the default transport with a bound on how long a
+// server may take to send response headers; the body (an event stream) stays
+// unbounded.
+func headerBoundedTransport(timeout time.Duration) http.RoundTripper {
+	if base, ok := http.DefaultTransport.(*http.Transport); ok {
+		t := base.Clone()
+		t.ResponseHeaderTimeout = timeout
+		return t
+	}
+	return http.DefaultTransport
 }

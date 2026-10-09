@@ -166,8 +166,6 @@ var visionModelPatterns = []string{
 	"claude-sonnet", "claude-opus", "claude-haiku",
 	// OpenAI
 	"gpt-4o", "gpt-4-turbo", "gpt-4-vision", "o1", "o3", "o4",
-	// DeepSeek (deepseek-chat, deepseek-v*, deepseek-pro, deepseek-flash)
-	"deepseek-chat", "deepseek-v", "deepseek-pro", "deepseek-flash",
 	// GLM
 	"glm-4v", "cogview",
 	// Kimi
@@ -189,7 +187,14 @@ func IsVisionCapableModel(model string) bool {
 	if model == "" {
 		return true // assume capability if unknown
 	}
-	lower := strings.ToLower(model)
+	lower := strings.ToLower(strings.TrimSpace(model))
+	name := lower
+	if index := strings.LastIndex(name, "/"); index >= 0 {
+		name = name[index+1:]
+	}
+	if strings.HasPrefix(name, "deepseek") {
+		return name == "deepseek-flash" || name == "deepseek-v4-flash" || name == "deepseek-v4-flash-vision-exp"
+	}
 	for _, pat := range visionModelPatterns {
 		if strings.Contains(lower, pat) {
 			return true

@@ -309,15 +309,20 @@ func (r *replTaskRunner) EnqueueWithFeedback(msg api.Message) string {
 // been changed. Idle, or with attachments (which cannot travel as guidance
 // text), the message goes through Enqueue as before.
 func (r *replTaskRunner) SubmitWithFeedback(msg api.Message) string {
+	feedback, _ := r.submitWithFeedback(msg)
+	return feedback
+}
+
+func (r *replTaskRunner) submitWithFeedback(msg api.Message) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.running && r.eng != nil && len(msg.Parts) == 0 && strings.TrimSpace(msg.Content) != "" {
 		r.eng.Steer(msg.Content)
 		_, n := r.eng.PendingSteer()
 		repl.SetSteerCount(n)
-		return steerFeedback
+		return steerFeedback, true
 	}
-	return r.enqueueQueueFeedbackLocked(msg)
+	return r.enqueueQueueFeedbackResultLocked(msg)
 }
 
 // reclaimSteerLocked moves guidance the finished task never consumed to the

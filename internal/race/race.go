@@ -11,6 +11,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -237,11 +238,31 @@ func (s *Service) List() ([]*Report, error) {
 		}
 		report, err := s.Load(entry.Name())
 		if err != nil {
-			return nil, err
+			// A directory left by a crash between Mkdir and the first save
+			// (or created by hand) must not hide every other run forever.
+			continue
 		}
 		reports = append(reports, report)
 	}
 	return reports, nil
+}
+
+// outsideProject reports whether store (the reports directory) is not root or
+// inside it. Both paths are absolute and symlink-resolved. On Windows a
+// project on D: and the default ~/.cove on C: make filepath.Rel fail, which
+// used to be read as "inside" and refused every cross-volume /race run.
+func outsideProject(root, store string) bool {
+	if runtime.GOOS == "windows" {
+		root, store = strings.ToLower(root), strings.ToLower(store)
+	}
+	if filepath.VolumeName(root) != filepath.VolumeName(store) {
+		return true
+	}
+	rel, err := filepath.Rel(root, store)
+	if err != nil {
+		return false
+	}
+	return rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (s *Service) Cancel(id string) error {
@@ -322,8 +343,7 @@ func (s *Service) run(ctx context.Context, project string, spec Spec, ready func
 	if err != nil {
 		return nil, err
 	}
-	rel, err := filepath.Rel(baseline.Root, absStore)
-	if err != nil || rel == "." || !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && rel != ".." {
+	if !outsideProject(baseline.Root, absStore) {
 		return nil, errors.New("race reports must live outside the source project in the config directory")
 	}
 	root, err := s.storage()
@@ -382,19 +402,19 @@ func (s *Service) candidate(ctx context.Context, baseline workspace.Baseline, id
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(spec.CandidateTimeoutSeconds)*time.Second)
 	defer cancel()
 	defer func() {
-		if ctx.Err() != nil && candidate.Generation.Status == "queued" {
+		if ctx.Err() != nil && (candidate.Generation.Status == "queued" || candidate.Generation.Status == "start_error") {
 			candidate.Generation.Status = contextStatus(ctx)
 		}
 	}()
 	parent, err := os.MkdirTemp("", "cove-race-")
 	if err != nil {
-		candidate.Error = err.Error()
+		candidate.Generation.Status, candidate.Error = "start_error", err.Error()
 		return
 	}
 	defer os.RemoveAll(parent)
 	work := filepath.Join(parent, candidate.ID)
 	if err := baseline.Add(ctx, work); err != nil {
-		candidate.Error = err.Error()
+		candidate.Generation.Status, candidate.Error = "start_error", err.Error()
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
 		_ = baseline.Remove(cleanupCtx, work)
@@ -499,7 +519,12 @@ func (s *Service) Select(ctx context.Context, project, id, name string) (*Report
 	if err != nil {
 		return nil, err
 	}
-	if report.Status != "completed" || report.Selected != "" {
+	// A run that hit the total timeout or was cancelled may still hold a
+	// candidate that finished generation and every verifier before the cut;
+	// its evidence (patch, hash, verification argv/exit codes) is complete and
+	// is checked below exactly as for a completed run. Only a run still in
+	// progress (or already applied) is refused here.
+	if report.Status == "running" || report.Selected != "" || (report.Status != "completed" && report.Status != "timeout" && report.Status != "cancelled") {
 		return nil, errors.New("run is incomplete or already selected")
 	}
 	baseline, err := workspace.Capture(ctx, project)

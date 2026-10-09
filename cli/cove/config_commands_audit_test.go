@@ -76,3 +76,33 @@ func TestConfigCommandsReportSaveFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestProviderCommandsRestoreConfigurationOnSaveFailure(t *testing.T) {
+	for _, input := range []string{"/model deepseek-v4-pro", "/provider openai", "/api-key replacement", "/base-url https://example.test/v1"} {
+		t.Run(input, func(t *testing.T) {
+			eng := newTestEngine(t)
+			captureOut(t)
+			cfg := config.DefaultConfig()
+			cfg.Model = "deepseek-flash"
+			cfg.Provider = config.ProviderConfig{Name: "deepseek", APIKey: "old", BaseURL: "https://api.deepseek.com"}
+			if err := eng.ReloadProviderConfig(providerAPIConfig(cfg.Provider), cfg.Model); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(os.Getenv("COVE_CONFIG_DIR"), "config.json")
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte("{not json"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			handleBuiltinConfigCommand(input, cfg, eng)
+			if cfg.Model != "deepseek-flash" || eng.Model() != "deepseek-flash" || cfg.Provider.Name != "deepseek" ||
+				cfg.Provider.APIKey != "old" || cfg.Provider.BaseURL != "https://api.deepseek.com" {
+				t.Fatal("save failure left candidate configuration active")
+			}
+			if savedConfig(t) != "{not json" {
+				t.Fatal("save failure overwrote the original config file")
+			}
+		})
+	}
+}

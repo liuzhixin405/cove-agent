@@ -178,7 +178,9 @@ func (b *Browser) workflowAddresses(ctx context.Context, host string) ([]net.IP,
 	}
 	lower := strings.ToLower(host)
 	if b.allowLocalhost && lower == "localhost" {
-		return []net.IP{net.IPv4(127, 0, 0, 1)}, nil
+		// A local server may listen on ::1 only (Node >= 17 on Windows);
+		// the dialer tries each address in turn.
+		return []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback}, nil
 	}
 	if lower == "localhost" || strings.HasSuffix(lower, ".localhost") || lower == "metadata.google.internal" || strings.HasSuffix(lower, ".internal") || strings.HasSuffix(lower, ".local") {
 		return nil, errWorkflowSafety
@@ -244,7 +246,8 @@ func (b *Browser) Run(ctx context.Context, workflow Workflow, options RunOptions
 	} else if errors.Is(runErr, errWorkflowNetwork) {
 		report.Reason = "network_unavailable"
 	} else if runErr != nil {
-		report.Status, report.Reason = StatusFail, "invalid_workflow"
+		// A malformed workflow file says nothing about the product.
+		report.Status, report.Reason = StatusUnverified, "invalid_workflow"
 	} else {
 		runErr = b.runWorkflow(taskCtx, workflow, options, &report)
 	}

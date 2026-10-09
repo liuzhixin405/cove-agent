@@ -118,6 +118,17 @@ func (t *GlobTool) Call(ctx context.Context, input Input, tctx Context) (Result,
 	// the cap are counted unchecked, so the overflow count is an upper bound.
 	const limit = 200
 	confine := newFileConfiner(tctx.Cwd, basePath)
+	// Results are shown relative to the working directory, as grep shows
+	// them, so `glob path=src` returns src/pkg/a.go that read/edit accept;
+	// relative to `path` they were "pkg/a.go", which read reported missing.
+	prefix := ""
+	if tctx.Cwd != "" {
+		if rel, err := filepath.Rel(tctx.Cwd, basePath); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel) {
+			prefix = rel
+		} else if err != nil || rel != "." {
+			prefix = basePath
+		}
+	}
 	var matches []string
 	rest := 0
 	for i, rel := range picked {
@@ -126,7 +137,7 @@ func (t *GlobTool) Call(ctx context.Context, input Input, tctx Context) (Result,
 			break
 		}
 		if confine.allow(rel) {
-			matches = append(matches, filepath.FromSlash(rel))
+			matches = append(matches, filepath.Join(prefix, filepath.FromSlash(rel)))
 		}
 	}
 

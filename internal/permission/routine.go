@@ -112,7 +112,8 @@ var routineGroups = map[string]*routineGroup{
 		},
 		refusedLong:  map[string][]string{},
 		refusedShort: map[string]string{},
-		label:        "go 常规操作（build/test/vet/run/mod/get 等，不含 install、clean、env -w）",
+		checkArgs:    func(_ string, rest []string) bool { return !goRunsOtherProgram(rest) },
+		label:        "go 常规操作（build/test/vet/run/mod/get 等，不含 install、clean、env -w、-exec）",
 	},
 	GroupCargoRoutine: {
 		programs: []string{"cargo"},

@@ -31,7 +31,8 @@ type Manager struct {
 	pendingTrim bool
 	pendingGC   bool
 	maintaining bool
-	maintWG     sync.WaitGroup
+	// maintDone is closed when the current maintenance goroutine ends.
+	maintDone chan struct{}
 }
 
 // New creates a checkpoint manager for the given working directory.
@@ -144,6 +145,9 @@ var storeConfig = []string{
 // Create snapshots the working tree and returns the checkpoint's commit hash.
 // When nothing changed since the last checkpoint it returns that one instead
 // of adding an identical entry.
+// WorkDir is the project directory the manager snapshots.
+func (m *Manager) WorkDir() string { return m.workDir }
+
 func (m *Manager) Create(label string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -52,7 +52,7 @@ func NewStreamableHTTPTransport(endpoint string) (*streamableHTTPTransport, erro
 		// that ran longer than it had its response cut off mid-stream. Every
 		// request carries the caller's context instead (the handshake deadline,
 		// the turn's cancellation).
-		client:  &http.Client{},
+		client:  &http.Client{Transport: headerBoundedTransport(sseEndpointTimeout)},
 		msgChan: make(chan json.RawMessage, 64),
 		ctx:     ctx,
 		cancel:  cancel,

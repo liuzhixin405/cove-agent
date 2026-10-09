@@ -148,8 +148,10 @@ func NewHandler(hub *Hub, token string, origins []string) (http.Handler, error) 
 		if err != nil {
 			return nil, err
 		}
-		hosts[parsed.Host] = true
-		allowed[origin] = true
+		// Hosts (RFC 3986) and origins (RFC 6454) compare case-insensitively;
+		// browsers send them lower-cased whatever --public-origin said.
+		hosts[strings.ToLower(parsed.Host)] = true
+		allowed[strings.ToLower(origin)] = true
 	}
 	expected := sha256.Sum256([]byte("Bearer " + token))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -161,13 +163,14 @@ func NewHandler(hub *Hub, token string, origins []string) (http.Handler, error) 
 			w.WriteHeader(code)
 			_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 		}
-		if !hosts[r.Host] || r.URL.RawQuery != "" {
+		host := strings.ToLower(r.Host)
+		if !hosts[host] || r.URL.RawQuery != "" {
 			fail(403, "host or query refused")
 			return
 		}
 		if origin := r.Header.Get("Origin"); origin != "" {
 			parsed, err := validOrigin(origin, false)
-			if err != nil || !allowed[origin] || parsed.Host != r.Host {
+			if err != nil || !allowed[strings.ToLower(origin)] || !strings.EqualFold(parsed.Host, r.Host) {
 				fail(403, "origin refused")
 				return
 			}

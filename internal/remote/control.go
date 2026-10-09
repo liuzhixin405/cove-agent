@@ -275,6 +275,14 @@ func (h *Hub) PendingApproval(scope Scope, tool string, input json.RawMessage, s
 
 // Consume belongs immediately before execution in the real permission path.
 // A delivered permit is not authorization until the exact operation is checked.
+// Approved reports whether the remote operator approved (rather than denied)
+// the pending operation. Consume still decides whether the permit may be used.
+func (p *Permit) Approved() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.approved
+}
+
 func (p *Permit) Consume(scope Scope, tool string, input json.RawMessage) bool {
 	if p == nil {
 		return false
@@ -316,11 +324,18 @@ func (h *Hub) CancelApproval(id string) {
 	}
 }
 
+// deniedPermit is delivered when the remote side decided against the pending
+// operation: a remote cancel or the service stopping. It is never usable
+// (revoked) and reports Approved() == false. Drift, expiry and replacement
+// deliver nil instead: the remote side merely can no longer answer, and the
+// local prompt goes on waiting on its own.
+func deniedPermit(p Pending) *Permit { return &Permit{pending: p, revoked: true} }
+
 func (h *Hub) RevokeApproval() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.approval != nil {
-		h.approval.delivery <- nil
+		h.approval.delivery <- deniedPermit(h.approval.pending)
 		h.approval = nil
 	}
 	if h.issued != nil {
@@ -339,7 +354,7 @@ func (h *Hub) Close() {
 		h.issued = nil
 	}
 	if h.approval != nil {
-		h.approval.delivery <- nil
+		h.approval.delivery <- deniedPermit(h.approval.pending)
 		h.approval = nil
 	}
 	for _, a := range h.queue {

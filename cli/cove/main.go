@@ -15,6 +15,7 @@ import (
 
 	"path/filepath"
 
+	"slices"
 	"strings"
 
 	"syscall"
@@ -55,7 +56,7 @@ type chatRunner interface {
 }
 
 var (
-	Version = "12.1.0"
+	Version = "12.2.0"
 
 	BuildTime = "pro"
 
@@ -345,7 +346,7 @@ func preferredVisionModelForProvider(providerName, currentModel string) string {
 
 	case "deepseek":
 
-		return "deepseek-v4-flash"
+		return "deepseek-flash"
 
 	case "openai", "openai-compatible":
 
@@ -573,6 +574,7 @@ type replEngineAdapter struct {
 }
 
 func (a replEngineAdapter) Messages() []api.Message { return a.eng.Messages() }
+func (a replEngineAdapter) MessageCount() int       { return a.eng.MessageCount() }
 
 // GenerateOnce forwards Engine.GenerateOnce (command.GuideGenerator), so
 // /init drafts CLAUDE.md with the model.
@@ -762,11 +764,7 @@ func handleSkill(input string, eng *engine.Engine) {
 
 				d = strings.TrimSpace(desc[0])
 
-				if len(d) > 60 {
-
-					d = d[:57] + "..."
-
-				}
+				d = truncateDesc(d, 60)
 
 			}
 
@@ -942,44 +940,78 @@ func skillCreateConflict(name string, prompts map[string]string) string {
 	return ""
 }
 
-func applyProviderConfigChange(cfg *config.Config, reloader providerReloader, mutate func() error) error {
+func cloneProviderConfig(provider config.ProviderConfig) config.ProviderConfig {
+	provider.APIKeys = slices.Clone(provider.APIKeys)
+	if provider.ImageFilesAPI != nil {
+		value := *provider.ImageFilesAPI
+		provider.ImageFilesAPI = &value
+	}
+	return provider
+}
 
-	before := cfg.EffectiveProvider()
-
-	beforeModel := strings.TrimSpace(cfg.Model)
-
-	if err := mutate(); err != nil {
-
+func applyProviderConfigChange(cfg *config.Config, reloader providerReloader, mutate func() error, persist ...func() error) (err error) {
+	if len(persist) > 1 {
+		return fmt.Errorf("only one config persistence step is supported")
+	}
+	snapshot := *cfg
+	cfg.Provider = cloneProviderConfig(cfg.Provider)
+	if cfg.Profiles != nil {
+		cfg.Profiles = make(map[string]*config.Profile, len(snapshot.Profiles))
+		for name, profile := range snapshot.Profiles {
+			if profile == nil {
+				cfg.Profiles[name] = nil
+				continue
+			}
+			copyProfile := *profile
+			if profile.Provider != nil {
+				provider := cloneProviderConfig(*profile.Provider)
+				copyProfile.Provider = &provider
+			}
+			cfg.Profiles[name] = &copyProfile
+		}
+	}
+	defer func() {
+		if err != nil {
+			*cfg = snapshot
+		}
+	}()
+	before := snapshot.EffectiveProvider()
+	beforeModel := strings.TrimSpace(snapshot.Model)
+	if err = mutate(); err != nil {
 		return err
-
 	}
-
 	cfg.Model = strings.TrimSpace(cfg.Model)
-
 	cfg.Provider.Name = strings.TrimSpace(cfg.Provider.Name)
-
 	cfg.Provider.APIKey = strings.TrimSpace(cfg.Provider.APIKey)
-
 	cfg.Provider.BaseURL = strings.TrimSpace(cfg.Provider.BaseURL)
-
 	cfg.Model = config.ResolveModelForProvider(cfg.Model, cfg.Provider.Name)
-
-	if reloader == nil {
-
-		return nil
-
-	}
-
 	after := cfg.EffectiveProvider()
-
-	if beforeModel == cfg.Model && before.Name == after.Name && before.BaseURL == after.BaseURL && before.APIKey == after.APIKey {
-
-		return nil
-
+	changed := beforeModel != cfg.Model || before.Name != after.Name || before.BaseURL != after.BaseURL ||
+		before.APIKey != after.APIKey || !slices.Equal(before.APIKeys, after.APIKeys) || before.ImageFilesEnabled() != after.ImageFilesEnabled()
+	reload := func(provider config.ProviderConfig, model string) error {
+		if fullReloader, ok := reloader.(interface {
+			ReloadProviderConfig(api.ProviderConfig, string) error
+		}); ok {
+			return fullReloader.ReloadProviderConfig(providerAPIConfig(provider), model)
+		}
+		return reloader.ReloadProvider(provider.Name, model, provider.BaseURL, provider.APIKey)
 	}
-
-	return reloader.ReloadProvider(after.Name, cfg.Model, after.BaseURL, after.APIKey)
-
+	if changed && reloader != nil {
+		if err = reload(after, cfg.Model); err != nil {
+			return err
+		}
+	}
+	if len(persist) == 1 {
+		if err = persist[0](); err != nil {
+			if changed && reloader != nil {
+				if rollbackErr := reload(before, beforeModel); rollbackErr != nil {
+					return fmt.Errorf("%w; provider rollback failed: %v", err, rollbackErr)
+				}
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func listSessions(all bool) {

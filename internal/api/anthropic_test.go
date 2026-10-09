@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -116,7 +117,7 @@ func TestAnthropicConvertMessagesSupportsImageParts(t *testing.T) {
 			{Type: "text", Text: "请描述这张图"},
 			{Type: "image", MimeType: "image/jpeg", Data: "aGVsbG8="},
 		},
-	}})
+	}}, true)
 
 	if len(msgs) != 1 {
 		t.Fatalf("expected 1 message, got %d", len(msgs))
@@ -129,5 +130,20 @@ func TestAnthropicConvertMessagesSupportsImageParts(t *testing.T) {
 	}
 	if got := msgs[0].Content[1].Source["media_type"]; got != "image/jpeg" {
 		t.Fatalf("media_type = %#v, want image/jpeg", got)
+	}
+}
+
+// A request made with thinking disabled (the wrap-up summary) must not carry
+// the thinking blocks kept in the history; one made with thinking on keeps
+// the last assistant turn's blocks verbatim.
+func TestAnthropicConvertMessagesThinkingBlocksFollowTheRequest(t *testing.T) {
+	p := &anthropicProvider{}
+	block := json.RawMessage(`{"type":"thinking","thinking":"…","signature":"sig"}`)
+	msgs := []Message{{Role: "assistant", Content: "x", ThinkingBlocks: []json.RawMessage{block}}}
+	if out := p.convertMessages(msgs, true); len(out) != 1 || len(out[0].Content) != 2 || out[0].Content[0].Raw == nil {
+		t.Fatalf("thinking on: blocks dropped: %+v", out)
+	}
+	if out := p.convertMessages(msgs, false); len(out) != 1 || len(out[0].Content) != 1 || out[0].Content[0].Type != "text" {
+		t.Fatalf("thinking disabled: blocks still sent: %+v", out)
 	}
 }

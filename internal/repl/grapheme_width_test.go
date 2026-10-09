@@ -55,7 +55,7 @@ func TestPinnedInputLineMeasuresEmojiSequences(t *testing.T) {
 func TestNeedsMultiRowMeasuresEmojiSequences(t *testing.T) {
 	lr := &LineReader{promptWidth: 2}
 	// 10 sequences are 20 columns: more than the 17 a 20-column row leaves.
-	if !lr.needsMultiRow([]rune(strings.Repeat("⚠️", 10)), 20) {
+	if !lr.needsMultiRow([]rune(strings.Repeat("⚠️", 10)), 20, 24) {
 		t.Fatal("a 20-column emoji line was judged to fit a 17-column row")
 	}
 }

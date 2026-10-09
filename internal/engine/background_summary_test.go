@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
+	"github.com/liuzhixin405/cove-agent/internal/cost"
 	"github.com/liuzhixin405/cove-agent/internal/dream"
 	"github.com/liuzhixin405/cove-agent/internal/extract"
 	"github.com/liuzhixin405/cove-agent/internal/session"
@@ -123,6 +125,124 @@ func TestBackgroundSummarySilentWhenNothingHappened(t *testing.T) {
 	eng.WaitBackground(context.Background())
 	if got := rec.all(); len(got) != 0 {
 		t.Fatalf("summaries = %+v, want none", got)
+	}
+}
+
+func TestBackgroundExtractionDoesNotCallProviderOverBudget(t *testing.T) {
+	isolateHome(t)
+	provider := &seqProvider{reply: func(context.Context, int, api.ChatRequest) (*api.ChatResponse, error) {
+		return &api.ChatResponse{Content: "NONE"}, nil
+	}}
+	eng, err := New(Config{
+		Model: "test-model", MaxBudget: 0.01,
+		Provider: api.ProviderConfig{Name: "mock", APIKey: "test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng.provRef.Set(provider)
+	eng.costTracker.Add("test-model", 1_000_000, 0)
+	if !eng.costTracker.OverBudget() {
+		t.Fatal("test did not exhaust the budget")
+	}
+	eng.extractRunner.Extract(context.Background(), []api.Message{
+		{Role: "user", Content: "Project uses Go"}, {Role: "assistant", Content: "Noted"},
+		{Role: "user", Content: "Remember this"}, {Role: "assistant", Content: "Done"},
+	})
+	if len(provider.requests()) != 0 {
+		t.Fatal("background extraction called the model after budget exhaustion")
+	}
+}
+
+func TestBackgroundBudgetProviderChecksEveryRequest(t *testing.T) {
+	for _, streaming := range []bool{false, true} {
+		for _, unlimited := range []bool{false, true} {
+			name := "chat"
+			if streaming {
+				name = "stream"
+			}
+			if unlimited {
+				name += "/unlimited"
+			} else {
+				name += "/bounded"
+			}
+			t.Run(name, func(t *testing.T) {
+				tracker := cost.NewTracker(0.01)
+				if unlimited {
+					tracker.SetMaxBudget(0)
+				}
+				provider := &seqProvider{reply: func(context.Context, int, api.ChatRequest) (*api.ChatResponse, error) {
+					return &api.ChatResponse{Content: "NONE", InputTokens: 1_000_000}, nil
+				}}
+				eng := &Engine{costTracker: tracker, llm: api.NewMeteredProvider(provider, func(model string, response *api.ChatResponse) {
+					tracker.Add(model, response.InputTokens, response.OutputTokens)
+				})}
+				guarded := eng.backgroundProvider()
+				chat := func() error {
+					request := api.ChatRequest{Model: "test-model"}
+					var err error
+					if streaming {
+						_, err = guarded.ChatStream(context.Background(), request, nil)
+					} else {
+						_, err = guarded.Chat(context.Background(), request)
+					}
+					return err
+				}
+				for attempt := 0; attempt < 3; attempt++ {
+					err := chat()
+					if !unlimited && attempt > 0 {
+						if !errors.Is(err, errBackgroundBudget) {
+							t.Fatalf("attempt %d: got %v, want budget rejection", attempt, err)
+						}
+					} else if err != nil {
+						t.Fatal(err)
+					}
+				}
+				wantCalls := 1
+				if unlimited {
+					wantCalls = 3
+				}
+				if got := len(provider.requests()); got != wantCalls {
+					t.Fatalf("provider calls = %d, want %d", got, wantCalls)
+				}
+				tracker.SetMaxBudget(0)
+				if err := chat(); err != nil {
+					t.Fatalf("removing budget did not resume background calls: %v", err)
+				}
+				if got := len(provider.requests()); got != wantCalls+1 {
+					t.Fatalf("provider calls after budget off = %d, want %d", got, wantCalls+1)
+				}
+			})
+		}
+	}
+}
+
+func TestBackgroundBudgetKeepsLocalBookkeeping(t *testing.T) {
+	eng, provider := extractingEngine(t, 0)
+	eng.costTracker.SetMaxBudget(0.01)
+	eng.costTracker.Add("test-model", 1_000_000, 0)
+	eng.reviewRunning = true
+	rec := &summaryRecorder{}
+	eng.OnBackgroundSummary = rec.record
+	eng.bg.Add(1)
+	eng.bgPending.Add(1)
+	eng.runBackgroundWork(backgroundJob{
+		learn: true, saved: true, checkpointed: true,
+		msgs: []api.Message{
+			{Role: "user", Content: "Use Go"}, {Role: "assistant", Content: "OK"},
+			{Role: "user", Content: "Remember"}, {Role: "assistant", Content: "OK"},
+		},
+		review: []api.Message{{Role: "user", Content: "Review this"}},
+	})
+	if provider.finished.Load() {
+		t.Fatal("background extraction ran despite budget exhaustion")
+	}
+	if eng.reviewRunning || eng.bgPending.Load() != 0 {
+		t.Fatal("skipping learning left background work pending")
+	}
+	got := rec.all()
+	if len(got) != 1 || !got[0].SessionSaved || len(got[0].Extra) != 1 || got[0].Extra[0] != checkpointHint {
+		t.Fatalf("summaries = %+v, want saved session with checkpoint hint", got)
 	}
 }
 

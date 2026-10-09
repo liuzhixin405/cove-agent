@@ -14,6 +14,7 @@ import (
 	"github.com/liuzhixin405/cove-agent/internal/engine"
 	"github.com/liuzhixin405/cove-agent/internal/render"
 	"github.com/liuzhixin405/cove-agent/internal/termui"
+	"github.com/liuzhixin405/cove-agent/internal/textutil"
 	"github.com/liuzhixin405/cove-agent/internal/uiout"
 )
 
@@ -54,6 +55,7 @@ func runChatInteractionMessage(ctx context.Context, runner chatRunner, userMsg a
 
 	maxAttempts := 3
 	p := newTurnPrinter()
+	p.compactTools = replInteractive
 	defer p.stop()
 	turnStart := time.Now()
 	var usage *turnUsage
@@ -195,6 +197,10 @@ type turnPrinter struct {
 	reasoningChars int
 	last           outputKind
 	atLineStart    bool
+	compactTools   bool
+	previewLines   int
+	previewCells   int
+	previewFolded  bool
 
 	// One sanitiser per stream, so a sequence split across two chunks of
 	// the same stream is reassembled rather than half-printed. A command's
@@ -298,7 +304,7 @@ func (p *turnPrinter) flushProgressLocked() {
 	for _, z := range []*render.StreamSanitizer{&p.progress, &p.progressErr} {
 		if rest := z.Flush(); rest != "" {
 			p.switchToLocked(outProgress)
-			p.printLocked(termui.Dim + indentLines(rest, toolProgressIndent, p.atLineStart) + termui.Reset)
+			p.printToolProgressLocked(rest)
 		}
 	}
 }
@@ -430,6 +436,7 @@ func (p *turnPrinter) toolOutputStart(toolName, header string) {
 	p.stopSpinnerLocked()
 	// The previous command's held-back bytes belong under its own header.
 	p.flushProgressLocked()
+	p.previewLines, p.previewCells, p.previewFolded = 0, 0, false
 	line := "  ▸ " + toolName
 	if h := strings.TrimSpace(render.StripControls(strings.ReplaceAll(header, "\n", " "))); h != "" {
 		line += " " + h
@@ -441,6 +448,51 @@ func (p *turnPrinter) toolOutputStart(toolName, header string) {
 // toolProgressIndent is what live tool output is indented by, under the
 // header toolOutputStart printed.
 const toolProgressIndent = "    "
+
+const toolPreviewLines = 8
+const toolPreviewCells = 160
+
+func (p *turnPrinter) printToolProgressLocked(output string) {
+	if p.compactTools {
+		if p.previewFolded {
+			return
+		}
+		var preview strings.Builder
+		for _, part := range strings.SplitAfter(output, "\n") {
+			if part == "" {
+				continue
+			}
+			if p.previewLines >= toolPreviewLines {
+				p.previewFolded = true
+				break
+			}
+			line := strings.TrimSuffix(part, "\n")
+			remaining := toolPreviewCells - p.previewCells
+			visible := textutil.TruncateWidth(line, remaining, "")
+			preview.WriteString(visible)
+			p.previewCells += textutil.Width(visible)
+			if textutil.Width(line) > remaining {
+				p.previewFolded = true
+				break
+			}
+			if strings.HasSuffix(part, "\n") {
+				preview.WriteByte('\n')
+				p.previewLines++
+				p.previewCells = 0
+			}
+		}
+		output = preview.String()
+		if p.previewFolded {
+			if !strings.HasSuffix(output, "\n") && (output != "" || !p.atLineStart) {
+				output += "\n"
+			}
+			output += "后续实时输出已折叠\n"
+		}
+	}
+	if output != "" {
+		p.printLocked(termui.Dim + indentLines(output, toolProgressIndent, p.atLineStart) + termui.Reset)
+	}
+}
 
 // toolProgress surfaces live output from long-running tools (bash,
 // powershell) so the user can tell what a slow command is doing. The
@@ -464,7 +516,7 @@ func (p *turnPrinter) toolStreamProgress(z *render.StreamSanitizer, chunk string
 		return
 	}
 	p.switchToLocked(outProgress)
-	p.printLocked(termui.Dim + indentLines(out, toolProgressIndent, p.atLineStart) + termui.Reset)
+	p.printToolProgressLocked(out)
 }
 
 // indentLines puts indent at the start of every line of s: at its beginning

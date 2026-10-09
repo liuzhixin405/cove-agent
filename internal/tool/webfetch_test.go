@@ -57,6 +57,26 @@ func TestFetchedBodyRefusesBinary(t *testing.T) {
 	}
 }
 
+func TestFetchedBodyHTMLParserBoundaries(t *testing.T) {
+	tests := []struct {
+		name, format, input, want string
+	}{
+		{"quoted attribute", "text", `<p title="a > b">visible</p>`, "visible"},
+		{"unclosed script", "text", `<p>visible</p><script>secret <p>hidden</p>`, "visible"},
+		{"unquoted link", "markdown", `<p><a href=/docs?a=1&amp;b=2>Docs</a></p>`, "[Docs](/docs?a=1&b=2)"},
+		{"code whitespace", "markdown", "<pre>\tfirst  line\n\n\n  last\n</pre>", "```\n\tfirst  line\n\n\n  last\n```"},
+		{"raw HTML", "html", `<p title="a > b">visible</p>`, `<p title="a > b">visible</p>`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := fetchedText([]byte(test.input), "text/html; charset=utf-8", test.format)
+			if err != nil || got != test.want {
+				t.Fatalf("fetchedText() = %q, %v; want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 // CheckPermissions judged the raw input, and safeurl prepends https:// only
 // when "://" appears nowhere, so "example.com/?next=http://127.0.0.1/" was
 // parsed with scheme "example.com/?next=http" and denied as private although

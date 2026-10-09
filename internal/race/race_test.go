@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -433,6 +434,13 @@ func TestRaceCLIExecutableHelper(t *testing.T) {
 	if profile["max_budget_usd"] != 1.25 || profile["permission_mode"] != "auto" {
 		os.Exit(12)
 	}
+	// The race-budget profile is built on the parent's active profile: its
+	// provider/model must still apply to the candidate (replacing the whole
+	// profiles map used to drop them and run against the base provider).
+	provider, _ := profile["provider"].(map[string]any)
+	if provider["name"] != "profile-provider" || provider["api_key"] != "profile-key" || profile["model"] != "profile-model" {
+		os.Exit(14)
+	}
 	if _, err := os.Stat(".git"); err != nil {
 		os.Exit(13)
 	}
@@ -445,7 +453,7 @@ func TestRaceCLIExecutableHelper(t *testing.T) {
 func TestCLIRunnerActualSubprocessConfigAndCleanup(t *testing.T) {
 	project := fixture(t)
 	configDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"max_budget_usd":999,"profiles":{"existing":{"max_budget_usd":999}},"provider":{"name":"fixture","api_key":"private-key"}}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"max_budget_usd":999,"active_profile":"existing","profiles":{"existing":{"max_budget_usd":999,"model":"profile-model","provider":{"name":"profile-provider","api_key":"profile-key"}}},"provider":{"name":"fixture","api_key":"private-key"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	runner := CLIRunner{Executable: os.Executable, PrefixArgs: []string{"-test.run=^TestRaceCLIExecutableHelper$", "--", "race-cli-helper"}, ConfigDirectory: configDir}
@@ -477,5 +485,23 @@ func TestRaceStrictSpec(t *testing.T) {
 	}
 	if _, err := ReadSpec(path); err == nil {
 		t.Fatal("accepted unknown spec key")
+	}
+}
+
+// A project on one volume and the config directory on another (D:\proj and
+// C:\Users\me\.cove on Windows) made filepath.Rel fail, which was read as
+// "inside the project" and refused every /race run.
+func TestOutsideProjectAcrossVolumes(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("volume names are a Windows concept")
+	}
+	if !outsideProject(`D:\github\proj`, `C:\Users\me\.cove\race`) {
+		t.Fatal("cross-volume store judged inside the project")
+	}
+	if outsideProject(`D:\github\proj`, `D:\github\proj\.cove\race`) || outsideProject(`D:\github\proj`, `d:\GitHub\Proj`) {
+		t.Fatal("store inside the project judged outside")
+	}
+	if !outsideProject(`D:\github\proj`, `D:\github\other`) {
+		t.Fatal("sibling directory judged inside")
 	}
 }

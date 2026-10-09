@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/liuzhixin405/cove-agent/internal/filelock"
 )
@@ -128,7 +129,11 @@ func (e *Executor) RunDue(ctx context.Context, now time.Time, sessionID string) 
 		if err := ctx.Err(); err != nil {
 			return results, errors.Join(append(failures, err)...)
 		}
-		result, err := e.run(ctx, spec.ID, "schedule", "", sessionID, now)
+		// `now` decides which tasks are due; the claim itself is stamped
+		// with the current time, otherwise the second and third task of a
+		// tick would start with a lease (and a Started) that already aged
+		// by the preceding tasks' run time and could expire mid-run.
+		result, err := e.run(ctx, spec.ID, "schedule", "", sessionID, time.Now().UTC())
 		if result.ID != "" {
 			results = append(results, result)
 		}
@@ -196,8 +201,10 @@ func (e *Executor) run(ctx context.Context, id, trigger, eventKey, sessionID str
 		}
 		result.Base = base
 		check, err := e.Runner.Run(jobCtx, work, spec, spec.BudgetUSD/float64(spec.Retries+1))
+		// The runner's output is in its Check (with its command and exit
+		// code); copying it into result.Output stored every up-to-4 MiB
+		// log twice in state.json.
 		result.Checks = append(result.Checks, check)
-		result.Output = check.Output
 		if err == nil && check.ExitCode != 0 {
 			err = fmt.Errorf("runner exited %d", check.ExitCode)
 		}
@@ -270,14 +277,14 @@ func isolatedWorktree(ctx context.Context, project string) (string, string, func
 		defer cancel()
 		check, err := runCommand(cleanCtx, project, nil, []string{"git", "worktree", "remove", "--force", work})
 		if err != nil || check.ExitCode != 0 {
-			return fmt.Errorf("worktree cleanup failed (%s), retained at %s: %w", check.Output, tmp, err)
+			return fmt.Errorf("worktree cleanup failed (%s), retained at %s: %w", outputTail(check.Output), tmp, err)
 		}
 		return os.RemoveAll(tmp)
 	}
 	check, err := runCommand(ctx, project, nil, []string{"git", "worktree", "add", "--detach", work, base})
 	if err != nil || check.ExitCode != 0 {
 		_ = os.RemoveAll(tmp)
-		return "", "", nil, fmt.Errorf("git worktree add failed: %s: %w", check.Output, err)
+		return "", "", nil, fmt.Errorf("git worktree add failed: %s: %w", outputTail(check.Output), err)
 	}
 	return work, base, cleanup, nil
 }
@@ -285,11 +292,30 @@ func isolatedWorktree(ctx context.Context, project string) (string, string, func
 func capturePatch(ctx context.Context, work, base string) (string, error) {
 	check, err := runCommand(ctx, work, nil, []string{"git", "add", "--all", "--", "."})
 	if err != nil || check.ExitCode != 0 {
-		return "", fmt.Errorf("cannot collect changed and untracked files: %s: %w", check.Output, err)
+		return "", fmt.Errorf("cannot collect changed and untracked files: %s: %w", outputTail(check.Output), err)
 	}
-	check, err = runCommand(ctx, work, nil, []string{"git", "diff", "--cached", "--binary", "--no-ext-diff", base, "--"})
+	// --no-textconv: a user-level textconv driver (e.g. pdftotext for *.pdf)
+	// would turn a binary change into a text diff that git apply rejects.
+	check, err = runCommand(ctx, work, nil, []string{"git", "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", base, "--"})
 	if err != nil || check.ExitCode != 0 {
-		return "", fmt.Errorf("cannot capture patch: %s: %w", check.Output, err)
+		// Never embed the (up to 4 MiB) output itself in the error: it ends
+		// up in result.Error, state.json and the REPL/CLI error line.
+		return "", fmt.Errorf("cannot capture patch: %s: %w", outputTail(check.Output), err)
 	}
 	return check.Output, nil
+}
+
+// outputTail keeps the last few KiB of a command's output for an error
+// message, by rune boundary.
+func outputTail(output string) string {
+	const keep = 4096
+	output = strings.TrimSpace(output)
+	if len(output) <= keep {
+		return output
+	}
+	cut := len(output) - keep
+	for cut < len(output) && !utf8.RuneStart(output[cut]) {
+		cut++
+	}
+	return "…" + output[cut:]
 }

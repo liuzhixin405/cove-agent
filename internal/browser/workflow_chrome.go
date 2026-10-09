@@ -71,7 +71,10 @@ func (b *Browser) runWorkflow(ctx context.Context, workflow Workflow, options Ru
 				report.Reason = "cancelled_or_timeout"
 				return ctx.Err()
 			case proxy.blocked.Load() || errors.Is(err, errWorkflowSafety):
-				report.Status, report.Reason = StatusFail, "safety_policy"
+				// Not evidence about the product: the workflow touched
+				// something the policy forbids. Unverified, as documented
+				// ("取消或安全拒绝为 unverified"), not a product failure.
+				report.Status, report.Reason = StatusUnverified, "safety_policy"
 				return errWorkflowSafety
 			case errors.Is(err, ErrAssertionFailed):
 				report.Status, report.Reason = StatusFail, "assertion_failed"
@@ -86,7 +89,7 @@ func (b *Browser) runWorkflow(ctx context.Context, workflow Workflow, options Ru
 		}
 	}
 	if proxy.blocked.Load() {
-		report.Status, report.Reason = StatusFail, "safety_policy"
+		report.Status, report.Reason = StatusUnverified, "safety_policy"
 		return errWorkflowSafety
 	}
 	if proxy.failed.Load() {
@@ -115,15 +118,28 @@ func (b *Browser) runWorkflowViewport(ctx context.Context, workflow Workflow, ch
 		}
 		go func() {
 			blocked := paused.Request == nil
-			if paused.Request != nil {
-				raw := paused.Request.URL
-				blocked = b.workflowURL(tab, raw) != nil
-				if strings.HasPrefix(raw, "data:") || strings.HasPrefix(raw, "blob:") || raw == "about:blank" {
-					blocked = false
-				}
-			}
-			if blocked {
+			if paused.Request == nil {
 				proxy.blocked.Store(true)
+			} else if raw := paused.Request.URL; !(strings.HasPrefix(raw, "data:") || strings.HasPrefix(raw, "blob:") || raw == "about:blank") {
+				switch checkErr := b.workflowURL(tab, raw); {
+				case checkErr == nil:
+				case errors.Is(checkErr, errWorkflowSafety):
+					// A private or forbidden destination: refuse the
+					// request and end the run on safety grounds.
+					blocked = true
+					proxy.blocked.Store(true)
+				case tab.Err() != nil:
+					// The viewport is being torn down; not evidence of
+					// anything, and not a verdict on the other viewport.
+					return
+				default:
+					// An unresolvable sub-resource host (a DNS-blocked
+					// analytics domain) is a network condition, not a
+					// safety refusal: the request fails and the run is
+					// unverified, never "safety_policy".
+					blocked = true
+					proxy.failed.Store(true)
+				}
 			}
 			chrome := chromedp.FromContext(tab)
 			if chrome == nil || chrome.Target == nil {

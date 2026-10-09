@@ -141,7 +141,13 @@ func (c *MemoryCmd) Execute(ctx context.Context, in Input) (Output, error) {
 		if len(in.Args) < 2 {
 			return Output{Message: "用法: /memory remove <名称>"}, nil
 		}
-		if err := in.MemoryStore.Delete(in.Args[1]); err != nil {
+		// Same locks as add: a background extraction in its read -> append
+		// -> rename window would otherwise write the "deleted" file back.
+		err := withMemoryWriteLock(in.MemoryStore, func() error { return in.MemoryStore.Delete(in.Args[1]) })
+		if errors.Is(err, filelock.ErrTimeout) {
+			return Output{Message: "记忆目录正被另一个 cove 进程写入，请稍后重试"}, nil
+		}
+		if err != nil {
 			return Output{}, err
 		}
 		return Output{Message: fmt.Sprintf("记忆 '%s' 已删除", in.Args[1])}, nil

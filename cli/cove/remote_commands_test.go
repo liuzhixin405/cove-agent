@@ -16,6 +16,7 @@ import (
 	"github.com/liuzhixin405/cove-agent/internal/api"
 	"github.com/liuzhixin405/cove-agent/internal/command"
 	"github.com/liuzhixin405/cove-agent/internal/remote"
+	"github.com/liuzhixin405/cove-agent/internal/repl"
 )
 
 func TestRemoteCommandsNilConstruction(t *testing.T) {
@@ -416,5 +417,80 @@ func TestRemoteQueuedCancelPrecedesPermitConsumption(t *testing.T) {
 	}
 	if !runner.WaitIdleUntil(time.Now().Add(5 * time.Second)) {
 		t.Fatal("real runner ignored cancellation")
+	}
+}
+
+// A local steer (the user typing a line while the prompt waits), a remote
+// pause or a queue change moves the scope version. That only means the
+// remote side can no longer approve this prompt; it used to be delivered as
+// a remote "n" and the local prompt was refused under the user's hands.
+func TestScopeDriftDoesNotDenyTheLocalPermissionPrompt(t *testing.T) {
+	captureTurnOutput(t)
+	eng := steerTestEngine(t)
+	eng.SetAutoExtract(false)
+	provider := &blockingProvider{firstStarted: make(chan struct{}), release: make(chan struct{})}
+	eng.SetProvider(provider)
+	runner := newREPLTaskRunner(eng)
+	t.Cleanup(func() {
+		runner.CancelForExit()
+		runner.WaitIdleUntil(time.Now().Add(5 * time.Second))
+	})
+	runner.Enqueue(api.Message{Role: "user", Content: "wait for approval"})
+	select {
+	case <-provider.firstStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("real runner did not start")
+	}
+	fe := &frontend{eng: eng, tasks: runner, reg: command.NewRegistry()}
+	cmd := fe.remoteCommands()[0].(*remoteCommand)
+	hub := remote.NewHubWithWake(cmd.ownerWake)
+	cmd.controller = &remoteController{hub: hub}
+	fe.reg.Register(cmd)
+	snapshot, err := fe.remoteSnapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.Publish(snapshot)
+	// permissionAnswer registers the pending on the owner thread, which the
+	// test drives by polling, so it runs on its own goroutine.
+	type registration struct {
+		answers <-chan repl.ExternalAnswer
+		cleanup func()
+	}
+	registered := make(chan registration, 1)
+	go func() {
+		answers, cleanup := cmd.permissionAnswer(eng, "bash", map[string]any{"command": "mkdir forbidden"}, "mkdir forbidden")
+		registered <- registration{answers, cleanup}
+	}()
+	var reg registration
+	deadline := time.Now().Add(5 * time.Second)
+	for reg.answers == nil {
+		fe.pollRemote()
+		select {
+		case reg = <-registered:
+		case <-time.After(20 * time.Millisecond):
+			if time.Now().After(deadline) {
+				t.Fatal("remote answer channel not registered")
+			}
+		}
+	}
+	if reg.answers == nil {
+		t.Fatal("remote answer channel not registered")
+	}
+	answers := reg.answers
+	defer reg.cleanup()
+	if hub.Snapshot().Pending == nil {
+		t.Fatal("pending approval was not published")
+	}
+	// The user types a line while the prompt is open: steer, scope drifts.
+	runner.SubmitWithFeedback(api.Message{Role: "user", Content: "be careful"})
+	fe.pollRemote()
+	if hub.Snapshot().Pending != nil {
+		t.Fatal("drifted pending approval still published")
+	}
+	select {
+	case answer := <-answers:
+		t.Fatalf("scope drift answered the local prompt with %q", answer.Answer)
+	case <-time.After(300 * time.Millisecond):
 	}
 }

@@ -2,6 +2,23 @@ package api
 
 import "testing"
 
+func TestDeepSeekVisionCapability(t *testing.T) {
+	for model, want := range map[string]bool{
+		"deepseek-flash":               true,
+		"deepseek-v4-flash":            true,
+		"deepseek-v4-flash-vision-exp": true,
+		"DeepSeek/DeepSeek-Flash":      true,
+		"deepseek-v4-pro":              false,
+		"deepseek-chat":                false,
+		"deepseek-reasoner":            false,
+		"deepseek-v5":                  false,
+	} {
+		if got := IsVisionCapableModel(model); got != want {
+			t.Errorf("IsVisionCapableModel(%q) = %v, want %v", model, got, want)
+		}
+	}
+}
+
 func TestNormalizeProviderNameAliases(t *testing.T) {
 	cases := map[string]string{
 		"anthropic":  "anthropic",

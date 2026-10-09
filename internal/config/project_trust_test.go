@@ -123,6 +123,49 @@ func TestUntrustedProjectConfigIgnoresSensitiveFields(t *testing.T) {
 	}
 }
 
+func TestProjectImageFilesAPIRequiresTrust(t *testing.T) {
+	global, project := isolate(t)
+	writeFile(t, filepath.Join(global, "config.json"), `{"provider":{"name":"deepseek","api_key":"sk-global","image_files_api":false}}`)
+	projectPath := filepath.Join(project, ".cove.json")
+	writeFile(t, projectPath, `{"provider":{"image_files_api":true}}`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Provider.ImageFilesEnabled() {
+		t.Fatal("untrusted project enabled persistent image upload")
+	}
+	_, fields := cfg.UntrustedProjectConfig()
+	if len(fields) != 1 || fields[0] != "provider.image_files_api" {
+		t.Fatalf("ignored fields=%v", fields)
+	}
+	if err := TrustProjectConfig(projectPath); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Provider.ImageFilesEnabled() {
+		t.Fatal("trusted project opt-in ignored")
+	}
+	if cfg.SnapshotProfile().Provider.ImageFilesEnabled() {
+		t.Fatal("project upload opt-in leaked into global profile snapshot")
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	var saved struct {
+		Provider ProviderConfig `json:"provider"`
+	}
+	if err := json.Unmarshal([]byte(readFile(t, filepath.Join(global, "config.json"))), &saved); err != nil {
+		t.Fatal(err)
+	}
+	if saved.Provider.ImageFilesEnabled() {
+		t.Fatal("project upload opt-in leaked into global configuration")
+	}
+}
+
 // Values that only make cove more careful need no trust: a stricter
 // permission mode, a lower budget, disabling automatic verification.
 func TestUntrustedProjectConfigAppliesRestrictiveValues(t *testing.T) {

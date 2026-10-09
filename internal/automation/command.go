@@ -30,6 +30,11 @@ func (b *boundedOutput) Write(data []byte) (int, error) {
 }
 
 func runCommand(ctx context.Context, cwd string, env []string, argv []string) (Check, error) {
+	return runCommandInput(ctx, cwd, env, argv, "")
+}
+
+// runCommandInput runs argv with input on its stdin (empty means no input).
+func runCommandInput(ctx context.Context, cwd string, env []string, argv []string, input string) (Check, error) {
 	check := Check{Command: append([]string(nil), argv...), ExitCode: -1}
 	if len(argv) == 0 {
 		return check, errors.New("empty command")
@@ -43,7 +48,7 @@ func runCommand(ctx context.Context, cwd string, env []string, argv []string) (C
 		}
 	}
 	cmd.Env = append(cmd.Env, env...)
-	cmd.Stdin = strings.NewReader("")
+	cmd.Stdin = strings.NewReader(input)
 	cmd.WaitDelay = time.Second
 	configureProcess(cmd)
 	output := &boundedOutput{}
@@ -85,6 +90,17 @@ func (r CommandRunner) Run(ctx context.Context, worktree string, spec Spec, budg
 	if cleanup != nil {
 		defer cleanup()
 	}
-	prompt := spec.Prompt + "\nWork only in the current isolated worktree. Do not apply, merge, push, or modify other worktrees. Return a reviewable maintenance result."
-	return runCommand(ctx, worktree, env, []string{r.Executable, "--no-auto", "--max-turns", fmtInt(spec.MaxTurns), "-p", prompt})
+	const instructions = "Work only in the current isolated worktree. Do not apply, merge, push, or modify other worktrees. Return a reviewable maintenance result."
+	argv := []string{r.Executable, "--no-auto", "--max-turns", fmtInt(spec.MaxTurns), "-p"}
+	if len(spec.Prompt) <= maxArgPrompt {
+		return runCommand(ctx, worktree, env, append(argv, spec.Prompt+"\n"+instructions))
+	}
+	// A spec prompt is allowed up to 64 KiB, but Windows caps the whole
+	// command line at 32767 characters; `cove -p` appends piped stdin to the
+	// prompt argument, so a long prompt travels on stdin instead.
+	return runCommandInput(ctx, worktree, env, append(argv, instructions), spec.Prompt)
 }
+
+// maxArgPrompt is the largest prompt still passed as a -p argument; longer
+// prompts go through stdin (see CommandRunner.Run).
+const maxArgPrompt = 24 * 1024

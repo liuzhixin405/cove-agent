@@ -68,6 +68,19 @@ var Prices = map[string]Price{
 	"gpt-4o":            {Input: 2.5, InputCacheHit: 1.25, Output: 10.0},
 	"gpt-4o-mini":       {Input: 0.15, InputCacheHit: 0.075, Output: 0.6},
 	"o3-mini":           {Input: 1.1, InputCacheHit: 1.1, Output: 4.4},
+	// OpenAI list prices (platform.openai.com/docs/pricing). These used to
+	// fall to defaultPrice ($0.435/$0.87), an order of magnitude low for
+	// gpt-5 and o1, so max_budget_usd was not a bound for them. Longest
+	// substring wins, so gpt-5-mini and o4-mini resolve to their own rows.
+	"gpt-5":        {Input: 1.25, InputCacheHit: 0.125, Output: 10.0},
+	"gpt-5-mini":   {Input: 0.25, InputCacheHit: 0.025, Output: 2.0},
+	"gpt-5-nano":   {Input: 0.05, InputCacheHit: 0.005, Output: 0.4},
+	"gpt-4.1":      {Input: 2.0, InputCacheHit: 0.5, Output: 8.0},
+	"gpt-4.1-mini": {Input: 0.4, InputCacheHit: 0.1, Output: 1.6},
+	"gpt-4.1-nano": {Input: 0.1, InputCacheHit: 0.025, Output: 0.4},
+	"o1":           {Input: 15.0, InputCacheHit: 7.5, Output: 60.0},
+	"o3":           {Input: 2.0, InputCacheHit: 0.5, Output: 8.0},
+	"o4-mini":      {Input: 1.1, InputCacheHit: 0.275, Output: 4.4},
 }
 
 // defaultPrice is used when a model name does not match any entry in Prices.

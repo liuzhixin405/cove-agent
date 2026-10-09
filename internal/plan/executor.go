@@ -256,9 +256,10 @@ func (pe *PlanExecutor) runTask(ctx context.Context, task *Task, completed map[s
 		} else if result.Error != "" {
 			lastErr = result.Error
 			lastOutput = result.Output
-			if result.CapReached {
+			if result.CapReached || result.Truncated {
 				// Re-running the task from scratch would redo the same work
-				// and hit the same cap; keep what was done instead.
+				// and hit the same cap (or the same 5-minute deadline);
+				// keep what was done instead.
 				break
 			}
 		} else if !result.Success {

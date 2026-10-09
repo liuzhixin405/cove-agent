@@ -35,14 +35,19 @@ func (r *replTaskRunner) initQueueStore() {
 }
 
 func (r *replTaskRunner) enqueueQueueFeedbackLocked(msg api.Message) string {
+	feedback, _ := r.enqueueQueueFeedbackResultLocked(msg)
+	return feedback
+}
+
+func (r *replTaskRunner) enqueueQueueFeedbackResultLocked(msg api.Message) (string, bool) {
 	ahead, merged, running := r.enqueueLocked(msg)
 	if ahead < 0 {
-		return "[未接收] 原会话队列保存失败，请处理持久化错误后重新提交。"
+		return "[未接收] 原会话队列保存失败，请处理持久化错误后重新提交。", false
 	}
 	if r.paused {
-		return "[已排队] 队列已暂停，输入 /tasks 查看并确认启动。"
+		return "[已排队] 队列已暂停，输入 /tasks 查看并确认启动。", true
 	}
-	return enqueueFeedback(ahead, merged, running)
+	return enqueueFeedback(ahead, merged, running), true
 }
 
 func (r *replTaskRunner) persistQueueLocked() bool {

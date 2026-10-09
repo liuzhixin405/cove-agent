@@ -1,6 +1,9 @@
 package safety
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // Downloaded code handed to an interpreter through a substitution. The pipe
 // spellings (curl ... | sh, irm ... | iex) are caught by catastrophicPipeline;
@@ -16,6 +19,10 @@ import "strings"
 // substitution whose commands fetch (curl, wget, fetch, iwr, irm,
 // Invoke-WebRequest, Invoke-RestMethod; base64/xxd decode likewise) with a
 // placeholder word and looks where the placeholder ends up.
+
+// psCallOfFetched is PowerShell's call operator (or dot-sourcing) applied to
+// a fetched substitution or group.
+var psCallOfFetched = regexp.MustCompile(`(?:^|[\s;|(])[&.]\s*(?:` + fetchedValue + `|` + fetchedCode + `)`)
 
 const (
 	// fetchedCode stands for $(...), `...` and <(...) whose commands fetch:
@@ -46,6 +53,11 @@ func fetchedCodeRun(command string) (string, bool) {
 	if marked == command {
 		return "", false
 	}
+	// The tokenizer reads "&" as an operator, so the call operator applied
+	// to a fetched value never reaches the loop below.
+	if psCallOfFetched.MatchString(marked) {
+		return "downloaded code run as a command", true
+	}
 	for _, pipeline := range readings(marked) {
 		piped := false
 		for _, c := range pipeline {
@@ -54,6 +66,16 @@ func fetchedCodeRun(command string) (string, bool) {
 				continue
 			}
 			if strings.Contains(w[0], fetchedCode) {
+				return "downloaded code run as a command", true
+			}
+			if strings.Contains(w[0], fetchedValue) {
+				// "(irm URL) | iex", "(iwr URL).Content | iex": the group's
+				// value is the pipeline input of what follows.
+				piped = true
+				continue
+			}
+			if (w[0] == "&" || w[0] == ".") && len(w) > 1 && (strings.Contains(w[1], fetchedValue) || strings.Contains(w[1], fetchedCode)) {
+				// & ([scriptblock]::Create((irm URL))), . (irm URL)
 				return "downloaded code run as a command", true
 			}
 			name, args := ProgramName(w[0]), w[1:]

@@ -81,6 +81,7 @@ func TestAutomationRunnerPrivateBudgetConfiguration(t *testing.T) {
 	cfg.MaxBudgetUsd = 20
 	cfg.ActiveProfile = "expensive"
 	cfg.Profiles = map[string]*config.Profile{"expensive": {MaxBudgetUsd: 50}}
+	cfg.Provider.APIKey = "sk-real-1234567890"
 	runner, err := automationRunner(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -102,6 +103,12 @@ func TestAutomationRunnerPrivateBudgetConfiguration(t *testing.T) {
 	}
 	if isolated.MaxBudgetUsd != .25 || isolated.MaxIterations != 4 || isolated.ActiveProfile != "" || len(isolated.Profiles) != 0 || isolated.PermissionMode != "auto" || isolated.DoneVerifyAuto == nil || *isolated.DoneVerifyAuto {
 		t.Fatalf("isolated=%+v", isolated)
+	}
+	// The worker reads this file with config.Load, which clears a masked
+	// key: the private config must carry the real one or every run fails
+	// authentication.
+	if !strings.Contains(string(data), `"sk-real-1234567890"`) || strings.Contains(string(data), "****") {
+		t.Fatalf("private config does not carry the real API key: %s", data)
 	}
 	if cfg.MaxBudgetUsd != 20 || cfg.ActiveProfile != "expensive" {
 		t.Fatal("mutated parent config")

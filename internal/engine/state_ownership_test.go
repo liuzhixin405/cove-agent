@@ -21,6 +21,7 @@ import (
 //   - in processScoped otherwise.
 var (
 	conversationManaged = []string{
+		"agentActivity",
 		"messages", "sessionView", "systemPrompt", "totalTokens", "lastInputTokens", "usageMsgCount",
 		"session", "costBase", "fileHistory", "turnFilesChanged", "turnRanGit", "turnChangedFiles", "turnCheckpointed",
 		"pendingSteer", "pendingSteerN", "loopDetector", "guardrails", "acceptance",
@@ -43,7 +44,7 @@ var (
 		"autoLearnOff", "dreamRunner", "fastOutcomes", "recordingEnabled", "recordingDir", "recordingSeq", "acceptanceMu",
 		"recordingReady", "recordingMu", "replayEnabled", "replayDir", "replayResponses", "replayIndex",
 		"actMu", "acts", "actSeq", "provRef", "collectContext", "refreshGit", "costNoticeFor",
-		"fileDiffs", "diffMu", "contextTokens", "turnModelSnap", "repoMapMu", "reviewRunning", "nonInteractive", "skillMu", "requestOverhead", "smallWindowWarned",
+		"fileDiffs", "diffMu", "contextTokens", "messageCount", "turnModelSnap", "repoMapMu", "reviewRunning", "nonInteractive", "skillMu", "requestOverhead", "smallWindowWarned",
 	}
 )
 

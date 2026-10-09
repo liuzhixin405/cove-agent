@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/fsatomic"
@@ -85,7 +86,10 @@ func (s *Store) prepareProvenance(name, content string, source *ProvenanceSource
 	if appendTo != "" {
 		previous, err := s.Provenance(appendTo)
 		if err != nil {
-			return err
+			// The side record is informational ("来源未知" is a valid
+			// answer); a corrupt or foreign-version file must not stop
+			// every later save/append of this memory.
+			previous = nil
 		}
 		if previous != nil {
 			record.Sources = append(record.Sources, previous.Sources...)
@@ -120,4 +124,22 @@ func (s *Store) SaveWithSource(name, content string, source ProvenanceSource) er
 // AppendWithSource carries forward known sources when existing content is kept.
 func (s *Store) AppendWithSource(name, content string, source ProvenanceSource) (string, error) {
 	return s.append(name, content, &source)
+}
+
+// pruneProvenance removes the provenance records of name's superseded
+// revisions, keeping the one for content. Best effort: a failure leaves a
+// stale record, never a missing current one.
+func pruneProvenance(dir, name, content string) {
+	keep := provenanceHash(content) + ".json"
+	parent := filepath.Dir(provenancePath(dir, name, content))
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || entry.Name() == keep || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		_ = os.Remove(filepath.Join(parent, entry.Name()))
+	}
 }

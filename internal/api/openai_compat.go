@@ -20,6 +20,7 @@ type openAICompatProvider struct {
 	baseURL      string
 	client       *http.Client // for non-streaming (has Timeout)
 	streamClient *http.Client // for streaming (no global Timeout)
+	imageFiles   *deepseekImageFiles
 }
 
 func newOpenAICompatProvider(cfg ProviderConfig) *openAICompatProvider {
@@ -42,7 +43,7 @@ func newOpenAICompatProvider(cfg ProviderConfig) *openAICompatProvider {
 	} else if len(cfg.APIKeys) == 1 {
 		cfg.APIKey = cfg.APIKeys[0]
 	}
-	return &openAICompatProvider{
+	provider := &openAICompatProvider{
 		name:    cfg.Name,
 		apiKey:  cfg.APIKey,
 		keyPool: pool,
@@ -57,6 +58,10 @@ func newOpenAICompatProvider(cfg ProviderConfig) *openAICompatProvider {
 			Transport: transport,
 		},
 	}
+	if cfg.ImageFilesAPI && cfg.Name == "deepseek" {
+		provider.imageFiles = &deepseekImageFiles{gate: make(chan struct{}, 1), entries: make(map[imageFileKey]imageFileEntry)}
+	}
+	return provider
 }
 
 func (p *openAICompatProvider) activeKey() string {
@@ -196,7 +201,7 @@ func (p *openAICompatProvider) doChat(ctx context.Context, body oaiReq) (*ChatRe
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 	hadImage := oaiReqHasImageURL(body)
-	httpResp, err := p.endpoint(p.client).post(ctx, data)
+	httpResp, err := p.imageEndpoint(p.client, body).post(ctx, data)
 	if err != nil {
 		return nil, err
 	}
@@ -482,7 +487,10 @@ func (p *openAICompatProvider) ChatStream(ctx context.Context, req ChatRequest, 
 	body.setOutputLimit(req.MaxTokens)
 	hadImage := oaiReqHasImageURL(body)
 
-	data, _ := json.Marshal(body)
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("marshal request: %w", err)
+	}
 
 	sc := p.streamClient
 	if sc == nil {
@@ -494,7 +502,7 @@ func (p *openAICompatProvider) ChatStream(ctx context.Context, req ChatRequest, 
 	streamCtx, markProgress, stopWatchdog := newStreamWatchdog(ctx)
 	defer stopWatchdog()
 
-	httpResp, err := p.endpoint(sc).openStream(streamCtx, data)
+	httpResp, err := p.imageEndpoint(sc, body).openStream(streamCtx, data)
 	if err != nil {
 		return nil, err
 	}

@@ -277,6 +277,14 @@ func (m *Manager) ApplyFiles(plan *FileRestorePlan, token string) (string, error
 		if err != nil || exists != file.exists || mode != file.beforeMode || sha256.Sum256(data) != file.beforeHash {
 			return backup, fmt.Errorf("执行期间文件已改变，停止回滚: %s", file.path)
 		}
+		if exists && mode&0o200 == 0 {
+			// A read-only file (Perforce/TFS checkout, a generated file):
+			// Windows refuses to replace or delete it until the READONLY
+			// attribute is cleared; the restored mode is applied afterwards.
+			if err := confined.Chmod(file.path, mode|0o200); err != nil {
+				return backup, fmt.Errorf("回滚 %s 失败: %w", file.path, err)
+			}
+		}
 		if file.delete {
 			err = confined.Remove(file.path)
 		} else {

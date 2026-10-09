@@ -1,9 +1,14 @@
 package engine
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"image"
+	"image/png"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -399,6 +404,44 @@ func TestAgentToolRunsASubAgent(t *testing.T) {
 	if !reflect.DeepEqual(names, []string{"read"}) {
 		t.Fatalf("explore sub-agent was offered %v, want only read-only tools", names)
 	}
+	activities := eng.AgentActivities()
+	if len(activities) != 1 || activities[0].Stage != "finished" || !activities[0].Success || activities[0].Task != "find the config loader" {
+		t.Fatalf("agent tool did not publish its lifecycle: %+v", activities)
+	}
+	eng.resetConversationState()
+	if len(eng.AgentActivities()) != 0 {
+		t.Fatal("new conversation retained old agent activity")
+	}
+}
+
+func TestAgentActivityTracksPermissionWait(t *testing.T) {
+	write := &mockTool{name: "write", result: "written"}
+	provider := &seqProvider{reply: func(ctx context.Context, count int, request api.ChatRequest) (*api.ChatResponse, error) {
+		if count == 0 {
+			return toolCallResp("write-1", "write", map[string]any{"path": "result.txt"}), nil
+		}
+		return &api.ChatResponse{Content: "done"}, nil
+	}}
+	eng := newPatternEngine(t, provider, func(cfg *Config) { cfg.PermissionMode = "default" }, write)
+	eng.perm.SetMode(permission.Default)
+	eng.WirePlanExecutor()
+	seen := false
+	eng.PermissionPrompt = func(string, map[string]any, string) bool {
+		activities := eng.AgentActivities()
+		if len(activities) != 1 || activities[0].Stage != "waiting" || activities[0].Tool != "write" {
+			t.Fatalf("approval prompt did not show a waiting agent: %+v", activities)
+		}
+		seen = true
+		return true
+	}
+	_, err := eng.runtime.AgentRunner.(api.AgentRunner).Run(context.Background(), "code", "write the result")
+	if err != nil || !seen {
+		t.Fatalf("delegated approval was not reached: %v", err)
+	}
+	activities := eng.AgentActivities()
+	if len(activities) != 1 || activities[0].Stage != "finished" || activities[0].LastStep != "write result.txt" {
+		t.Fatalf("approval did not resume and finish the agent: %+v", activities)
+	}
 }
 
 // ===========================================================================
@@ -582,6 +625,237 @@ func TestShortFollowUpStaysOnThePremiumModel(t *testing.T) {
 	}
 }
 
+func TestImageHistoryRoutesToVisionModel(t *testing.T) {
+	for _, fast := range []string{"", "deepseek-flash"} {
+		t.Run("fast="+fast, func(t *testing.T) {
+			prov := &seqProvider{}
+			eng := newPatternEngine(t, prov, func(c *Config) {
+				c.Model = "deepseek-v4-pro"
+				c.ModelFast = fast
+				c.Provider.Name = "deepseek"
+			})
+			msg := api.Message{Role: "user", Content: "重构 architecture based on this screenshot", Parts: []api.MessagePart{{Type: "image", MimeType: "image/png", Data: "cGl4ZWxz"}}}
+			if _, err := eng.RunMessageWithStream(context.Background(), msg, nil, nil); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := run(t, eng, "继续重构 architecture"); err != nil {
+				t.Fatal(err)
+			}
+			reqs := prov.requests()
+			if len(reqs) != 2 {
+				t.Fatalf("requests = %d, want 2", len(reqs))
+			}
+			for _, req := range reqs {
+				if req.Model != "deepseek-flash" {
+					t.Fatalf("image history sent to %q", req.Model)
+				}
+				found := false
+				for _, message := range req.Messages {
+					for _, part := range message.Parts {
+						found = found || (part.Type == "image" && part.Data == "cGl4ZWxz")
+					}
+				}
+				if !found {
+					t.Fatal("image payload lost")
+				}
+			}
+		})
+	}
+}
+
+func TestImageTurnDoesNotEscalateToNonVisionModel(t *testing.T) {
+	failing := &mockTool{name: "read", readOnly: true, safe: true, err: errors.New("boom")}
+	prov := &seqProvider{reply: func(ctx context.Context, count int, req api.ChatRequest) (*api.ChatResponse, error) {
+		if count < 3 {
+			return toolCallResp("r", "read", map[string]any{"input": string(rune('a' + count))}), nil
+		}
+		return &api.ChatResponse{Content: "done"}, nil
+	}}
+	eng := newPatternEngine(t, prov, func(c *Config) {
+		c.Model = "deepseek-v4-pro"
+		c.ModelFast = "deepseek-flash"
+		c.Provider.Name = "deepseek"
+	}, failing)
+	msg := api.Message{Role: "user", Content: "hi", Parts: []api.MessagePart{{Type: "image", Data: "cGl4ZWxz"}}}
+	if _, err := eng.RunMessageWithStream(context.Background(), msg, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	reqs := prov.requests()
+	if len(reqs) < 4 {
+		t.Fatalf("requests = %d, want at least 4", len(reqs))
+	}
+	for _, req := range reqs {
+		if req.Model != "deepseek-flash" {
+			t.Fatalf("image turn escalated to %q", req.Model)
+		}
+	}
+}
+
+func TestImageTurnRejectsMissingVisionModel(t *testing.T) {
+	prov := &seqProvider{}
+	eng := newPatternEngine(t, prov, nil)
+	msg := api.Message{Role: "user", Content: "see image", Parts: []api.MessagePart{{Type: "image", Data: "cGl4ZWxz"}}}
+	if _, err := eng.RunMessageWithStream(context.Background(), msg, nil, nil); err == nil {
+		t.Fatal("image sent without a vision model")
+	}
+	if len(prov.requests()) != 0 {
+		t.Fatal("non-vision provider was called")
+	}
+}
+
+func TestImageTurnDoesNotFallbackToPro(t *testing.T) {
+	prov := &seqProvider{reply: func(context.Context, int, api.ChatRequest) (*api.ChatResponse, error) {
+		return nil, &api.RetryableError{Status: 503, Msg: "high demand"}
+	}}
+	eng := newPatternEngine(t, prov, func(c *Config) {
+		c.Model = "deepseek-v4-pro"
+		c.ModelFast = "deepseek-flash"
+		c.Provider.Name = "deepseek"
+	})
+	msg := api.Message{Role: "user", Content: "hi", Parts: []api.MessagePart{{Type: "image", Data: "cGl4ZWxz"}}}
+	if _, err := eng.RunMessageWithStream(context.Background(), msg, nil, nil); err == nil {
+		t.Fatal("expected the overload error")
+	}
+	reqs := prov.requests()
+	if len(reqs) != 1 || reqs[0].Model != "deepseek-flash" {
+		t.Fatalf("unexpected fallback requests: %+v", reqs)
+	}
+	if eng.currentModel() != "deepseek-flash" || !eng.HasInterruptedTurn() {
+		t.Fatal("vision overload was not retained as a resumable Flash turn")
+	}
+}
+
+func TestReadImagesReachNextModelRequest(t *testing.T) {
+	for _, count := range []int{1, 2} {
+		t.Run(fmt.Sprintf("images=%d", count), func(t *testing.T) {
+			dir := t.TempDir()
+			var calls []api.ToolCall
+			var expected []string
+			for index := 0; index < count; index++ {
+				var raw bytes.Buffer
+				if err := png.Encode(&raw, image.NewRGBA(image.Rect(0, 0, 16+index, 8))); err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(dir, fmt.Sprintf("screen-%d.png", index))
+				if err := os.WriteFile(path, raw.Bytes(), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				expected = append(expected, base64.StdEncoding.EncodeToString(raw.Bytes()))
+				calls = append(calls, api.ToolCall{ID: fmt.Sprintf("image-%d", index), Name: "read", Input: map[string]any{"filePath": path}})
+			}
+			prov := &seqProvider{reply: func(ctx context.Context, index int, req api.ChatRequest) (*api.ChatResponse, error) {
+				if index == 0 {
+					return &api.ChatResponse{ToolCalls: calls}, nil
+				}
+				return &api.ChatResponse{Content: "done"}, nil
+			}}
+			eng := newPatternEngine(t, prov, func(c *Config) {
+				c.Model = "deepseek-v4-pro"
+				c.ModelFast = "deepseek-flash"
+				c.Provider.Name = "deepseek"
+			}, tool.NewReadTool())
+			eng.collectContext = func() *ctxt.ProjectContext { return &ctxt.ProjectContext{Cwd: dir} }
+			eng.SetProjectContext(eng.collectContext())
+			if _, err := run(t, eng, "重构 architecture based on screenshots"); err != nil {
+				t.Fatal(err)
+			}
+			reqs := prov.requests()
+			if len(reqs) != 2 {
+				t.Fatalf("requests=%d, want 2", len(reqs))
+			}
+			if reqs[0].Model != "deepseek-v4-pro" || reqs[1].Model != "deepseek-flash" {
+				t.Fatalf("models=%q -> %q, want Pro -> Flash", reqs[0].Model, reqs[1].Model)
+			}
+			var images []api.MessagePart
+			toolCount := 0
+			for _, message := range reqs[1].Messages {
+				if message.Role == "tool" {
+					if len(images) != 0 || len(message.Parts) != 0 {
+						t.Fatal("image blocks split the tool-result batch")
+					}
+					if message.ToolCallID != calls[toolCount].ID {
+						t.Fatalf("tool result out of order: %q", message.ToolCallID)
+					}
+					toolCount++
+				}
+				if len(message.Parts) > 0 {
+					if message.Role != "user" || !message.Synthetic || toolCount != count {
+						t.Fatalf("image message not after tool batch: %+v", message)
+					}
+					images = append(images, message.Parts...)
+				}
+			}
+			if len(images) != count || toolCount != count {
+				t.Fatalf("image count=%d tool results=%d, want %d", len(images), toolCount, count)
+			}
+			for index, part := range images {
+				if part.Type != "image" || part.MimeType != "image/png" || part.Data != expected[index] {
+					t.Fatalf("image %d changed: %+v", index, part)
+				}
+			}
+		})
+	}
+}
+
+type imageResultTestTool struct {
+	tool.Tool
+	result tool.Result
+}
+
+func (imageTool *imageResultTestTool) Call(context.Context, tool.Input, tool.Context) (tool.Result, error) {
+	return imageTool.result, nil
+}
+
+func TestFailedToolImageIsNotForwarded(t *testing.T) {
+	imageTool := &imageResultTestTool{Tool: tool.NewReadTool(), result: tool.Result{
+		Data: "image read failed", IsError: true,
+		Parts: []api.MessagePart{{Type: "image", MimeType: "image/png", Data: "cGl4ZWxz"}},
+	}}
+	prov := &seqProvider{reply: func(ctx context.Context, index int, req api.ChatRequest) (*api.ChatResponse, error) {
+		if index == 0 {
+			return toolCallResp("image", "read", map[string]any{"filePath": "screen.png"}), nil
+		}
+		return &api.ChatResponse{Content: "done"}, nil
+	}}
+	eng := newPatternEngine(t, prov, func(c *Config) {
+		c.Model = "deepseek-v4-pro"
+		c.ModelFast = "deepseek-flash"
+		c.Provider.Name = "deepseek"
+	}, imageTool)
+	if _, err := run(t, eng, "重构 architecture"); err != nil {
+		t.Fatal(err)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 2 || reqs[1].Model != "deepseek-v4-pro" {
+		t.Fatalf("failed image changed routing: requests=%d", len(reqs))
+	}
+	for _, message := range reqs[1].Messages {
+		if len(message.Parts) != 0 {
+			t.Fatal("failed tool leaked image payload")
+		}
+	}
+}
+
+func TestSerialToolImagesSurviveDispatch(t *testing.T) {
+	imageTool := &imageResultTestTool{Tool: tool.NewBrowserTool(), result: tool.Result{
+		Data: "Saved screenshot", Parts: []api.MessagePart{{Type: "image", MimeType: "image/png", Data: "cGl4ZWxz"}},
+	}}
+	eng := newPatternEngine(t, &seqProvider{}, nil, imageTool)
+	calls := []api.ToolCall{
+		{ID: "first", Name: "browser", Input: map[string]any{"action": "navigate", "url": "https://example.com"}},
+		{ID: "second", Name: "browser", Input: map[string]any{"action": "navigate", "url": "https://example.com"}},
+	}
+	results := eng.dispatchTools(context.Background(), calls)
+	if len(results) != 2 {
+		t.Fatalf("results=%d, want 2", len(results))
+	}
+	for index, result := range results {
+		if result.Failed || result.ID != calls[index].ID || len(result.Parts) != 1 || result.Parts[0].Data != "cGl4ZWxz" {
+			t.Fatalf("serial image result changed: %+v", result)
+		}
+	}
+}
+
 // The engine recognises failed tools by the "Error:" prefix (circuit breaker,
 // failure signals, is_error on the wire). A tool that reports IsError with a
 // bare message was invisible to all of them.
@@ -714,27 +988,44 @@ func TestThinkingBlocksAreKeptForTheNextRequest(t *testing.T) {
 	t.Fatal("assistant tool-call turn missing from the second request")
 }
 
-// Thinking blocks are bound to the exact prefix they were produced under.
-// When history is rewritten (output masking, compaction) they have to go, or
-// the next request is rejected.
-func TestRewritingHistoryDropsThinkingBlocks(t *testing.T) {
+// When history is rewritten (output masking, compaction) the thinking blocks
+// of earlier assistant turns go: Anthropic ignores them anyway. The last
+// assistant turn keeps its blocks: when the next message carries that turn's
+// tool results, the API requires them unmodified and rejects the request
+// without them ("a final assistant message must start with a thinking block").
+func TestRewritingHistoryDropsEarlierThinkingBlocksOnly(t *testing.T) {
 	eng := newPatternEngine(t, &seqProvider{}, nil)
 	eng.masker.outputDir = t.TempDir()
 	eng.masker.protectionThreshold = 1
 	eng.masker.minPrunableThreshold = 1
 	eng.compressor = nil
+	block := func(s string) []json.RawMessage {
+		return []json.RawMessage{json.RawMessage(`{"type":"thinking","thinking":"` + s + `"}`)}
+	}
 	eng.messages = []api.Message{
 		{Role: "user", Content: "go"},
-		{Role: "assistant", ThinkingBlocks: []json.RawMessage{json.RawMessage(`{"type":"thinking"}`)},
-			ToolCalls: []api.ToolCall{{ID: "c1", Name: "read"}}},
+		{Role: "assistant", ThinkingBlocks: block("first"), ToolCalls: []api.ToolCall{{ID: "c1", Name: "read"}}},
 		{Role: "tool", ToolCallID: "c1", Name: "read", Content: strings.Repeat("z", 8000)},
 		{Role: "user", Content: "next"},
+		{Role: "assistant", ThinkingBlocks: block("last"), ToolCalls: []api.ToolCall{{ID: "c2", Name: "read"}}},
+		{Role: "tool", ToolCallID: "c2", Name: "read", Content: strings.Repeat("y", 8000)},
 	}
 	eng.checkAndCompress(context.Background(), "test-model")
-	for _, m := range eng.messages {
-		if len(m.ThinkingBlocks) > 0 {
-			t.Fatalf("thinking blocks survived a history rewrite: %+v", m)
+	var last *api.Message
+	for i := range eng.messages {
+		m := &eng.messages[i]
+		if m.Role == "assistant" {
+			last = m
 		}
+	}
+	for i := range eng.messages {
+		m := &eng.messages[i]
+		if m.Role == "assistant" && m != last && len(m.ThinkingBlocks) > 0 {
+			t.Fatalf("an earlier turn's thinking blocks survived the rewrite: %+v", m)
+		}
+	}
+	if last == nil || len(last.ThinkingBlocks) != 1 || !strings.Contains(string(last.ThinkingBlocks[0]), "last") {
+		t.Fatalf("the last assistant turn lost its thinking blocks: %+v", last)
 	}
 }
 

@@ -381,10 +381,14 @@ func (c *Checker) checkNetworkReachable(ctx context.Context) CheckResult {
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, u.String(), nil)
 	if err == nil {
 		var resp *http.Response
-		client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyFromEnvironment}}
+		transport := &http.Transport{Proxy: http.ProxyFromEnvironment, DisableKeepAlives: true}
+		client := &http.Client{Transport: transport}
 		if resp, err = client.Do(req); err == nil {
 			_ = resp.Body.Close()
 		}
+		// A throw-away transport keeps its idle connection (and two
+		// goroutines) until the server closes it; each /diagnose left one.
+		transport.CloseIdleConnections()
 	}
 	if err != nil {
 		// *url.Error's text repeats the full URL, query string included.
@@ -465,6 +469,13 @@ func (c *Checker) checkGit(_ context.Context) CheckResult {
 
 func (c *Checker) checkDataDir(_ context.Context) CheckResult {
 	res := CheckResult{Name: "data_dir", Title: "数据目录"}
+	if c.homeDir == "" {
+		// No home directory (HOME/USERPROFILE unset): the data directory
+		// cannot be located; probing "./.cove" would create it inside the
+		// user's project.
+		res.Status, res.Skipped = SevInfo, true
+		return res
+	}
 	dataDir := filepath.Join(c.homeDir, ".cove")
 
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
@@ -493,6 +504,10 @@ func (c *Checker) checkDataDir(_ context.Context) CheckResult {
 
 func (c *Checker) checkDiskSpace(_ context.Context) CheckResult {
 	res := CheckResult{Name: "disk_space", Title: "磁盘空间"}
+	if c.homeDir == "" {
+		res.Status, res.Skipped = SevInfo, true
+		return res
+	}
 
 	// Use a simple write test with a small file — cross-platform
 	dataDir := filepath.Join(c.homeDir, ".cove")
@@ -541,6 +556,10 @@ func isDiskFull(err error) bool {
 
 func (c *Checker) checkSessionIntegrity(_ context.Context) CheckResult {
 	res := CheckResult{Name: "sessions", Title: "会话完整性"}
+	if c.homeDir == "" {
+		res.Status, res.Skipped = SevInfo, true
+		return res
+	}
 	sessDir := filepath.Join(c.homeDir, ".cove", "sessions")
 
 	if _, err := os.Stat(sessDir); os.IsNotExist(err) {

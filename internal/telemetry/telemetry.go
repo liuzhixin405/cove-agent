@@ -32,8 +32,14 @@ type Recorder struct {
 // NewRecorder creates a telemetry recorder with local storage.
 func NewRecorder() *Recorder {
 	home, _ := os.UserHomeDir()
+	path := ""
+	if home != "" {
+		// Without a home directory there is nowhere to keep the history;
+		// "./.cove/telemetry.json" would be written into the project.
+		path = filepath.Join(home, ".cove", "telemetry.json")
+	}
 	return &Recorder{
-		filePath: filepath.Join(home, ".cove", "telemetry.json"),
+		filePath: path,
 		enabled:  false, // opt-in only
 	}
 }
@@ -106,7 +112,7 @@ func (r *Recorder) Flush() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if len(r.events) == 0 {
+	if len(r.events) == 0 || r.filePath == "" {
 		return nil
 	}
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/liuzhixin405/cove-agent/internal/proctree"
 	"github.com/liuzhixin405/cove-agent/internal/textutil"
 )
 
@@ -21,6 +22,11 @@ func executeReadOnlyCommand(cmd string) string {
 	} else {
 		c = exec.CommandContext(ctx, "sh", "-c", cmd)
 	}
+	// Kill the whole tree on timeout and stop reading pipes shortly after:
+	// killing only the shell left `grep -r` running with the pipe open, so
+	// CombinedOutput returned when grep finished, the run (and the
+	// consolidation lock with it) stuck for as long as that took.
+	proctree.Configure(ctx, c, time.Second)
 
 	output, err := c.CombinedOutput()
 	result := strings.TrimSpace(string(output))

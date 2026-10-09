@@ -112,7 +112,7 @@ func (e *Engine) runReview(msgs []api.Message, sessionID string) reviewResult {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), reviewTimeout)
 	defer cancel()
-	resp, err := e.llm.Chat(ctx, e.reviewRequest(snapshot))
+	resp, err := e.backgroundProvider().Chat(ctx, e.reviewRequest(snapshot))
 	if err != nil {
 		log.Warnf("background review failed: %v", err)
 		return reviewResult{}

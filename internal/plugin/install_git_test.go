@@ -1,6 +1,8 @@
 package plugin
 
 import (
+	"context"
+	"errors"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // isolateHome points HOME/USERPROFILE at a temp dir and keeps the machine's
@@ -80,6 +83,226 @@ var (
 	pluginRepoMu        sync.Mutex
 	pluginRepoTemplates = map[string]string{}
 )
+
+func TestInstallDoesNotBlockReadersOrDuplicateInstall(t *testing.T) {
+	isolateHome(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() { close(started) })
+		<-release
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	defer close(release)
+	mgr := NewManager()
+	mgr.Init()
+	installed := make(chan error, 1)
+	go func() { installed <- mgr.Install("slow", srv.URL+"/slow.git") }()
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("clone did not reach the test server")
+	}
+	read := make(chan struct{})
+	go func() { mgr.AllPlugins(); close(read) }()
+	select {
+	case <-read:
+	case <-time.After(time.Second):
+		t.Error("plugin listing blocked behind git clone")
+	}
+	duplicate := make(chan error, 1)
+	go func() { duplicate <- mgr.Install("slow", srv.URL+"/slow.git") }()
+	select {
+	case err := <-duplicate:
+		if err == nil || !strings.Contains(err.Error(), "install") {
+			t.Errorf("duplicate install error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Error("duplicate install waited for network instead of being rejected")
+	}
+	t.Cleanup(func() {
+		select {
+		case <-installed:
+		case <-time.After(5 * time.Second):
+			t.Error("install did not finish after test server released")
+		}
+	})
+}
+
+func TestInstallContextStopsGitAndCleansUp(t *testing.T) {
+	for _, deadline := range []bool{false, true} {
+		name := "cancel"
+		if deadline {
+			name = "deadline"
+		}
+		t.Run(name, func(t *testing.T) {
+			isolateHome(t)
+			started := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				once.Do(func() { close(started) })
+				<-release
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer srv.Close()
+			ctx, cancel := context.WithCancel(context.Background())
+			if deadline {
+				cancel()
+				ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+			}
+			defer cancel()
+			mgr := NewManager()
+			mgr.Init()
+			finished := make(chan error, 1)
+			go func() { finished <- mgr.InstallContext(ctx, "slow", srv.URL+"/slow.git") }()
+			select {
+			case <-started:
+			case <-time.After(8 * time.Second):
+				close(release)
+				t.Fatal("clone did not reach test server")
+			}
+			wantErr := context.Canceled
+			if deadline {
+				wantErr = context.DeadlineExceeded
+			} else {
+				cancel()
+			}
+			var err error
+			select {
+			case err = <-finished:
+				close(release)
+			case <-time.After(15 * time.Second):
+				t.Error("git did not stop after context cancellation")
+				close(release)
+				err = <-finished
+			}
+			if !errors.Is(err, wantErr) {
+				t.Errorf("install error = %v, want %v", err, wantErr)
+			}
+			if _, err := os.Stat(filepath.Join(mgr.Dir(), "slow")); !os.IsNotExist(err) {
+				t.Errorf("cancelled installation left plugin directory: %v", err)
+			}
+			staging, err := filepath.Glob(filepath.Join(filepath.Dir(mgr.Dir()), ".cove-plugin-install-*"))
+			if err != nil || len(staging) != 0 {
+				t.Errorf("cancelled installation left staging directories: %v, %v", staging, err)
+			}
+			if err := mgr.Install("slow", ""); err != nil {
+				t.Errorf("cancelled installation retained reservation: %v", err)
+			}
+		})
+	}
+}
+
+func TestInstallLockfileFailureDoesNotTrackPlugin(t *testing.T) {
+	isolateHome(t)
+	source := newPluginRepo(t, "rollback", "1.0.0")
+	mgr := NewManager()
+	mgr.Init()
+	lockPath := mgr.Marketplace().lockfilePath()
+	if err := os.Mkdir(lockPath, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Install("rollback", source); err == nil {
+		t.Fatal("install succeeded despite lockfile write failure")
+	}
+	if _, ok := mgr.Marketplace().LockInfo("rollback"); ok {
+		t.Error("failed installation retained an in-memory lock entry")
+	}
+	if _, err := os.Stat(filepath.Join(mgr.Dir(), "rollback")); !os.IsNotExist(err) {
+		t.Errorf("failed installation retained its directory: %v", err)
+	}
+	if len(mgr.AllPlugins()) != 0 {
+		t.Error("failed installation was published")
+	}
+	if err := os.Remove(lockPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Install("rollback", source); err != nil {
+		t.Fatalf("retry failed after fixing lockfile: %v", err)
+	}
+	lock, ok := mgr.Marketplace().LockInfo("rollback")
+	if !ok || lock.Version != "1.0.0" || lock.CommitSHA == "" {
+		t.Fatal("retry did not persist the installed version and commit")
+	}
+}
+
+func TestMarketplaceContextStopsGit(t *testing.T) {
+	for _, operation := range []string{"install", "refresh", "update", "update-all"} {
+		t.Run(operation, func(t *testing.T) {
+			isolateHome(t)
+			started := make(chan struct{})
+			release := make(chan struct{})
+			var once sync.Once
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				once.Do(func() { close(started) })
+				<-release
+				w.WriteHeader(http.StatusInternalServerError)
+			}))
+			defer srv.Close()
+			defer close(release)
+			mgr := NewManager()
+			mgr.Init()
+			url := srv.URL + "/slow.git"
+			switch operation {
+			case "install":
+				mgr.Marketplace().index = []MarketplaceEntry{{Name: "slow", Source: url}}
+			case "refresh":
+				mgr.Marketplace().sources = []MarketplaceSource{{Name: "slow", Type: "git", URL: url, Enabled: true}}
+			default:
+				if err := mgr.Install("slow", newPluginRepo(t, "slow", "1.0.0")); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, filepath.Join(mgr.Dir(), "slow"), "remote", "set-url", "origin", url)
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			finished := make(chan error, 1)
+			go func() {
+				switch operation {
+				case "install":
+					finished <- mgr.MarketplaceInstallContext(ctx, "slow")
+				case "refresh":
+					finished <- mgr.MarketplaceRefreshContext(ctx)
+				default:
+					name := "slow"
+					if operation == "update-all" {
+						name = ""
+					}
+					message, err := mgr.MarketplaceUpdateContext(ctx, name)
+					if err == nil && strings.Contains(message, context.Canceled.Error()) {
+						err = context.Canceled
+					}
+					finished <- err
+				}
+			}()
+			select {
+			case <-started:
+			case <-time.After(8 * time.Second):
+				t.Fatal("marketplace git did not reach server")
+			}
+			cancel()
+			select {
+			case err := <-finished:
+				if !errors.Is(err, context.Canceled) {
+					t.Errorf("operation error = %v, want cancellation", err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("marketplace operation ignored cancellation")
+			}
+			if operation == "install" {
+				if _, err := os.Stat(filepath.Join(mgr.Dir(), "slow")); !os.IsNotExist(err) {
+					t.Error("cancelled marketplace installation left a directory")
+				}
+				if _, ok := mgr.Marketplace().LockInfo("slow"); ok {
+					t.Error("cancelled marketplace installation retained a lock entry")
+				}
+			}
+		})
+	}
+}
 
 // copyTree copies the directory src to dst, which must not exist.
 func copyTree(src, dst string) error {

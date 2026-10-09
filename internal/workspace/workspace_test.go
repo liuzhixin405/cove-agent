@@ -160,11 +160,14 @@ func TestPatchRejectsIgnoredCandidateAndIncludesUntracked(t *testing.T) {
 	if err := os.WriteFile(ignored, []byte("verifier input absent from patch"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Patch(ctx, work, baseline.Commit); err == nil || !strings.Contains(err.Error(), "ignored files") {
-		t.Fatalf("captured incomplete ignored candidate: %v", err)
+	// Ignored build artefacts are removed from the worktree before the capture
+	// (they can never be in the patch, and a verifier must not see them), so
+	// the candidate is captured without them rather than refused.
+	if patch, err := Patch(ctx, work, baseline.Commit); err != nil || strings.Contains(string(patch), "b/ignored.txt") {
+		t.Fatalf("ignored artefact handling: %v %s", err, patch)
 	}
-	if err := os.Remove(ignored); err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(ignored); !os.IsNotExist(err) {
+		t.Fatalf("ignored artefact survived the capture: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(work, "new.txt"), []byte("new candidate file\n"), 0600); err != nil {
 		t.Fatal(err)
