@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,8 +30,19 @@ type AcceptanceCheck struct {
 	Result    *VerifyResult `json:"result,omitempty"`
 }
 
+type GitEvidence struct {
+	Action     string            `json:"action"`
+	Command    string            `json:"command"`
+	Cwd        string            `json:"cwd"`
+	Status     string            `json:"status"`
+	Reason     string            `json:"reason"`
+	Commit     string            `json:"commit,omitempty"`
+	RemoteRefs map[string]string `json:"remote_refs,omitempty"`
+}
+
 // AcceptanceReport is a task-scoped record, not a model's completion claim.
 type AcceptanceReport struct {
+	Git        []GitEvidence                 `json:"git,omitempty"`
 	Browser    []browser.Report              `json:"browser,omitempty"`
 	Regression []delegate.RegressionEvidence `json:"regression,omitempty"`
 	Version    int                           `json:"version"`
@@ -139,7 +151,7 @@ func (e *Engine) finishAcceptance(err error) {
 	if err != nil {
 		e.acceptance.Outcome, e.acceptance.Reason = "interrupted", err.Error()
 	}
-	if len(e.acceptance.Checks) == 0 && len(e.acceptance.Regression) == 0 && len(e.acceptance.Browser) == 0 && err == nil {
+	if len(e.acceptance.Checks) == 0 && len(e.acceptance.Regression) == 0 && len(e.acceptance.Browser) == 0 && len(e.acceptance.Git) == 0 && err == nil {
 		e.acceptance.Reason = "没有可执行的校验证据，不能据此宣称验收通过"
 	}
 	report := cloneAcceptance(e.acceptance)
@@ -182,10 +194,33 @@ func (e *Engine) finishAcceptance(err error) {
 		}
 		e.engineOutput(fmt.Sprintf("验收: 通过 %d，失败 %d，未验证 %d；/acceptance 查看证据。", passed, failed, unverified))
 	}
+	if len(report.Git) > 0 {
+		passed, failed, unverified := 0, 0, 0
+		for _, evidence := range report.Git {
+			switch evidence.Status {
+			case "passed":
+				passed++
+			case "failed":
+				failed++
+			default:
+				unverified++
+			}
+		}
+		e.engineOutput(fmt.Sprintf("Git 操作: 成功 %d，失败 %d，未确认 %d（不代表构建/测试通过）；/acceptance 查看证据。", passed, failed, unverified))
+	}
 }
 
 func cloneAcceptance(report *AcceptanceReport) *AcceptanceReport {
 	copyReport := *report
+	copyReport.Git = append([]GitEvidence(nil), report.Git...)
+	for index := range copyReport.Git {
+		if refs := copyReport.Git[index].RemoteRefs; refs != nil {
+			copyReport.Git[index].RemoteRefs = make(map[string]string, len(refs))
+			for ref, hash := range refs {
+				copyReport.Git[index].RemoteRefs[ref] = hash
+			}
+		}
+	}
 	copyReport.Browser = append([]browser.Report(nil), report.Browser...)
 	for index := range copyReport.Browser {
 		copyReport.Browser[index] = cloneBrowserReport(report.Browser[index])
@@ -338,6 +373,21 @@ func (report *AcceptanceReport) Summary() string {
 	fmt.Fprintf(&text, "任务验收 %s（会话 %s，%s）\n%s\n", report.ID, report.SessionID, outcome, report.Request)
 	if report.Reason != "" {
 		fmt.Fprintf(&text, "%s\n", report.Reason)
+	}
+	for _, evidence := range report.Git {
+		status := map[string]string{"passed": "成功", "failed": "失败", "unverified": "未确认"}[evidence.Status]
+		fmt.Fprintf(&text, "Git 操作 [%s] %s: %s\n命令: %s\n目录: %s；提交: %s\n", status, evidence.Action, evidence.Reason, evidence.Command, evidence.Cwd, evidence.Commit)
+		refs := make([]string, 0, len(evidence.RemoteRefs))
+		for ref := range evidence.RemoteRefs {
+			refs = append(refs, ref)
+		}
+		sort.Strings(refs)
+		for _, ref := range refs {
+			fmt.Fprintf(&text, "远端引用: %s %s\n", evidence.RemoteRefs[ref], ref)
+		}
+	}
+	if len(report.Git) > 0 {
+		text.WriteString("Git 操作与远端引用核对不代表构建/测试通过。\n")
 	}
 	for index, check := range report.Checks {
 		status := map[string]string{"passed": "通过", "failed": "失败", "unverified": "未验证"}[check.Status]

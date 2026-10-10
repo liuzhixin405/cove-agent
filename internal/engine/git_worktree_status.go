@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"os/exec"
 	"regexp"
@@ -10,11 +11,108 @@ import (
 	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
+	"github.com/liuzhixin405/cove-agent/internal/permission"
+	"github.com/liuzhixin405/cove-agent/internal/safety"
+	"github.com/liuzhixin405/cove-agent/internal/session"
 )
 
 // gitStatusTimeout bounds the turn-end `git status`; a slow repository must
 // not hold the prompt back.
 const gitStatusTimeout = 3 * time.Second
+
+func (e *Engine) recordGitEvidence(ctx context.Context, tc api.ToolCall, cwd, output string, failed bool) {
+	if !permission.IsShellTool(tc.Name) {
+		return
+	}
+	e.acceptanceMu.Lock()
+	active := e.acceptance != nil && e.acceptance.Outcome == "running" && session.SameProjectDir(e.acceptance.Cwd, cwd)
+	e.acceptanceMu.Unlock()
+	if !active {
+		return
+	}
+	command, _ := tc.Input["command"].(string)
+	commands := safety.SimpleCommands(command)
+	if e.perm != nil && e.perm.ShellKindFor(tc.Name) == permission.ShellPOSIX {
+		commands = safety.SimpleCommandsPOSIX(command)
+	}
+	if len(commands) != 1 || len(commands[0].Redirects) != 0 || len(safety.NestedCommands(command)) != 0 || safety.HasHostileCharacters(command) || strings.ContainsRune(command, '&') {
+		return
+	}
+	words := commands[0].Words
+	if e.perm != nil && e.perm.ShellKindFor(tc.Name) == permission.ShellPOSIX && len(words) > 1 && words[0] == "time" {
+		words = words[1:]
+		if words[0] == "-p" {
+			words = words[1:]
+		}
+	}
+	if len(words) < 2 || safety.ProgramName(words[0]) != "git" {
+		return
+	}
+	switch words[1] {
+	case "commit", "tag", "push", "ls-remote":
+	default:
+		return
+	}
+	evidence := GitEvidence{Action: words[1], Command: command, Cwd: session.NormalizeProjectDir(cwd), Status: "passed", Reason: "Git 命令执行成功；不代表测试通过"}
+	if failed {
+		evidence.Status, evidence.Reason = "failed", truncateTail(output, 1000)
+	} else {
+		readCtx, cancel := context.WithTimeout(ctx, gitStatusTimeout)
+		defer cancel()
+		git := func(ref string) (string, error) {
+			cmd := exec.CommandContext(readCtx, "git", "rev-parse", "--verify", ref)
+			cmd.Dir = cwd
+			value, err := cmd.Output()
+			return strings.TrimSpace(string(value)), err
+		}
+		evidence.Commit, _ = git("HEAD")
+		if words[1] == "ls-remote" {
+			evidence.RemoteRefs = map[string]string{}
+			evidence.Status, evidence.Reason = "unverified", "未获得可与本地引用核对的远端证据"
+			valid := true
+			for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+				fields := strings.Fields(line)
+				if len(fields) != 2 || !strings.HasPrefix(fields[1], "refs/") || len(evidence.RemoteRefs) >= 64 {
+					valid = false
+					break
+				}
+				bytes, err := hex.DecodeString(fields[0])
+				if err != nil || len(bytes) != 20 && len(bytes) != 32 {
+					valid = false
+					break
+				}
+				if _, duplicate := evidence.RemoteRefs[fields[1]]; duplicate {
+					valid = false
+					break
+				}
+				evidence.RemoteRefs[fields[1]] = fields[0]
+			}
+			if valid && len(evidence.RemoteRefs) > 0 {
+				evidence.Status, evidence.Reason = "passed", "返回的远端引用均与本地同名引用一致"
+				for ref, hash := range evidence.RemoteRefs {
+					local, err := git(ref)
+					if err != nil {
+						evidence.Status, evidence.Reason = "unverified", "本地引用不可读取: "+ref
+						break
+					}
+					if local != hash {
+						evidence.Status, evidence.Reason = "failed", "远端引用与本地不一致: "+ref
+						break
+					}
+				}
+			}
+		}
+	}
+	e.acceptanceMu.Lock()
+	defer e.acceptanceMu.Unlock()
+	if e.acceptance == nil || e.acceptance.Outcome != "running" || !session.SameProjectDir(e.acceptance.Cwd, cwd) {
+		return
+	}
+	if len(e.acceptance.Git) >= 32 {
+		e.acceptance.Git = e.acceptance.Git[len(e.acceptance.Git)-31:]
+	}
+	e.acceptance.Git = append(e.acceptance.Git, evidence)
+}
 
 // gitWorkState is what `git status --porcelain --branch` says about the
 // working tree: whether the changes are committed, and the commits pushed.

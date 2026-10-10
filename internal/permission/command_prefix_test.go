@@ -7,6 +7,49 @@ import (
 	"github.com/liuzhixin405/cove-agent/internal/shell"
 )
 
+func TestTimedCommandUsesOnlyExistingPOSIXAllowRules(t *testing.T) {
+	for _, rule := range []Rule{
+		{ToolPattern: "bash", CommandPrefix: "git push"},
+		{ToolPattern: "bash", CommandGroup: GroupGitRoutine},
+	} {
+		m := NewManager(Default)
+		m.SetShellKind(ShellPOSIX)
+		m.AddRule(DAllow, rule)
+		for _, line := range []string{"time git push origin main", "time -p git push origin main"} {
+			if decision, _ := m.Check("bash", map[string]any{"command": line}, DAsk); decision != DAllow {
+				t.Errorf("existing allow rule did not cover %q: %v", line, decision)
+			}
+		}
+		for _, line := range []string{"time -o timing.txt git push", "/usr/bin/time git push", "sudo git push", "env git push", "time git push > output.txt", "time git push; rm draft.txt", "time ls", "time bash -c 'git push'"} {
+			if decision, _ := m.Check("bash", map[string]any{"command": line}, DAsk); decision != DAsk {
+				t.Errorf("uncovered effects allowed for %q: %v", line, decision)
+			}
+		}
+		for _, deny := range []Decision{DDeny, DAsk} {
+			m.AddRule(deny, Rule{ToolPattern: "bash", CommandPrefix: "git push"})
+			if decision, _ := m.Check("bash", map[string]any{"command": "time -p git push origin main"}, DAsk); decision != deny {
+				t.Errorf("timing bypassed %v rule: %v", deny, decision)
+			}
+			m = NewManager(Default)
+			m.SetShellKind(ShellPOSIX)
+			m.AddRule(DAllow, rule)
+		}
+	}
+	for _, kind := range []ShellKind{ShellPOSIX, ShellPowerShell, ShellCmd, ""} {
+		m := NewManager(Default)
+		m.SetShellKind(kind)
+		if decision, _ := m.Check("bash", map[string]any{"command": "time git push"}, DAsk); decision != DAsk {
+			t.Errorf("timing created permission without an allow rule: %v", decision)
+		}
+		m.AddRule(DAllow, Rule{ToolPattern: "bash", CommandPrefix: "git push"})
+		if kind != ShellPOSIX {
+			if decision, _ := m.Check("bash", map[string]any{"command": "time git push"}, DAsk); decision != DAsk {
+				t.Errorf("POSIX timing normalized under %q: %v", kind, decision)
+			}
+		}
+	}
+}
+
 func TestCommandPrefixesPicksExecutableAndSubcommand(t *testing.T) {
 	cases := []struct {
 		cmd  string

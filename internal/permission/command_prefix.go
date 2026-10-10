@@ -198,13 +198,20 @@ type coverage struct {
 }
 
 func (c coverage) covers(words []string) bool {
+	scoped := words
+	if c.kind == ShellPOSIX && len(words) > 1 && words[0] == "time" {
+		scoped = words[1:]
+		if scoped[0] == "-p" {
+			scoped = scoped[1:]
+		}
+	}
 	for _, p := range c.prefixes {
-		if hasWordPrefix(words, p) {
+		if hasWordPrefix(words, p) || hasWordPrefix(scoped, p) {
 			return true
 		}
 	}
 	for _, g := range c.groups {
-		if groupCovers(g, words) {
+		if groupCovers(g, words) || groupCovers(g, scoped) {
 			return true
 		}
 	}

@@ -924,6 +924,7 @@ When you finish, write a short report for the user about the latest request only
 - Name the files you changed and anything the user needs to do next.
 - Say how you verified it (the command and its result), or that you could not.
 - In a git repository, if you changed files, say whether the changes are committed and pushed. Only call a commit or push done if you ran it and it succeeded; otherwise say plainly that the changes are not committed or not pushed. Commands you list for the user to run are instructions, not work you did — say so.
+- For Git releases, run commit, tag, push and ls-remote as separate shell tool calls. Do not append echo/status commands that can hide their exit codes. Query the remote branch, tag and peeled tag refs explicitly to verify the release; local upstream status alone is not remote evidence.
 - Mention remaining risks or open questions only if there are any.
 
 Keep it brief: do not restate the request, replay every step, or add filler. Reply in the user's language.
@@ -1314,6 +1315,7 @@ func (e *Engine) executeToolWithParts(ctx context.Context, tc api.ToolCall, part
 		return fmt.Sprintf("Error: invalid %s input: %s", tc.Name, errMsg), true
 	}
 
+	defer func() { e.recordGitEvidence(ctx, tc, cwd, toolOutput, failed) }()
 	if err := e.authorizeToolCall(tc, tctx, tctx.SetWaiting); err != nil {
 		return "Error: " + err.Error(), true
 	}

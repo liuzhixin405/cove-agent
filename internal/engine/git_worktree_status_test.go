@@ -9,7 +9,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/liuzhixin405/cove-agent/internal/api"
 	ctxt "github.com/liuzhixin405/cove-agent/internal/context"
+	"github.com/liuzhixin405/cove-agent/internal/permission"
+	"github.com/liuzhixin405/cove-agent/internal/tool"
 )
 
 func TestParseGitStatusAndLine(t *testing.T) {
@@ -109,13 +112,15 @@ func TestReadGitWorkStateRealRepo(t *testing.T) {
 	}
 	root := t.TempDir()
 	remote, work := filepath.Join(root, "remote.git"), filepath.Join(root, "work")
-	git := func(dir string, args ...string) {
+	git := func(dir string, args ...string) string {
 		t.Helper()
 		cmd := exec.Command("git", append([]string{"-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"}, args...)...)
 		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
+		out, err := cmd.CombinedOutput()
+		if err != nil {
 			t.Fatalf("git %v: %v\n%s", args, err, out)
 		}
+		return string(out)
 	}
 	git(root, "init", "--bare", "-b", "main", remote)
 	git(root, "clone", remote, work)
@@ -136,8 +141,52 @@ func TestReadGitWorkStateRealRepo(t *testing.T) {
 		t.Fatalf("new file: %+v", s)
 	}
 	git(work, "add", "a.txt")
-	git(work, "commit", "-m", "a")
-	git(work, "push", "-u", "origin", "main")
+	t.Setenv("COVE_CONFIG_DIR", t.TempDir())
+	t.Chdir(work)
+	eng := newPatternEngine(t, &seqProvider{}, nil, tool.NewBashTool())
+	eng.projCtx = &ctxt.ProjectContext{Cwd: work, IsGitRepo: true}
+	eng.verifyGate = NewVerifyGate([]string{"build"}, work)
+	eng.beginAcceptance(api.Message{Role: "user", Content: "release"})
+	record := func(line, output string, failed bool) {
+		eng.recordGitEvidence(context.Background(), api.ToolCall{Name: "bash", Input: map[string]any{"command": line}}, work, output, failed)
+	}
+	record("git commit -m a", git(work, "commit", "-m", "a"), false)
+	record("git tag -a v-test -m v-test", git(work, "tag", "-a", "v-test", "-m", "v-test"), false)
+	record("git push --atomic -u origin main v-test", git(work, "push", "--atomic", "-u", "origin", "main", "v-test"), false)
+	output, failed := eng.executeTool(context.Background(), api.ToolCall{Name: "bash", Input: map[string]any{"command": "git ls-remote origin refs/heads/main refs/tags/v-test 'refs/tags/v-test^{}'"}})
+	if failed {
+		t.Fatalf("real shell query failed: %s", output)
+	}
+	eng.recordAcceptanceResults([]string{"build"}, []VerifyResult{{Command: "build", Passed: true}})
+	eng.noteVerifyEvidence(eng.newTurnLimits(), "bash", map[string]any{"command": "git push"}, "ok", false)
+	report, err := eng.LastAcceptance()
+	if err != nil || len(report.Git) != 4 || report.Checks[0].Status != "unverified" {
+		t.Fatalf("Git evidence missing or invalidation bypassed: %+v %v", report, err)
+	}
+	for _, evidence := range report.Git {
+		if evidence.Status != "passed" || evidence.Commit == "" {
+			t.Fatalf("real Git operation not recorded: %+v", evidence)
+		}
+	}
+	if len(report.Git[3].RemoteRefs) != 3 || !strings.Contains(report.Summary(), "远端引用:") {
+		t.Fatalf("remote hashes not archived: %+v", report.Git[3])
+	}
+	report.Git[3].RemoteRefs["refs/heads/main"] = "tampered"
+	again, _ := eng.LastAcceptance()
+	if again.Git[3].RemoteRefs["refs/heads/main"] == "tampered" {
+		t.Fatal("caller mutated live Git evidence")
+	}
+	eng.finishAcceptance(nil)
+	eng.acceptance = nil
+	reloaded, err := eng.LastAcceptance()
+	if err != nil || len(reloaded.Git) != 4 || reloaded.Git[3].Status != "passed" {
+		t.Fatalf("persisted Git evidence lost: %+v %v", reloaded, err)
+	}
+	eng.beginAcceptance(api.Message{Role: "user", Content: "next task"})
+	next, _ := eng.LastAcceptance()
+	if len(next.Git) != 0 {
+		t.Fatal("new task reused previous Git evidence")
+	}
 	if got := state().Line(); got != "git：工作区干净，与 origin/main 同步（按本地记录）" {
 		t.Fatalf("after push: %q", got)
 	}
@@ -147,5 +196,50 @@ func TestReadGitWorkStateRealRepo(t *testing.T) {
 	git(work, "commit", "-am", "b")
 	if got := state().Line(); got != "git：改动已提交，1 个提交未推送到 origin/main" {
 		t.Fatalf("after commit: %q", got)
+	}
+}
+
+func TestGitEvidenceRejectsUnprovenResults(t *testing.T) {
+	dir := t.TempDir()
+	eng := newPatternEngine(t, &seqProvider{}, nil)
+	eng.verifyGate = NewVerifyGate(nil, dir)
+	eng.beginAcceptance(api.Message{Role: "user", Content: "release"})
+	for _, line := range []string{"echo 'git push'", "git push; echo done", "git tag -a v1 -m v1 && git status", "cd elsewhere; git push", "git push > output.txt", "bash -c 'git push'", "git push &", "git push & # background"} {
+		eng.recordGitEvidence(context.Background(), api.ToolCall{Name: "bash", Input: map[string]any{"command": line}}, dir, "ok", false)
+	}
+	report, _ := eng.LastAcceptance()
+	if len(report.Git) != 0 {
+		t.Fatalf("ambiguous/quoted commands produced evidence: %+v", report.Git)
+	}
+	for _, output := range []string{"", "ok", "not-a-hash\trefs/heads/main", strings.Repeat("a", 40) + "\trefs/heads/main"} {
+		eng.recordGitEvidence(context.Background(), api.ToolCall{Name: "bash", Input: map[string]any{"command": "git ls-remote origin refs/heads/main"}}, dir, output, false)
+	}
+	report, _ = eng.LastAcceptance()
+	for _, evidence := range report.Git {
+		if evidence.Status == "passed" {
+			t.Fatalf("unproven remote state accepted: %+v", evidence)
+		}
+	}
+	eng.recordGitEvidence(context.Background(), api.ToolCall{Name: "bash", Input: map[string]any{"command": "git push"}}, dir, "permission denied", true)
+	report, _ = eng.LastAcceptance()
+	if last := report.Git[len(report.Git)-1]; last.Status != "failed" || last.Reason != "permission denied" {
+		t.Fatalf("failed push not recorded: %+v", last)
+	}
+}
+
+func TestGitEvidenceRecordsDeniedToolWithoutExecuting(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	bash := &mockTool{name: "bash"}
+	eng := newPatternEngine(t, &seqProvider{}, nil, bash)
+	eng.projCtx = &ctxt.ProjectContext{Cwd: dir}
+	eng.verifyGate = NewVerifyGate(nil, dir)
+	eng.perm.SetMode(permission.Default)
+	eng.PermissionPrompt = func(string, map[string]any, string) bool { return false }
+	eng.beginAcceptance(api.Message{Role: "user", Content: "release"})
+	output, failed := eng.executeTool(context.Background(), api.ToolCall{Name: "bash", Input: map[string]any{"command": "git push"}})
+	report, err := eng.LastAcceptance()
+	if !failed || bash.callCount != 0 || err != nil || len(report.Git) != 1 || report.Git[0].Status != "failed" || !strings.Contains(report.Git[0].Reason, "Error:") {
+		t.Fatalf("denied push not safely recorded: failed=%v calls=%d report=%+v err=%v output=%s", failed, bash.callCount, report, err, output)
 	}
 }

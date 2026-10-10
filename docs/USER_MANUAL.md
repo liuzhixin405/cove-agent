@@ -330,7 +330,7 @@ DeepSeek Flash 原生支持图片，`deepseek-v4-pro` 不支持。只要当前�
 | `/tasks` | 查看运行中/排队任务（TUI）；headless 显示同步执行状态。子命令 `saved`/`restore`/`remove`/`move`/`run`/`retry`/`skip` 见[持久化任务队列](#持久化任务队列) |
 | `/agents` | 查看 agent 活动快照（Alt+M 展开实时 Agent Map 面板）；任务运行中也可用 |
 | `/tasks saved` | 列出当前项目持久化队列；仅交互式 REPL 支持恢复及队列管理 |
-| `/acceptance` | 查看当前会话最新任务的验收证据；交互式与 headless 均可查看 |
+| `/acceptance` | 查看当前会话最新任务的构建/测试、回归、浏览器及独立 Git 操作证据；交互式与 headless 均可查看 |
 | `/workflow [direct\|review\|once]` | 默认直接执行；可选当前会话持续先确认方案，或仅下一项任务先确认。不改变 `/mode` 工具权限 |
 | `/automations [list\|add\|run\|tick\|event\|remove]` | 添加、手动运行或扫描维护任务；事件显式触发并按 key 去重 |
 | `/inbox [list\|show\|patch\|review]` | 查看维护结果、验证日志和补丁；accepted/rejected 只记录审阅决定 |
@@ -368,6 +368,10 @@ DeepSeek Flash 原生支持图片，`deepseek-v4-pro` 不支持。只要当前�
 验证在当前工作区运行，不是独立的干净检出测试；选中文件的暂存内容与工作区不同，或验证期间选中文件、暂存快照改变，会拒绝提交。其他未提交文件仍可能影响测试结果；需要验证独立可复现的提交时，还应在干净检出或 CI 中测试。
 
 模型通过 shell 工具执行可识别的 `git commit` 时，开启验证也会执行提交前检查。应将暂存、提交和推送拆成独立工具调用；门禁拒绝串行提交命令、切换验证目录或在 `git commit` 中再选择/暂存文件。它不是任意脚本、变量或自定义 Git 别名的安全沙箱。推送仍走原有权限确认，不会由 `/commit` 自动执行。
+
+模型任务中的独立 `git commit`、`git tag`、`git push` 和 `git ls-remote` 工具调用会归档到 `/acceptance` 的 Git 操作区域，包含执行命令、目录、执行时观察到的提交哈希和结果。远端查询还保存分支、标签及标签解引用的哈希；只有实际返回的引用全部与本地同名引用一致时，才显示核对成功。空输出、无法读取的本地引用、不一致或不合法的输出不会被当成远端核对通过。复合命令、后台执行、重定向或含 `&` 的命令不归档为成功证据，避免最后一个命令掩盖 Git 失败。
+
+这些是本轮执行时的历史记录，不表示后续修改后的工作区仍已发布，也不代表构建/测试通过。commit/push hook 可能改文件，仍会使旧测试证据失效，但不会删除已经执行过的 Git 操作记录；因此可以同时看到“Git 操作成功”和“构建/测试未验证”。斜杠 `/commit` 不属于模型工具调用记录，新任务也不继承上一任务的 Git 证据。
 
 ### 系统
 
@@ -570,6 +574,7 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 
 - 前缀取法：`git`、`go`、`npm`、`docker`、`kubectl`、`dotnet`、`cargo`、`pip` 等带子命令的工具取“程序 + 子命令”（`go test`、`npm run`、`docker compose`），其他程序只取程序名（`rm`、`sed`）。复合命令会为其中每条需要授权的命令各记一个前缀（`cd src && go test ./... | tee out.txt` 一次回答记住 `go test` 和 `tee`）
 - 之后一行命令里的**每一条**命令（`&&`、`||`、`;`、`&`、管道、换行、子 shell 分隔的都算）都必须以已允许的前缀开头、属于已记住的组、或本身只读，才免询问，按词比较：允许 `go test` 后，`go test ./... && rm -rf x`、`go test ./... | tee out.txt`（除非也允许了 `tee`）、`sudo go test`、`FOO=1 go test`、`go vet` 仍会询问；`cd src && go test ./... && echo done` 放行
+- POSIX shell（Git Bash/sh）下，`time <命令>` 和 `time -p <命令>` 可复用内部命令已有的允许前缀或分组，例如已允许 Git 常规操作后 `time git push origin main` 不再重复询问；没有允许规则时仍需授权，deny/ask 与危险参数限制保持生效。仅支持这两种计时形式，不包括 `/usr/bin/time`、`time -o 文件`、其他包装器，或 PowerShell/cmd 下名为 time 的程序；计时包装不自动变成只读。
 - **引号内的参数**：在 Git Bash / sh 和 PowerShell 下，整词位于引号内的参数可以包含 `; & | < > ( )`，所以 `git commit -m "fix(api): handle 429; retry"`、`git commit -m 'a && b'` 能被 `git commit` 前缀覆盖。**cmd.exe** 下保持严格：单引号在 cmd 中不是引号，任何含这些字符的参数都不被覆盖（照常询问）。行内出现 `\"` 或 `\'` 时不信任引号；PowerShell 下未加引号的 `$变量` 参数不覆盖（`$x.Method()` 会执行代码）
 - **heredoc**：`<<EOF`、`<<'EOF'`、`<<-EOF` 与 here-string `<<<` 的内容是 stdin 数据，不参与前缀判断，所以 `git commit -F- <<'EOF' … EOF` 能被 `git commit` 前缀覆盖
 - 仍然不会被前缀规则放行、照常询问的情况：任意位置出现 `$(`、反引号、`${`、`<(`、`>(`（引号内也算）；输出重定向到文件（`/dev/null`、`NUL`、`$null` 除外）
@@ -601,7 +606,7 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 
 例如 deny `git push` 能命中 `git -C . push`、`/usr/bin/git push`、`sudo git push`、`command git push`、`env X=1 git push`。
 
-**`allow` 规则不做归一化**，仍按原样逐词比较（见上一节），所以允许 `go test` 不会放行 `sudo go test` 或 `/usr/local/go/bin/go test`。
+**`allow` 规则不做通用归一化**，仍按原样逐词比较（见上一节），所以允许 `go test` 不会放行 `sudo go test` 或 `/usr/local/go/bin/go test`。唯一的计时包装例外是 POSIX 的 `time` / `time -p` 复用内部命令已有的允许前缀或分组。
 
 **`deny` / `ask` 规则也看嵌套命令**：`bash -c "git push"`、`sh -c`、`cmd /c`、`powershell "…"`、`eval`/`iex`、`xargs git push`、`find -exec/-execdir/-ok`、管道进 shell 的 heredoc 里的命令都会被展开匹配。命令行上定义了 git 别名（`git -c alias.p=push`、`--config-env`、`git config alias.*`）时，所有针对 git 的 deny/ask 规则都命中；命令的程序名是变量（`$GIT push`、`G=git; $G push`、`${GIT} push`、`$env:GIT push`、`%GIT% push`，以及嵌套的 `bash -c "$CMD"`、`eval "$x"`）时看不出要运行什么，所有 deny/ask 规则都命中；这类命令也不算只读、不自动批准、不能记住前缀。git 组的 ask/deny 规则只覆盖非只读用法，`git branch -a`、`git tag`、`git stash list`、`git remote -v` 这类只读列表命令不受影响。
 
