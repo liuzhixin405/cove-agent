@@ -36,7 +36,7 @@ func TestBareHistoryDetailPrintsUsage(t *testing.T) {
 	out := captureOut(t)
 	eng := newTestEngine(t)
 	pending := false
-	if !handleSessionCommand("/history detail", eng, &pending) {
+	if !handleSessionCommand("/history detail", eng, &pending, nil) {
 		t.Fatal("not handled")
 	}
 	if got := out.String(); !strings.Contains(got, "用法") || strings.Contains(got, "恢复会话失败") {

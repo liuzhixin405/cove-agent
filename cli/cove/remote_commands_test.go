@@ -112,7 +112,7 @@ func TestRemoteCommandLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fe.remoteWake() == nil || !strings.Contains(output.Message, "Private credential file:") {
+	if fe.remoteWake() == nil || !strings.Contains(output.Message, "私有凭据文件:") {
 		t.Fatal("start did not connect lifecycle")
 	}
 	if _, err := cmd.Execute(context.Background(), command.Input{Args: []string{"start"}}); err == nil {
@@ -136,15 +136,15 @@ type remoteTestClient struct {
 func newRemoteTestClient(t *testing.T, session *e2eSession) *remoteTestClient {
 	t.Helper()
 	session.Type("/remote start")
-	session.WaitFor("Private credential file:", e2eTimeout)
+	session.WaitFor("私有凭据文件:", e2eTimeout)
 	var address, credential string
 	for _, line := range strings.Split(session.Output(), "\n") {
 		line = strings.TrimSpace(line)
-		if at := strings.Index(line, "Remote: http://"); at >= 0 {
-			address = strings.TrimSpace(line[at+len("Remote: "):])
+		if at := strings.Index(line, "远程地址: http://"); at >= 0 {
+			address = strings.TrimSpace(line[at+len("远程地址: "):])
 		}
-		if at := strings.Index(line, "Private credential file:"); at >= 0 {
-			credential = strings.TrimSpace(line[at+len("Private credential file:"):])
+		if at := strings.Index(line, "私有凭据文件:"); at >= 0 {
+			credential = strings.TrimSpace(line[at+len("私有凭据文件:"):])
 		}
 	}
 	if address == "" || credential == "" {
@@ -325,12 +325,25 @@ func TestRemoteRealREPLPendingFailsClosed(t *testing.T) {
 				client.result("cancel-task", "applied")
 			case "stop":
 				session.Type("/remote stop")
-				session.WaitFor("Remote stopped", e2eTimeout)
+				session.WaitFor("远程监督已停止", e2eTimeout)
 				session.WaitFor("denied operation completed", e2eTimeout)
 			case "expiry":
 				session.WaitFor("denied operation completed", e2eTimeout)
+				// The answer streams before the task runner settles; the
+				// scope version changes once more when it does, and a
+				// status read taken in between made the action a 409.
+				session.WaitIdle(e2eTimeout)
+				// The published snapshot lags the live state by up to one
+				// owner poll (250 ms); an action built from a stale scope
+				// is a 409. Read until the snapshot says idle too.
 				var current remote.Snapshot
-				client.request("GET", "/v1/status", nil, 200, &current)
+				for attempt := 0; ; attempt++ {
+					client.request("GET", "/v1/status", nil, 200, &current)
+					if !current.Running || attempt > 40 {
+						break
+					}
+					time.Sleep(50 * time.Millisecond)
+				}
 				client.request("POST", "/v1/actions", remote.Action{ID: "expired", Scope: current.Scope, Kind: "approve", ApprovalID: pending.Pending.ID}, 202, nil)
 				client.result("expired", "rejected")
 			case "exit":

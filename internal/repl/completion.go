@@ -302,3 +302,8 @@ func commonPrefix(ss []string) string {
 	}
 	return string(p)
 }
+
+// ChoicesAvailable reports whether a choice panel can be drawn at all: in
+// plain mode (no raw terminal, COVE_PLAIN_REPL=1) ShowChoices would record
+// the choices but never show them, so a caller prints its text form instead.
+func ChoicesAvailable() bool { return !shouldUseFallbackReadline() }

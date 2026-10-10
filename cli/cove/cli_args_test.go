@@ -99,9 +99,17 @@ func TestParseCLIArgsPrintAcceptsDashPrompt(t *testing.T) {
 }
 
 func TestParseCLIArgsValueFlagsNeedAValue(t *testing.T) {
-	for _, flag := range []string{"--image", "--file", "--profile", "--record", "--replay"} {
+	for _, flag := range []string{"--image", "--file", "--profile"} {
 		if _, err := parseCLIArgs([]string{flag}); err == nil {
 			t.Fatalf("%s without a value: expected an error", flag)
+		}
+	}
+}
+
+func TestParseCLIArgsRejectsRemovedRecordingFlags(t *testing.T) {
+	for _, flag := range []string{"--record", "--replay"} {
+		if _, err := parseCLIArgs([]string{flag, "recordings"}); err == nil || !strings.Contains(err.Error(), "未知参数") {
+			t.Fatalf("%s: expected unknown flag error, got %v", flag, err)
 		}
 	}
 }
@@ -126,14 +134,14 @@ func TestParseCLIArgsFlags(t *testing.T) {
 	if _, err := parseCLIArgs([]string{"--image", "b.png"}); err == nil || !strings.Contains(err.Error(), "-p") {
 		t.Fatalf("--image without -p: err=%v, want a refusal naming -p", err)
 	}
-	opts, err := parseCLIArgs([]string{"-d", "--no-auto", "--no-tui", "--dump-system-prompt", "--profile", "work", "--record", "rec", "--replay", "rep", "--file", "a.go", "--image", "b.png", "-p", "hi"})
+	opts, err := parseCLIArgs([]string{"-d", "--no-auto", "--no-tui", "--dump-system-prompt", "--profile", "work", "--file", "a.go", "--image", "b.png", "-p", "hi"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !opts.debug || !opts.noAuto || !opts.noTUI || !opts.dumpPrompt {
 		t.Fatalf("boolean flags not set: %+v", opts)
 	}
-	if opts.profile != "work" || opts.recordDir != "rec" || opts.replayDir != "rep" {
+	if opts.profile != "work" {
 		t.Fatalf("value flags not set: %+v", opts)
 	}
 	if !reflect.DeepEqual(opts.attachments, []string{"a.go", "b.png"}) {

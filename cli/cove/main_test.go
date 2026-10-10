@@ -49,25 +49,17 @@ func TestProviderEnvHelpLineListsExpandedEnvVars(t *testing.T) {
 	}
 }
 
-func TestMissingAPIKeyMessageIncludesProviderFirstSetupGuidance(t *testing.T) {
-	msg := missingAPIKeyMessage("anthropic")
-
+func TestMissingAPIKeyMessageIsShortAndPointsAtSetup(t *testing.T) {
+	msg := missingAPIKeyMessage("deepseek")
+	if n := strings.Count(msg, "\n"); n > 3 {
+		t.Errorf("message has %d line breaks, want at most 3:\n%s", n, msg)
+	}
 	checks := []string{
-		"先看当前厂商：anthropic",
-		"如果你用 Claude / Anthropic",
-		"ANTHROPIC_API_KEY",
-		"如果你用 DeepSeek",
+		"未配置 API key",
+		"deepseek",
+		"/setup",
 		"DEEPSEEK_API_KEY",
-		"如果你用 OpenAI",
-		"OPENAI_API_KEY",
-		"GLM / Kimi / Qwen / 豆包 / OpenRouter / 硅基流动 / Groq / Together / Fireworks / xAI",
-		"/provider openai-compatible",
-		"/base-url <兼容 OpenAI 的接口地址>",
-		"例如 GLM",
-		"例如 Kimi",
-		"例如 Qwen",
-		"也可用通用变量：LLM_API_KEY",
-		"设置后执行 /config，确认 api_key_set: true。",
+		"config.json",
 	}
 	for _, want := range checks {
 		if !strings.Contains(msg, want) {

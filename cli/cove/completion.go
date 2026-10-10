@@ -14,6 +14,7 @@ import (
 
 type cmdEntry struct {
 	Name     string
+	Aliases  []string
 	Desc     string
 	Type     string
 	Args     []string
@@ -32,6 +33,9 @@ func buildCommandList(cmdReg *command.Registry, toolReg *tool.Registry) []cmdEnt
 		}
 		if h, ok := c.(command.ArgHinter); ok && len(h.ArgHints()) > 0 {
 			e.ArgHints = map[string][]string{"": h.ArgHints()}
+		}
+		for _, a := range c.Aliases() {
+			e.Aliases = append(e.Aliases, "/"+a)
 		}
 		list = append(list, e)
 	}
@@ -77,15 +81,37 @@ func complete(input string, commands []cmdEntry, skills map[string]string) []str
 	lower := strings.ToLower(input)
 	for _, c := range commands {
 		cmdNames[strings.ToLower(c.Name)] = true
+		for _, alias := range c.Aliases {
+			cmdNames[strings.ToLower(alias)] = true
+		}
 		if strings.HasPrefix(input, "/") && c.Type == "tool" {
 			continue
 		}
-		if strings.HasPrefix(strings.ToLower(c.Name), lower) {
-			if c.Desc != "" {
-				matches = append(matches, c.Name+"\t"+shortDesc(c.Desc))
-			} else {
-				matches = append(matches, c.Name)
+		candidate := c.Name
+		matched := strings.HasPrefix(strings.ToLower(candidate), lower)
+		if !matched {
+			for _, alias := range c.Aliases {
+				if strings.HasPrefix(strings.ToLower(alias), lower) {
+					candidate, matched = alias, true
+					break
+				}
 			}
+		}
+		if !matched {
+			continue
+		}
+		description := shortDesc(c.Desc)
+		if len(c.Aliases) > 0 {
+			label := "别名: " + strings.Join(c.Aliases, ", ")
+			if candidate != c.Name {
+				label = "同 " + c.Name
+			}
+			description = label + "  " + description
+		}
+		if description != "" {
+			matches = append(matches, candidate+"\t"+description)
+		} else {
+			matches = append(matches, candidate)
 		}
 	}
 	for name, desc := range skills {
@@ -198,6 +224,11 @@ func findCompletionEntry(name string, commands []cmdEntry) (cmdEntry, bool) {
 	for _, c := range commands {
 		if strings.EqualFold(c.Name, name) {
 			return c, true
+		}
+		for _, alias := range c.Aliases {
+			if strings.EqualFold(alias, name) {
+				return c, true
+			}
 		}
 	}
 	return cmdEntry{}, false

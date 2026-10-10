@@ -31,6 +31,9 @@ type PlanExecutor struct {
 	delegator  *delegate.Delegator
 	runtime    *tool.Runtime
 	maxRetries int
+	// onTaskContext, when set, sees the context each task's sub-agent runs
+	// with (tests read the write-claim table through it).
+	onTaskContext func(context.Context)
 }
 
 // NewPlanExecutor creates a PlanExecutor backed by the given Delegator.
@@ -115,6 +118,10 @@ func (pe *PlanExecutor) Execute(ctx context.Context, plan *Plan) *ExecutionResul
 			var wg sync.WaitGroup
 			// execute_plan's max_agents (1-8) travels in the context.
 			sem := make(chan struct{}, tool.MaxAgentsFrom(ctx, MaxParallelAgents))
+			// Sibling tasks share one working tree: the engine's sub-agent
+			// executor claims each written path through this table and
+			// refuses a second task's write instead of letting it win.
+			claims := NewWriteClaims()
 			results := make([]struct {
 				task    *Task
 				success bool
@@ -126,7 +133,7 @@ func (pe *PlanExecutor) Execute(ctx context.Context, plan *Plan) *ExecutionResul
 				go func(idx int, task *Task) {
 					defer wg.Done()
 					defer func() { <-sem }()
-					success := pe.runTask(ctx, task, completed)
+					success := pe.runTask(WithTaskClaims(ctx, task.ID, claims), task, completed)
 					results[idx] = struct {
 						task    *Task
 						success bool
@@ -236,6 +243,9 @@ func (pe *PlanExecutor) runTask(ctx context.Context, task *Task, completed map[s
 		"Use available tools to read, write, and modify files. " +
 		"Report your results concisely. Do not ask for confirmation — just do the task."
 
+	if pe.onTaskContext != nil {
+		pe.onTaskContext(ctx)
+	}
 	prompt := basePrompt
 	var lastErr, lastOutput string
 	for attempt := 0; attempt <= pe.maxRetries; attempt++ {

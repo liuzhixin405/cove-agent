@@ -183,6 +183,9 @@ func (e *Engine) RunMessageWithStream(ctx context.Context, userMessage api.Messa
 			panic(r)
 		}
 	}()
+	if err := e.beginReviewWorkflow(e.interrupted != nil && sameRequest(e.interrupted.user, userMessage), userMessage); err != nil {
+		return "", err
+	}
 	t := e.beginTurn(ctx, userMessage, onDelta, onReasoning)
 
 	for iter := 0; ; iter++ {
@@ -289,6 +292,9 @@ func (e *Engine) beginTurn(ctx context.Context, userMessage api.Message, onDelta
 	}
 	// Cache system prompt and tool defs across iterations (stable within a run)
 	t.sp = e.SystemPrompt()
+	if e.reviewPending() {
+		t.sp += reviewWorkflowInstructions
+	}
 	t.toolDefs = e.buildAPIToolDefs()
 	e.setRequestOverhead(t.sp, t.toolDefs)
 
@@ -437,7 +443,6 @@ func (e *Engine) callModel(t *turn, iter int) (*api.ChatResponse, flow) {
 		Thinking:   e.config.Thinking,
 		Effort:     e.config.Effort,
 	}
-	e.recordEvent(t.ctx, "llm_request", map[string]any{"model": modelName, "messages": len(reqMessages), "request": req})
 	callStarted := time.Now()
 
 	var resp *api.ChatResponse
@@ -457,9 +462,7 @@ func (e *Engine) callModel(t *turn, iter int) (*api.ChatResponse, flow) {
 	e.activity("思考中…")
 
 	callbacks := streamCallbacks{onDelta: t.onDelta, onReasoning: t.onReasoning}
-	if e.replayEnabled {
-		resp, err = e.nextReplayResponse(useStream, t.onDelta, t.onReasoning)
-	} else if useStream {
+	if useStream {
 		firstDelta := true
 		modelAct := e.beginActivity(modelCallActivity + " " + modelName)
 		resp, err = e.llm.ChatStream(t.ctx, req, func(ev api.StreamEvent) {
@@ -551,7 +554,6 @@ func (e *Engine) callModel(t *turn, iter int) (*api.ChatResponse, flow) {
 		}
 	}
 	if err != nil {
-		e.recordEvent(t.ctx, "llm_error", map[string]any{"error": err.Error()})
 		trace.Write("model", map[string]any{"model": modelName, "messages": len(reqMessages), "est_tokens": e.totalTokens,
 			"ms": time.Since(callStarted).Milliseconds(), "error": textutil.ClipRunes(err.Error(), 160), "error_kind": api.Classify(err).String(), "cancelled": t.ctx.Err() != nil})
 		// Classified and recorded with its code (and remedied when the
@@ -590,15 +592,6 @@ func (e *Engine) callModel(t *turn, iter int) (*api.ChatResponse, flow) {
 	// build on it (see token_count.go).
 	e.recordUsage(resp.InputTokens, len(reqMessages))
 
-	// Live calls are billed by the metered provider (see New). Replayed
-	// responses never reach a provider, so they are billed here.
-	if e.replayEnabled {
-		billedModel := resp.Model
-		if billedModel == "" {
-			billedModel = modelName
-		}
-		e.costTracker.AddWithCacheWrite(billedModel, resp.InputTokens, resp.OutputTokens, resp.PromptCacheHitTokens, resp.PromptCacheMissTokens, resp.PromptCacheWriteTokens)
-	}
 	e.costBudgetNotice()
 
 	// Update rate limit tracking
@@ -606,7 +599,6 @@ func (e *Engine) callModel(t *turn, iter int) (*api.ChatResponse, flow) {
 		e.rateLimits.Update(resp.RateLimitHeaders)
 	}
 
-	e.recordEvent(t.ctx, "llm_response", map[string]any{"model": modelName, "content_len": len(resp.Content), "tool_calls": len(resp.ToolCalls), "stop_reason": resp.StopReason, "response": resp})
 	trace.Write("model", map[string]any{"model": modelName, "messages": len(reqMessages), "est_tokens": e.totalTokens,
 		"ms": time.Since(callStarted).Milliseconds(), "stop": resp.StopReason, "in": resp.InputTokens, "out": resp.OutputTokens,
 		"content_bytes": len(resp.Content), "tool_calls": len(resp.ToolCalls)})

@@ -146,6 +146,38 @@ func (f *fakeModel) Append(steps ...fakeStep) {
 	f.steps = append(f.steps, steps...)
 }
 
+func TestFakeModelAppendAfterFallback(t *testing.T) {
+	model := newFakeModel(t, fakeStep{Content: "initial"})
+	requestReply := func() string {
+		recorder := httptest.NewRecorder()
+		request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{}`))
+		model.handle(recorder, request)
+		var response struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil || len(response.Choices) != 1 {
+			t.Fatalf("invalid fake response: %v", err)
+		}
+		return response.Choices[0].Message.Content
+	}
+	for index, expected := range []string{"initial", "done", "done"} {
+		if actual := requestReply(); actual != expected {
+			t.Fatalf("reply %d = %q, want %q", index, actual, expected)
+		}
+	}
+	model.Append(fakeStep{Content: "appended"})
+	if actual := requestReply(); actual != "appended" {
+		t.Fatalf("appended step skipped: %q", actual)
+	}
+	if len(model.Requests()) != 4 {
+		t.Fatal("fallback requests disappeared from request history")
+	}
+}
+
 func (f *fakeModel) handle(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/v1/chat/completions" {
 		http.NotFound(w, r)
@@ -159,8 +191,8 @@ func (f *fakeModel) handle(w http.ResponseWriter, r *http.Request) {
 	step := fakeStep{Content: "done"}
 	if f.next < len(f.steps) {
 		step = f.steps[f.next]
+		f.next++
 	}
-	f.next++
 	f.mu.Unlock()
 
 	if step.Delay > 0 {
@@ -294,6 +326,29 @@ func e2eHome(t *testing.T, model *fakeModel) (home, project string) {
 	return home, project
 }
 
+// e2eHomeWithoutKey is e2eHome with no API key anywhere: the config's key
+// is empty and the provider environment variables are blank, so the REPL
+// starts in the setup wizard.
+func e2eHomeWithoutKey(t *testing.T, model *fakeModel) (home, project string) {
+	t.Helper()
+	home, project = e2eHome(t, model)
+	cfgPath := filepath.Join(home, ".cove", "config.json")
+	cfg := map[string]any{
+		"model":           "qwen-test",
+		"permission_mode": "default",
+		"done_check":      "off",
+		"provider":        map[string]any{"name": "openai-compatible", "base_url": model.BaseURL(), "api_key": ""},
+	}
+	b, _ := json.MarshalIndent(cfg, "", "  ")
+	if err := os.WriteFile(cfgPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, env := range []string{"LLM_API_KEY", "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_COMPATIBLE_API_KEY"} {
+		t.Setenv(env, "")
+	}
+	return home, project
+}
+
 // e2eSession is one running REPL: typed lines go in, everything printed
 // comes out.
 type e2eSession struct {
@@ -320,7 +375,7 @@ func startREPL(t *testing.T) *e2eSession {
 func startREPLWith(t *testing.T, beforeREPL func(app *appBootstrap)) *e2eSession {
 	t.Helper()
 	resetE2EGlobals()
-	app, err := bootstrapApp(false, "", "", "", true)
+	app, err := bootstrapApp(false, "", true)
 	if err != nil {
 		t.Fatalf("bootstrapApp: %v", err)
 	}

@@ -19,14 +19,23 @@ func (lr *LineReader) SetInteractionState(state string) {
 }
 
 func (lr *LineReader) statusLineLocked() string {
-	if lr.interactionState == "" {
-		return lr.inputStatus
-	}
 	var parts []string
+	if lr.interactionState == "" {
+		if lr.inputStatus != "" {
+			parts = append(parts, lr.inputStatus)
+		}
+		if h := currentHintLocked(); h != "" {
+			parts = append(parts, h)
+		}
+		return cleanStatus(strings.Join(parts, " | "))
+	}
 	if permInputCh != nil {
 		message := "等待你回答"
-		if permTitle == "等待授权" {
+		switch permTitle {
+		case "等待授权":
 			message = "等待你确认授权"
+		case "等待确认":
+			message = "等待你确认"
 		}
 		parts = append(parts, message)
 		if permHint != "" {
@@ -56,12 +65,20 @@ func (lr *LineReader) statusLineLocked() string {
 	if lr.inputStatus != "" {
 		parts = append(parts, lr.inputStatus)
 	}
+	if h := currentHintLocked(); h != "" {
+		parts = append(parts, h)
+	}
+	return cleanStatus(strings.Join(parts, " | "))
+}
+
+// cleanStatus replaces control characters so a hint cannot break the row.
+func cleanStatus(s string) string {
 	return strings.Map(func(value rune) rune {
 		if unicode.IsControl(value) {
 			return ' '
 		}
 		return value
-	}, strings.Join(parts, " | "))
+	}, s)
 }
 
 func (lr *LineReader) SetPanelSource(source func(int) ([]string, int)) {

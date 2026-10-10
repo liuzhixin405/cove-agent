@@ -236,13 +236,13 @@ var errWrapUpSkipped = errors.New("wrap-up skipped")
 // wrapUpSummary asks the turn's model, with no tools offered, for a short
 // status report: what was completed, what remains, what to do next. It is
 // one metered call through e.llm, skipped when the context is done, the
-// budget is exhausted or the turn is a replay. The prompt is not kept in
+// budget is exhausted. The prompt is not kept in
 // history.
 func (e *Engine) wrapUpSummary(ctx context.Context, routedModel, reason string) (string, error) {
 	if ctx.Err() != nil {
 		return "", ctx.Err()
 	}
-	if e.costTracker.OverBudget() || e.replayEnabled {
+	if e.costTracker.OverBudget() {
 		return "", errWrapUpSkipped
 	}
 	model := routedModel

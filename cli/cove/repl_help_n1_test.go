@@ -39,3 +39,43 @@ func TestCompactReportLine(t *testing.T) {
 		}
 	}
 }
+
+func TestHelpForOneCommand(t *testing.T) {
+	reg := (&frontend{}).install(registerAllCommands())
+	out := captureOut(t)
+	printCommandHelp(reg, "race")
+	if s := out.String(); !strings.Contains(s, "/race run <spec.json>") || !strings.Contains(s, "run | list | show") {
+		t.Fatalf("/help race = %q", s)
+	}
+	out = captureOut(t)
+	printCommandHelp(reg, "/cls")
+	if s := out.String(); !strings.Contains(s, "/clear") {
+		t.Fatalf("/help with an alias = %q", s)
+	}
+	out = captureOut(t)
+	printCommandHelp(reg, "rac")
+	if s := out.String(); !strings.Contains(s, "未找到命令 /rac") || !strings.Contains(s, "/race") {
+		t.Fatalf("unknown name must suggest the closest: %q", s)
+	}
+}
+
+func TestHelpAndKeysLinkEachOther(t *testing.T) {
+	out := captureOut(t)
+	printHelp((&frontend{}).install(registerAllCommands()), tool.NewRegistry(), nil)
+	if !strings.Contains(out.String(), "/help <命令>") || !strings.Contains(out.String(), "/keys") {
+		t.Fatalf("help footer: %q", out.String())
+	}
+	if !strings.Contains(keybindingHelp, "/help") {
+		t.Fatal("/keys must point back at /help")
+	}
+}
+
+// Every command sits in a named /help section; none falls into the default one.
+func TestEveryCommandHasACategory(t *testing.T) {
+	reg := (&frontend{}).install(registerAllCommands())
+	for _, c := range reg.All() {
+		if commandCategory(c) == "" {
+			t.Errorf("/%s has no /help category", c.Name())
+		}
+	}
+}

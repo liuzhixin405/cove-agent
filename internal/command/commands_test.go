@@ -466,3 +466,10 @@ func TestUndoCmdNamesTheBackupOnError(t *testing.T) {
 		t.Fatalf("undo output %q must report the error and still say how to reverse it", out.Message)
 	}
 }
+
+func TestUndoPendingPreviewID(t *testing.T) {
+	c := &UndoCmd{}
+	if c.PendingPreviewID() != "" {
+		t.Fatal("no preview yet")
+	}
+}

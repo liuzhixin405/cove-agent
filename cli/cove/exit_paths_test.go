@@ -65,16 +65,13 @@ func TestRunPrintModeSlashCheckIgnoresPipedContent(t *testing.T) {
 
 // -p without an API key sent the request anyway and surfaced whatever the
 // provider or network said (401, connection refused) instead of the setup
-// guidance headless and the TUI print. A --replay run needs no key.
+// guidance headless and the TUI print.
 func TestPrintModeKeyCheck(t *testing.T) {
-	if !runNeedsAPIKey("", false) {
+	if !runNeedsAPIKey("") {
 		t.Fatal("no key, live run: must be refused")
 	}
-	if runNeedsAPIKey("placeholder", false) {
+	if runNeedsAPIKey("placeholder") {
 		t.Fatal("a key is set: must run")
-	}
-	if runNeedsAPIKey("", true) {
-		t.Fatal("replay needs no key")
 	}
 }
 

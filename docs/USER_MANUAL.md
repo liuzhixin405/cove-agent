@@ -29,7 +29,6 @@
 - [诊断系统](#诊断系统)
 - [附件功能](#附件功能)
 - [Git 集成](#git-集成)
-- [CovePhone (Android)](#covephone-android)
 - [高级技巧](#高级技巧)
 
 ---
@@ -115,8 +114,6 @@ go build -o cove ./cli/cove
 | `--no-tui` | 使用 headless 模式（按行读 stdin，答案写 stdout，提示写 stderr）；任一轮失败（请求出错、取消、缺 API key、超预算、附件读不到）时以退出码 1 结束；收到 SIGTERM 时（含执行斜杠命令期间）保存会话后结束，不再读后续输入 |
 | `--tui` | 即使 stdin/stdout 不是终端也强制使用交互界面 |
 | `--profile <name>` | 使用指定 profile 启动 |
-| `--record <dir>` | 录制本次会话的请求与响应到目录 |
-| `--replay <dir>` | 用录制数据回放，不调用真实 API |
 | `-h, --help` | 帮助信息 |
 
 未知参数（例如拼错的 `--no-tiu`）和没有 `-p` 的多余文字会报错退出（退出码 2），不再被静默忽略。
@@ -124,7 +121,7 @@ go build -o cove ./cli/cove
 **`-p` 单次查询说明：**
 
 - 只有最终答案写到 stdout，提示、警告和错误都写到 stderr，因此 `cove -p "..." > out.txt` 只得到答案。
-- 管道输入会附在提示后面一起发送：`cat app.log | cove -p "解释这段日志"`；只有管道输入时它就是提示本身。管道输入上限 8MB，超出部分截断并在 stderr 提示。
+- 管道输入会附在提示后面一起发送：`cat app.log | cove -p "解释这段日志"`；只有管道输入时它就是提示本身。管道输入上限 8MB，超出部分截断并在 stderr 提示。stdin 不是普通文件且 stderr 不是终端时（IDE、CI 里），首字节最多等 3 秒，超时放弃管道输入并在 stderr 警告。
 - 提示可以不加引号：`cove -p 解释 这段 代码` 等同于 `cove -p "解释 这段 代码"`。
 - 退出码：`0` 成功，`1` 失败（API 错误、附件读取失败、到达迭代上限等），`2` 参数错误，`130` 被 Ctrl+C 中断。
 - 单轮上限：`-p` 下迭代上限是**硬上限**（`--max-turns N` 优先，否则取 `max_iterations`，默认 200；`0` 不限制），到达即以退出码 1 结束，不会询问；时间上限默认不施加，只有配置（`config.json`、`.cove.json` 或 profile）里显式写了 `max_turn_minutes` 才生效；停滞检测只记日志。一次性运行结束后没有续跑命令，需要更多步数时加大 `--max-turns` 重新运行。详见[单轮上限](#单轮上限与-continue)。
@@ -152,16 +149,16 @@ go build -o cove ./cli/cove
 
 | 提供商 | 环境变量 |
 |--------|---------|
-| GLM (智谱) | `GLM_API_KEY` / `ZHIPU_API_KEY` |
+| GLM (智谱) | `GLM_API_KEY` / `ZHIPU_API_KEY` / `BIGMODEL_API_KEY` |
 | Kimi (月之暗面) | `KIMI_API_KEY` / `MOONSHOT_API_KEY` |
 | Qwen (通义千问) | `QWEN_API_KEY` / `DASHSCOPE_API_KEY` |
-| Doubao (豆包) | `DOUBAO_API_KEY` / `ARK_API_KEY` |
+| Doubao (豆包) | `DOUBAO_API_KEY` / `ARK_API_KEY` / `VOLCENGINE_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` |
 | SiliconFlow (硅基流动) | `SILICONFLOW_API_KEY` |
 | Groq | `GROQ_API_KEY` |
 | Together | `TOGETHER_API_KEY` |
 | Fireworks | `FIREWORKS_API_KEY` |
-| xAI (Grok) | `XAI_API_KEY` |
+| xAI (Grok) | `XAI_API_KEY` / `GROK_API_KEY` |
 | Mistral | `MISTRAL_API_KEY` |
 | 自定义 | `LLM_API_KEY` + `LLM_BASE_URL` |
 
@@ -170,7 +167,8 @@ go build -o cove ./cli/cove
 ```
 /provider deepseek        # 切换到 DeepSeek
 /model deepseek-v4-pro    # 切换模型
-/api-key sk-xxx           # 设置 API Key
+/setup                    # 配置向导（选供应商、掩码输入 key、自动验证）
+/api-key                  # 掩码输入 API Key（也可 /api-key sk-xxx 直接设置）
 /base-url https://...     # 设置自定义接口地址
 ```
 
@@ -229,18 +227,17 @@ go build -o cove ./cli/cove
 ```json
 {
   "model": "deepseek-v4-pro",        // DeepSeek 提供商的默认高级模型
-  "model_fast": "deepseek-v4-flash"  // 默认快速模型
+  "model_fast": "deepseek-v4-pro"    // 未配置时与 model 相同，即不切换
 }
 ```
 
 #### 视觉模型自动切换
 
-当检测到图片附件时，系统自动切换到支持视觉的模型：
-| 提供商 | 视觉模型 |
+当检测到图片附件而当前模型不支持视觉时，先在 `model_fast` 与 `model` 里找支持视觉的那个；都不支持时只有 DeepSeek 会回退到内置视觉模型，其他提供商保持原模型并在发送时报“无可用视觉模型”，需要你自己把 `model` 或 `model_fast` 配成视觉模型：
+| 提供商 | 自动回退的视觉模型 |
 |--------|---------|
 | DeepSeek | `deepseek-flash`（兼容旧名 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp`） |
-| OpenAI | `gpt-4o` |
-| Anthropic | `claude-sonnet-4-20250514` |
+| 其他 | 不自动换模型 |
 
 DeepSeek Flash 原生支持图片，`deepseek-v4-pro` 不支持。只要当前对话中仍保留图片，模型路由、后续追问、自动升级和故障回退都必须使用视觉模型；没有可用视觉模型时会报错，不会仅发送图片的文字占位提示。
 
@@ -284,36 +281,36 @@ DeepSeek Flash 原生支持图片，`deepseek-v4-pro` 不支持。只要当前�
 | 命令 | 说明 |
 |------|------|
 | `/model <名称>` | 切换 AI 模型 |
-| `/provider <名称>` | 切换提供商（anthropic/deepseek/openai/openai-compatible/glm/kimi/qwen/doubao/openrouter/siliconflow/groq/together/fireworks/xai/mistral） |
-| `/api-key <密钥>` | 保存 API 密钥 |
+| `/provider <名称>` | 切换提供商（anthropic/deepseek/openai/openai-compatible/glm/kimi/qwen/doubao/openrouter/siliconflow/groq/together/fireworks/xai/mistral；也接受别名 claude、zhipu、bigmodel、moonshot、dashscope、tongyi、ark、grok、compatible） |
+| `/setup` | 配置向导：选供应商、掩码输入 API key、发一次测试请求验证后保存。启动时没有 key 自动进入，任意一步直接回车跳过；`COVE_NO_SETUP=1` 关闭自动进入 |
+| `/api-key [密钥]` | 保存 API 密钥；不带参数时掩码输入（显示 •，不进历史、不回显） |
 | `/base-url <地址>` | 设置自定义接口地址 |
 | `/mode <模式>` | 设置权限模式 |
 | `/profile [list\|switch\|save\|delete\|show]` | 管理具名配置档案 |
-| `/record [status\|start\|stop]` | 控制会话事件录制 |
 | `/budget <金额\|auto\|off\|save>` | 设置**本会话**预算上限（$）：`<金额>` 与 `auto`（按历史用量自动调整）只改本会话，`off` 取消本会话上限，`save` 把当前会话预算写入 `config.json`（见[预算管理](#预算管理)） |
 | `/cost` | 查看用量和费用 |
 | `/ratelimit` | 查看 API 速率限制状态 |
-| `/attach <文件...>` | 挂载图片或文件（支持 `list`/`remove`/`clear` 子命令） |
-| `/config` | 查看完整配置 |
+| `/attach <文件...>` | 挂载图片或文件（支持 `add`/`list`/`remove`/`clear` 子命令） |
+| `/config [键 值]` | 查看完整配置；带键和值时修改该配置项 |
 
 ### 会话
 
 | 命令 | 说明 |
 |------|------|
 | `/compact` | 立即压缩对话历史（强制摘要，至少 4 条消息即可），打印压缩前后的 token 数（见[上下文压缩](#上下文压缩)） |
-| `/undo` | 回退到上一个检查点 |
-| `/undo files <检查点> <文件>...` | 预览选中文件的回滚；带空格的文件名加引号 |
+| `/undo` | 回退到上一个检查点；交互模式先弹确认框显示目标与最近检查点，按 y 回退、n 取消；headless 直接回退 |
+| `/undo files <检查点> <文件>...` | 预览选中文件的回滚；带空格的文件名加引号；交互模式预览后按 y 直接应用，headless 用 `/undo apply <预览ID>` |
 | `/undo apply <预览ID>` | 确认当前项目/会话的文件级回滚预览；发现文件漂移则拒绝 |
 | `/undo cancel` | 放弃文件级回滚预览，不改文件 |
 | `/checkpoints` | 列出所有检查点 |
 | `/history` | 查看和恢复历史会话；空闲交互模式支持搜索、选择和预览 |
 | `/history detail <id>` | 查看某次会话详情 |
 | `/history delete <编号\|id>` | 删除一个历史会话（当前会话不能删） |
-| `/history clear` | 清空当前项目的历史会话：先显示将删除的数量，输入 `/history clear confirm` 才真正删除；`/history clear all confirm` 清空所有项目 |
+| `/history clear` | 清空当前项目的历史会话：交互模式弹出确认框显示将删除的数量，按 y 删除、n 取消；headless 需输入 `/history clear confirm`；`/history clear all` 清空所有项目 |
 | `/history clean` | 修复历史文件（补标题、标记注入消息）并备份，**不删除**任何会话 |
-| `/resume [id]` | 恢复已保存的会话 |
+| `/resume [id\|all]` | 恢复已保存的会话；`all` 列出所有项目的会话 |
 | `/continue` | 从中断处继续上一轮（因上限停止、Ctrl+C、API 错误等中断后），已完成的工具步骤不会重做 |
-| `/export` | 导出当前对话 |
+| `/export [文件名]` | 导出当前对话，可指定文件名 |
 
 ### 记忆
 
@@ -330,16 +327,19 @@ DeepSeek Flash 原生支持图片，`deepseek-v4-pro` 不支持。只要当前�
 
 | 命令 | 说明 |
 |------|------|
-| `/tasks` | 查看运行中/排队任务（TUI）；headless 显示同步执行状态 |
+| `/tasks` | 查看运行中/排队任务（TUI）；headless 显示同步执行状态。子命令 `saved`/`restore`/`remove`/`move`/`run`/`retry`/`skip` 见[持久化任务队列](#持久化任务队列) |
+| `/agents` | 查看 agent 活动快照（Alt+M 展开实时 Agent Map 面板）；任务运行中也可用 |
 | `/tasks saved` | 列出当前项目持久化队列；仅交互式 REPL 支持恢复及队列管理 |
 | `/acceptance` | 查看当前会话最新任务的验收证据；交互式与 headless 均可查看 |
-| `/automations` | 添加、手动运行或扫描维护任务；事件显式触发并按 key 去重 |
-| `/inbox` | 查看维护结果、验证日志和补丁；accepted/rejected 只记录审阅决定 |
+| `/workflow [direct\|review\|once]` | 默认直接执行；可选当前会话持续先确认方案，或仅下一项任务先确认。不改变 `/mode` 工具权限 |
+| `/automations [list\|add\|run\|tick\|event\|remove]` | 添加、手动运行或扫描维护任务；事件显式触发并按 key 去重 |
+| `/inbox [list\|show\|patch\|review]` | 查看维护结果、验证日志和补丁；accepted/rejected 只记录审阅决定 |
 | `/browser-verify` | 执行 DOM 场景，保存桌面/移动截图、哈希并接入会话验收 |
 | `/race` | 双 worktree 竞跑，共用验证器；明确 select 后才应用补丁 |
-| `/remote` | 在活跃交互 REPL 中启动认证远程监督与一次性审批 |
+| `/remote [start\|status\|stop]` | 在活跃交互 REPL 中启动认证远程监督与一次性审批 |
 | `/clear` | 清屏并清空回滚区（别名 `/cls`，快捷键 Ctrl+L）；不影响对话上下文 |
 | `/x [编号] [all]` | 展开工具块折叠的输出（编号是工具块标题后的 `#N`，省略则展开最近一个；默认最多 200 行，`all` 显示全部）；edit/write 展开后是改动的 diff。别名 `/expand` |
+| `/replay [任务序号或任务.改动]` | 逐字回放文件改动，省略参数播放最近任务；`/replay 1` 播放整个任务，`/replay 1.2` 播放第二次改动；`/replay list [关键词]` 筛选并选择，`/replay search <关键词>` 回放匹配记录，支持 `title:` 和 `file:`；`/replay overview [任务序号]` 只展示审阅概览，不调用模型。回放次数不限，不重新写文件，兼容完整编号 |
 | `/keys` | 查看输入快捷键（别名 `/shortcuts`） |
 | `/new` | 保存当前会话并开始新会话（清空对话上下文）；旧会话可在 `/history` 找回 |
 | `/stop` 或 `/cancel` | 取消当前任务（TUI）；headless 无后台任务可取消 |
@@ -360,26 +360,25 @@ DeepSeek Flash 原生支持图片，`deepseek-v4-pro` 不支持。只要当前�
 
 | 命令 | 说明 |
 |------|------|
-| `/mcp` | MCP 服务器管理 |
-| `/plugin` | 插件管理 |
-| `/skills` | 列出可用技能 |
-| `/skill <名称>` | 查看或调用一个技能（别名 `/skills`） |
+| `/mcp [list\|connect\|disconnect\|read]` | MCP 服务器管理 |
+| `/plugin [list\|install\|search\|refresh\|update\|enable\|disable\|uninstall]` | 插件管理 |
+| `/skill [名称]` | 不带参数列出可用技能，带名称查看或调用一个技能（别名 `/skills`） |
 | `/tools` | 列出可用工具 |
 | `/doctor` | 快速检查：git、ripgrep、供应商与 API key，末尾附“后台学习”“权限规则文件”两项 |
-| `/diagnose [quick\|errors\|archive\|codes\|trace N]` | 完整系统诊断与错误分析（含“后台学习”“权限规则文件”）；`trace` 查看最近 N 条交互轨迹 |
+| `/diagnose [quick\|errors\|archive\|codes\|trace N]` | 别名 `/diag`。完整系统诊断与错误分析（含“后台学习”“权限规则文件”）；`trace` 查看最近 N 条交互轨迹 |
 | `/status` | 查看代理状态与会话信息 |
 | `/stats` | 查看消息数与费用统计 |
 | `/permissions` | 查看当前权限模式 |
 | `/init [apply\|discard]` | 让模型阅读仓库（两级目录、README、清单文件、已有 AGENTS.md）起草 CLAUDE.md，以 diff 展示草稿；`/init apply` 写入（不覆盖已有文件），`/init discard` 放弃。已有 AGENTS.md 时提示“已检测到 AGENTS.md，将同时加载” |
 | `/cd <路径>` | 切换工作目录；`policies.json` 中的持久化规则会按新目录的项目根重新加载（旧项目的规则，包括 `[p]` 写入的规则，不再生效）；新目录的 `policies.json` 无法解析时给出警告并沿用切换前已加载的规则 |
 | `/context` | 查看当前上下文；项目结构与代码大纲在首次使用时后台生成并缓存（最多等 5 秒，超时提示稍后再看） |
-| `/system <提示词>` | 设置自定义系统提示词 |
+| `/system [提示词]` | 查看或设置自定义系统提示词 |
 | `/dream [status\|run]` | 无参数或 `status`：查看记忆整理（dream）的触发方式、上次结果与用量费用；`run`：忽略门槛立即在后台整理 |
 | `/hooks` | 列出从用户级 `hooks.json` 加载的钩子（事件、匹配工具、同步/异步、超时、命令），以及未加载条目的原因 |
-| `/help` | 显示帮助 |
+| `/help [命令]` | 显示帮助；带命令名显示该命令的用法、别名与子命令 |
 | `/trust` | 信任当前项目：项目目录（回合结束自动运行构建/测试校验）以及它的 `.cove.json`（按本进程读到的内容记录哈希，`/restart` 后其中需要信任的设置生效，文件一改就失去信任）。`/cd` 之后先 `/restart` 再信任新目录。见[项目配置的信任](#项目配置的信任) |
 | `/restart` | 保存会话并重启 cove，新进程用 `-r <会话 ID>` 接着当前会话（空会话则新开）。用于让新装的技能（`/skill install`）、插件、配置文件改动或升级后的二进制生效。退出部分与 `/exit` 相同（SessionEnd hook、MCP 断开）；启动参数沿用，但去掉 `-r`/`--resume` 和 `--image`/`--file`。任务运行中不能执行；headless 模式不支持。Windows 没有进程替换，首次重启后原进程留作监督进程等待新进程，之后的重启都由它发起，不会一层层叠加 |
-| `/exit` | 退出 REPL |
+| `/exit` | 退出 REPL（别名 `/quit`） |
 
 ---
 
@@ -394,6 +393,7 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 | `read` | 读取文件或目录内容 | R |
 | `write` | 写入文件（创建或覆盖） | W |
 | `edit` | 精确字符串替换编辑文件 | W |
+| `draw_image` | 用矩形、圆、线条、填充生成 PNG（没有文字原语，流程图之类请让模型用 `write` 写 SVG/Mermaid）。按需提供：只有对话里出现画图、图片、PNG、图标、占位图之类的意图，或本会话已用过它，才进入模型的工具表 | W；auto 模式放行 |
 | `glob` | 文件模式匹配查找 | R |
 | `grep` | 正则表达式搜索文件内容 | R |
 | `repo_map` | 按路径片段或标识符查询代码大纲（类型/函数/方法签名与行号），见[代码大纲按需查询](#代码大纲按需查询) | R |
@@ -436,7 +436,7 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 | `todowrite` | 创建和管理结构化任务列表 | W(本地) |
 | `plan_mode` | 进入计划模式（只读操作） | R |
 | `exit_plan_mode` | 退出计划模式 | W |
-| `execute_plan` | 执行计划中的任务（通过子智能体）；`max_agents`（1–8，默认 4）限制并行子智能体数 | W |
+| `execute_plan` | 执行计划中的任务（通过子智能体）；`max_agents`（1–8，默认 4）限制并行子智能体数。并行时所有子任务共用一个工作树（不是隔离）：第二个子任务写同一文件会被拒绝并告知归属任务 | W |
 | `task` | 记录一个待办任务（只记录，不会执行）；需开启 `experimental_tools` | W |
 | `task_list` / `task_get` / `task_output` | 列出 / 查看已记录的任务；需开启 `experimental_tools` | R |
 | `task_update` / `task_stop` | 更新任务状态或输出；需开启 `experimental_tools` | W |
@@ -458,8 +458,8 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 
 | 工具 | 说明 | 权限 |
 |------|------|------|
-| `sleep` | 暂停执行指定秒数（最多 300 秒）；需开启 `experimental_tools` | R |
-| `question` | 向用户提问（多选题）；**只在交互式界面注册** | R |
+| `sleep` | 暂停执行指定秒数（最多 300 秒）；需开启 `experimental_tools` | W(本地)，plan 模式放行 |
+| `question` | 向用户提问（多选题）；**只在交互式界面注册** | W(本地)，plan 模式放行 |
 | `skill` | 执行预定义技能 | W |
 
 ### MCP 与插件
@@ -489,7 +489,9 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 发给模型的工具列表按运行环境裁剪，用不上的工具不占上下文：
 
 - **`question`**：只在交互式 REPL 注册；`-p`、headless（`--no-tui`）和管道模式不注册。在 REPL 里，问题显示在输入行上方，你输入的下一行就是回答（可以输入选项编号）；15 分钟没回答按空答案处理。等待回答时按 Ctrl+C，工具立即返回 `Error: cancelled by user`，后面的问题不再问，你之后输入的内容也不会被当成回答。
+- **`plan_mode` / `exit_plan_mode`**：只在交互式 REPL 注册，`-p` 与 headless 下没人能确认退出计划。
 - **`browser`**：只在用 `-tags chromedp` 构建时注册。
+- **`draw_image`**：始终注册，但只在对话表现出画图意图（画、图片、图标、占位图、image、png、icon、draw 等）或本会话已调用过它时发给模型；其他回合不占工具表。
 - **`powershell`**：只在 Windows 上注册。
 - **实验性协作工具**：`task`、`task_list`、`task_get`、`task_output`、`task_update`、`task_stop`、`team_create`、`team_delete`、`send_message`、`brief`、`sleep` 默认不注册，配置 `"experimental_tools": true` 后才注册。
 - **`execute_plan`** 的 `max_agents`（1–8，默认 4）真正限制并行子智能体数。
@@ -503,9 +505,9 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 | 模式 | 自动放行（不弹窗） | 仍需确认 |
 |------|------------------|---------|
 | `default` | 只读工具（`read`/`grep`/`glob` 等）；**整行都是只读简单命令**的 `bash`/`powershell` 命令，如 `git status`、`git diff --stat`、`git log --oneline -5`、`ls -la`、`cat go.mod`、`grep -rn foo .`、`git status && git diff` | 其余一切：写文件、编辑、git 写操作、构建、安装、网络请求（`curl`/`wget` 即使只是 GET 也询问） |
-| `auto` | `default` 的全部 + 构建/测试命令（`go build`/`go test`/`go vet`/`go list`、`gofmt`、`cargo test`、`make`/`make test`、`dotnet test/build/run`、`pytest`、`npm run test:unit` 这类 test/lint/build 脚本等）+ 目标路径位于项目工作目录内的 `write`/`edit` | git 写操作（`commit`/`push` 等）、包安装、网络请求、未知命令、项目外写入、MCP 工具、`draw_image`、浏览器截图、`worktree` 等 |
+| `auto` | `default` 的全部 + 构建/测试命令（`go build`/`go test`/`go vet`/`go list`、`gofmt`、`cargo test`、`make`/`make test`、`dotnet test/build/run`、`pytest`、`npm run test:unit` 这类 test/lint/build 脚本等）+ 目标路径位于项目工作目录内的 `write`/`edit` | git 写操作（`commit`/`push` 等）、包安装、网络请求、未知命令、项目外写入、MCP 工具、浏览器截图、`worktree` 等 |
 | `bypass` | 全部（`deny` 规则仍生效） | 无（灾难命令仍被硬拦截，见下文） |
-| `plan` | 只读工具；整行只读的 `bash`/`powershell` 命令；只影响会话本身的工具（`todowrite`、`question`、`skill`，以及 `agent`/`execute_plan`，子代理的每个调用照样受 plan 限制） | 不询问：其余工具一律拒绝，不管工具自己怎么回答（之前选过的“总是允许”在此模式下不生效）。模型用 `plan_mode` 自行进入的计划模式同样按此执行；它可以用 `exit_plan_mode` 退出（需你确认），但你用 `/mode plan` 设置的计划模式只能由你切换 |
+| `plan` | 只读工具；整行只读的 `bash`/`powershell` 命令；只影响会话本身的工具（`todowrite`、`question`、`skill`，以及 `agent`/`execute_plan`，子代理的每个调用照样受 plan 限制；开启 `experimental_tools` 后的 `task*`、`team_*`、`send_message`、`sleep` 同样放行） | 不询问：其余工具一律拒绝，不管工具自己怎么回答（之前选过的“总是允许”在此模式下不生效）。模型用 `plan_mode` 自行进入的计划模式同样按此执行；它可以用 `exit_plan_mode` 退出（需你确认），但你用 `/mode plan` 设置的计划模式只能由你切换 |
 
 - 没有任何规则命中时，任何模式下都是“询问”（旧版本 `auto` 模式在无规则命中时直接放行，等于放行一切，已修正）。
 - 用户在 `policies.json` 或本次会话中配置的 `deny` / `ask` 规则优先于上述自动放行，也优先于 `allow` 规则（判定顺序与匹配方式见[规则判定顺序与匹配](#规则判定顺序与匹配)）。
@@ -528,7 +530,7 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
   ┃ 需要授权  bash
   ┃ git push
   ┃
-    [y] 允许   [a] 本会话记住   [p] 本项目记住   [n] 拒绝
+    [y] 允许   [a] 本会话记住   [p] 本项目记住   [n] 拒绝   [e] 拒绝并说明
         记住范围: bash 中 git 常规操作（add/commit/push/pull/switch 等，不含 --force、reset、clean、checkout）
 ```
 
@@ -537,8 +539,13 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 - `y` / `yes` — 只允许这一次
 - `a` / `always` / `总是` — 本次会话内记住“记住范围”一行所写的内容（不写文件，退出 cove 即失效）
 - `p` / `permanent` / `永久` — 本次会话生效，并写入 `~/.cove/policies.json`（设置了 `COVE_CONFIG_DIR` 时位于该目录下），**只对当前项目生效**（项目根 = 从启动目录向上找到的含 `.git` 的目录，找不到时为启动目录）。之后在同一项目启动 cove 不再询问。成功时提示会显示实际写入的文件路径，写入的规则作为本项目的磁盘规则装入本会话：用 `/cd` 切换到其他项目时与其他 `policies.json` 规则一起卸下，同一命令会重新询问，按新项目的规则判断。写入失败时提示“未能写入，仅本次会话有效”，规则退化为会话规则
-- `n` 或其他输入 — 拒绝
+- `n` / `no` / `否` / `拒绝` — 拒绝；整行输入 `n <理由>` 则理由随工具结果一起回给模型（粘贴或远程场景用）
+- `e` / `说明` — 拒绝并说明：再输入一行理由（直接回车等于不带理由拒绝），模型在工具结果里读到 `user rejected: <理由>`，按理由改做法而不是重试同一调用；其他不是答案的输入仍按普通指令处理
 - 15 分钟内没有回答视为拒绝（提示“授权超时”）
+
+#### 退出计划模式的确认
+
+模型在自己进入的计划模式里调用 `exit_plan_mode` 时，确认框标题为“退出计划模式”，正文渲染模型写的计划摘要（Markdown，最多 80 行，超出提示还有多少行；没写摘要时提示“模型未提供计划摘要”），以及模型列出的涉及文件、关键决策和验收标准。选项为 `[y] 执行计划`、`[e] 修改计划`（输入一句修改意见，模型留在计划模式修订后再次请求退出）、`[n] 继续规划`，没有“记住”选项。用 `/mode plan` 设置的计划模式不弹这个框，只有你能切换模式。
 
 提示尽量不带多余文字：“按键即答，无需回车；Ctrl+C 拒绝并停止任务”只在本进程第一次询问时显示；无法按规则记住的命令（带重定向、组合了无法归类的程序等）只是不提供 `[a]`/`[p]`，不再额外说明原因；只有已经记住过相关规则、这一行却没被覆盖时，才用一行暗色字说明哪条规则、为什么没覆盖，避免看起来像“记住了却没生效”。
 
@@ -674,6 +681,23 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 
 ---
 
+## 环境变量
+
+| 变量 | 取值 | 作用 |
+|------|------|------|
+| `COVE_CONFIG_DIR` | 目录 | 配置、会话、记忆、检查点等全部状态的根目录，默认 `~/.cove` |
+| `COVE_TUI` | `0` / `1` | 强制关闭 / 开启交互式 shell（默认按 stdin、stdout 是否为终端判断） |
+| `COVE_PLAIN_REPL` | `1` | 强制纯文本行编辑：不进原始模式，没有候选面板、钉住输入行与单键回答 |
+| `COVE_TUI_ASCII` | `1` | 用 ASCII 字符替代 Unicode 边框与符号 |
+| `COVE_PIN_INPUT` | `0` | 任务运行时不把输入行钉在终端底部 |
+| `COVE_ESC_INTERRUPT` | `0` | 关闭 Esc 中断任务（Esc 只保留清空输入） |
+| `COVE_FILE_PREVIEW` | `0` | 关闭文件改动的逐字预览动画与 `/replay` 动画（仍保存记录） |
+| `COVE_REPLAY_EXPLAIN` | `0` | `/replay` 不调用模型生成说明 |
+| `COVE_NO_SETUP` | `1` | 缺 API key 启动时不自动进入 `/setup` 向导 |
+| `COVE_AUTOMATION_CHILD` | `1` | 维护任务 worker 的内部标记，禁止嵌套维护命令；不要手动设置 |
+| `LLM_API_KEY` / `<PROVIDER>_API_KEY` / `LLM_BASE_URL` | 字符串 | 各供应商的 API key 与自定义接口地址，见[提供商与模型配置](#提供商与模型配置) |
+| `TAVILY_API_KEY` / `BRAVE_API_KEY` | 字符串 | `websearch` 工具的搜索后端；都没有时用 DuckDuckGo 兜底 |
+
 ## 配置系统
 
 ### 配置文件位置
@@ -717,7 +741,6 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
   },
   "permission_mode": "default",
   "max_budget_usd": 10,
-  "thinking_tokens": 16000,
   "debug": false,
   "mcp_servers": {
     "filesystem": {
@@ -759,11 +782,11 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 | `show_reasoning` | boolean | 是否把思考型模型（如 DeepSeek V4）的完整推理过程实时输出到对话区。默认关闭：推理进度只显示在状态行（"思考中… 已推理 N 字"） |
 | `disabled_skills` | string[] | 不加载的技能名称列表（内置或自定义均可），如 `["spike", "plan"]` |
 | `system_prompt` | string | 你自己的长期指令（如"提交信息用英文"），会**追加**到内置系统提示词末尾，不会替换内置规则 |
-| `thinking_tokens` | number | 已不再生效：新版 Claude 模型不接受固定的思考 token 预算，请改用 `thinking` + `effort` |
 | `debug` | boolean | 调试模式（开启详细日志） |
 | `verbose` | boolean | 预留字段，当前版本没有任何行为；可在 profile 中保存但不会改变输出 |
-| `mcp_servers` | object | MCP 服务器配置（支持 stdio/SSE/Streamable HTTP 传输） |
-| `profiles` | object | 具名配置组，可覆盖 `model`、`model_fast`、`provider`、`permission_mode`、`max_budget_usd`、`thinking_tokens`、`debug`、`verbose`、`system_prompt`；用 `/profile save/switch` 管理 |
+| `mcp_servers` | object | MCP 服务器配置（支持 stdio/SSE/Streamable HTTP 传输）；每个条目可带 `"env": {"KEY": "值"}` 注入子进程环境 |
+| `provider.image_files_api` | bool | 是否通过供应商的 Files API 上传图片，默认 false |
+| `profiles` | object | 具名配置组，可覆盖 `model`、`model_fast`、`provider`、`permission_mode`、`max_budget_usd`、`max_iterations`、`max_turn_minutes`、`subagent_max_iterations`、`max_sessions`、`debug`、`verbose`、`system_prompt`；用 `/profile save/switch` 管理 |
 | `active_profile` | string | 启动时应用的 profile 名称（`--profile` 参数优先）；名称不存在时会给出警告并使用基础配置 |
 | `context_window` | number | 当前 `model` 的上下文窗口（token）。用于 cove 认不出的模型（本地 llama.cpp、LM Studio 等），决定压缩触发点与每次请求的输出上限；0 或不设按模型名估算（认不出时按 32K）。E2008 的处置会自动把学到的值写进 `model_context_windows`（见[自动处置](#自动处置)） |
 | `model_context_windows` | object | 按模型名记录的上下文窗口，如 `{"qwen3.6-27b": 16384}`。E2008 处置从服务端报错学到真实窗口后自动写入，下次启动直接生效；按模型名区分，切换 profile 不会把一个模型的窗口套到另一个上。窗口已知且小于 48K 时，cove 只向模型发送核心工具（读写编辑、shell、搜索、待办、提问、repo_map、skill、webfetch），repo map 摘录、记忆注入和单个工具结果的上限也按窗口比例缩小 |
@@ -825,7 +848,7 @@ Cove 内置 **12 个技能**，编译在二进制里，随 cove 版本一起更�
 | 来源 | 位置 |
 |------|------|
 | 内置 | 编译在 cove 二进制中 |
-| 插件 | `~/.cove/plugins/<插件名>/skills/` |
+| 插件 | `~/.cove/plugins/<插件名>/skills/`；目录名以 `.disabled` 结尾的插件不加载 |
 | 用户 | `~/.claude/skills/`，然后 `~/.cove/skills/`（后者优先）；后台回顾自动生成的技能也在这里（`auto-<slug>-<hash>/`，见[技能审查](#技能审查-background-review)） |
 | 项目 | 从 git 仓库根目录到当前目录，每一级的 `.claude/skills/` 和 `.cove/skills/`，越靠近当前目录越优先 |
 
@@ -845,7 +868,7 @@ Cove 内置 **12 个技能**，编译在二进制里，随 cove 版本一起更�
 | `executing-plans` | 按已有的实现计划分步执行，设置检查点 |
 | `github-code-review` | 在 GitHub 上审查 PR：读 diff、行内评论、批准或要求修改 |
 | `github-pr-workflow` | GitHub PR 生命周期：建分支、提交、开 PR、盯 CI、合并 |
-| `karpathy-guidelines` | 编码准则：先想后写、简单优先、改动精准、目标驱动 |
+| `karpathy-guidelines` | 编码准则：先想后写、简单优先、改动精准、目标驱动；动手前标注每条前提的证据，改完还原实现证伪测试，交付时说明生效位置与未修问题 |
 | `performance-optimization` | 基于测量的性能优化：先 profile，修真正的瓶颈，再验证效果 |
 | `plan` | 实现前先写可执行的计划：小任务、精确路径、完整代码 |
 | `requesting-code-review` | 提交前自检：安全扫描、质量门禁、自动修复 |
@@ -903,14 +926,15 @@ Cove 支持 **Model Context Protocol (MCP)**，可连接外部工具服务器。
 ```
 /mcp list          # 列出已连接的 MCP 服务器
 /mcp connect ...   # 连接新服务器
-/mcp disconnect    # 断开连接
+/mcp disconnect <名称|all>   # 断开一个或全部连接
+/mcp read <服务器> <资源URI>  # 读取 MCP 资源
 ```
 
 > **注意**：`mcp_servers` 里的服务器仅在 Cove **启动时**从配置加载。修改配置后需重启 Cove（或用 `/mcp connect` 手动连接）。
 
 ### 断线重连与工具列表刷新
 
-- 服务器首次意外断线（不是 `/mcp disconnect`）时，2 秒后自动重连一次；再次断线需要 `/mcp connect`。
+- 服务器首次意外断线（不是 `/mcp disconnect`）时，2 秒后自动重连一次；再次断线需要 `/mcp connect`。 自动重连与 `tools/list` 刷新各限 30 秒；每个 MCP 工具描述最多保留 2048 字节。
 - 收到服务器的 `notifications/tools/list_changed` 通知时自动刷新工具列表。`/mcp connect`、断开、刷新之后，发给模型的工具定义缓存随之失效，模型下一次调用就能看到新工具。
 - 单个工具的 schema 超过 4KB 时依次精简：先去掉各处 `description` 字段 → 只留属性类型 → 只列属性名，保证仍是合法 JSON（以前会在 JSON 中间截断）。
 
@@ -924,8 +948,12 @@ Cove 支持 **Model Context Protocol (MCP)**，可连接外部工具服务器。
 
 ```
 /plugin list       # 列出已安装插件
-/plugin install    # 安装插件
-/plugin remove     # 卸载插件
+/plugin install <名称>   # 从市场安装插件
+/plugin search <关键词>  # 搜索市场
+/plugin refresh          # 刷新市场索引
+/plugin update [名称]    # 更新插件
+/plugin enable|disable <名称>
+/plugin uninstall <名称> # 卸载（别名 remove/rm）
 ```
 
 ---
@@ -960,11 +988,53 @@ Cove 的 REPL 支持异步任务执行：
 
 交互模式下，每次命令的实时预览最多显示 8 行，每行最多 160 个显示列；超出后只显示一次“后续实时输出已折叠”。完成结果和工具块全文仍保留，可用 `/x <块ID>` 查看；下一条命令重新开始预览。headless 的实时输出不折叠。
 
+成功的 `write`/`edit` 会在工具结果之后逐字展示改动的 diff：自动预览最多 8 行、每行 160 个显示列，播放时间不超过约 2 秒；长内容自动加速。实际文件仍完整写入，动画不逐字修改磁盘文件，也不展示尚未收到的模型工具参数。失败、无改动、二进制文件或超过现有 1 MiB diff 上限的文件不生成预览。
+
+完整 diff 独立保存在 Cove 配置目录的 `previews/<会话哈希>/` 下（默认 `~/.cove/previews/`，受 `COVE_CONFIG_DIR` 覆盖），不受工具块最近 300 条上限影响，也不会因播放而删除。新记录带有任务 ID 和从用户输入提取的短标题，不额外调用模型；每次提交的任务独立分组，同名任务不会合并，同一轮自动网络重试仍属于原组。旧记录缺少任务信息，各自保留为“历史改动”，不猜测原任务归属。
+
+`/replay list` 按任务首次改动从旧到新分组，显示任务标题、改动数量及 `1.1`、`1.2` 等子序号；`/replay 1` 顺序播放第一个任务的全部改动，`/replay 1.2` 只播放该任务第二次改动，`/replay` 播放包含最近一次改动的任务。`/replay <完整编号>` 仍可精确指定一条记录。可以反复播放同一份改动，恢复同一会话后仍可回放。每次改动展示完整 diff，长内容自动加速至约 10 秒，Ctrl+C 可取消当前播放并停止后续改动，任务运行时请先完成任务或 `/stop`。记录可能含源码或敏感文本，持续占用磁盘；删除对应目录才会清除，不随会话自动清理。
+
+`/replay list main.go` 查找当前会话所有包含该文件名的记录，跨任务显示匹配改动，保留原始任务和子序号、不重新编号。普通关键词在任务标题、记录的文件路径、工具名和增删摘要中匹配，不区分大小写，Windows 的 `\` 与 `/` 路径分隔符等价；多个空格分隔的关键词需同时匹配。不搜索 diff 正文，也不搜索其他会话。
+
+用 `file:` 或 `title:` 限定字段，例如 `/replay list file:demo/chess/main.go` 只筛选文件路径，`/replay list title:棋盘` 筛选任务标题；`/replay list title:棋盘 file:main.go` 同时限定两者。`/replay search file:main.go` 按记录时间顺序回放当前会话该文件的全部匹配改动，`/replay search title:棋盘` 回放匹配标题的改动。普通文件名可能同时匹配某个任务标题，若只想看指定文件，请使用 `file:`。无匹配时仅显示提示，不回放其他记录。筛选后 `/replay <任务序号>` 仍会播放整个任务，需用子序号播放单次改动，或用 `/replay search <原关键词>` 只播放全部匹配记录；旧记录没有标题，但仍能按文件路径搜索。
+
+设置 `COVE_FILE_PREVIEW=0` 可关闭自动动画及回放动画，但仍保存预览记录；headless 模式始终直接输出回放全文、不播放动画。关闭动画不改变 `/x` 的行为。
+
+### 可选的先确认后实现流程
+
+默认 `/workflow direct` 沿用直接执行，不增加方案审批或额外解读调用。`/workflow review` 对当前会话后续任务启用先确认后实现，`/workflow once` 只启用下一项任务；不带参数可查看当前设置及是否仍待确认。设置随会话保存，恢复同一会话仍生效，新会话默认直接执行；单次模式已开始的待确认任务恢复时不会绕过审批。
+
+模型先只读调查，提交涉及文件、关键决策（依赖、接口兼容等）和验收标准，然后通过 `exit_plan_mode` 请求明确确认。未确认前，引擎拒绝文件写入、有副作用的命令和委托实现；`bypass` 或工具 `allow` 规则不能代替方案确认。用户拒绝后继续调整方案，不开始修改；无交互审批处理器时保存方案并保持待确认。确认期间方案列出的文件内容或元数据发生变化，会拒绝本次确认，要求重新调查。
+
+批准后仍遵守原有工具权限。这是实现方案确认，不是完整预计 diff 审批、批准后的文件范围锁或文件级事务；仍应审阅实际 diff 和验收证据。`/workflow` 不改变 `/mode`，用户设置的 `/mode plan` 仍禁止实现，需要用户自行切换。需要跳过该流程时明确执行 `/workflow direct`。
+
+### 任务审阅概览与选择
+
+空闲交互式 `/replay list [关键词]` 打开候选列表，可继续输入筛选、上下键选择，按一次 Enter 回放，Esc 取消；完整任务和单次改动分别可选。过滤只匹配部分改动时不会提供包含无关文件的整任务候选。headless、简化输入或选择器不可用时保留编号文本列表。
+
+交互回放先显示所选任务的文件改动次数、累计增删行数、已保存方案和历史验收证据，再播放代码。`/replay overview 1` 只显示第一项任务概览，`/replay overview` 默认最近任务；概览不调用模型，也不重新执行校验。
+
+新任务的方案和引擎验收报告保存在同一会话预览目录的 `tasks/` 中，并按稳定任务 ID 关联，不会把最新任务证据套到旧改动。报告是任务级历史证据，不代表当前工作区重新验证，也不证明单条改动正确；计划中的验收标准不等于已经通过。没有报告的旧记录明确显示未记录证据。累计增删是各次已记录 diff 的总和，不是当前文件净增删；现有二进制、无 diff 和大小限制仍适用。
+
+### 回放代码解读
+
+交互式 `/replay` 首次播放一条记录时，会用 Cove 当前模型调用链生成一次结构化中文解读，遵守模型预算并独立计费，不执行工具、不改变会话历史。仅发送该记录的任务短标题、路径和完整 diff，不读取其他文件。每次调用最多 30 秒；超过 32 KiB 的 diff 跳过 AI 解读，原始代码仍完整回放。自动文件预览和 `/replay list` 不触发解读调用。
+
+回放时先展示 `+`、`-`、上下文和 `@@` 位置标记的说明，再以独立颜色显示“AI 解读（可能有误，不属于源码）”及对应增删代码行的解读。解读不是源码注释，不会写入文件或混入保存的原始 diff；`/x` 仍显示原始工具输出。模型结论可能不准确，应以代码和测试为准。
+
+解读保存在同一预览记录中，后续回放直接复用，不再请求模型。格式错误、无效行号或模型调用失败会缓存失败状态并回退到原始 diff，避免反复计费；用户取消时不保存未完成解读，下次回放可重新生成。缓存保存失败或另一个进程正在生成时会提示并播放原始代码，不保证下次无需调用。生成期间记录发生变化则不保存旧内容的解读。
+
+设置 `COVE_REPLAY_EXPLAIN=0` 同时关闭解读生成和展示，已有缓存不会删除。headless 默认不生成解读，但可展示已有缓存；`COVE_FILE_PREVIEW=0` 只关闭打字动画，交互模式仍可生成和展示解读。
+
 ### 输入状态与选择
+
+Esc 清空输入后状态行提示“已清空，Ctrl+Z 恢复”，在空输入行上按 Ctrl+Z 恢复刚清空的内容。任务运行中在空输入行按 Esc 不再直接中断：状态行提示“再按一次 Esc 中断任务（或 Ctrl+C）”，2 秒内再按一次才中断（Ctrl+C 仍一次中断；`COVE_ESC_INTERRUPT=0` 整体关闭 Esc 中断）。需要确认的操作（整树 `/undo`、文件级回滚、`/history clear`）统一用和授权提示相同的竖条框显示预览，按 y 确认、n 取消，输入其他内容等于取消并按普通输入处理；状态行显示“等待你确认”。
 
 普通空闲时不显示额外状态行，保留输入框原有提示。需要关注时显示“正在处理任务”“任务已停止”“等待你确认授权”“选择历史会话”或“正在查看 Agent 面板”等短句，不展示“输入去向”“焦点”等内部标签；有附件时仍显示附件信息。空闲时输入成为新任务，执行中成为追加指引，以 `/` 开头则按命令处理；等待审批或提问时，符合答案规则的输入作为回答，其余输入保持原有处理方式。状态未变化时不重绘。
 
 命令候选改为纵向列表，显示名称和说明，最多展示 5 个候选。上下键改变选中项，Enter 填入候选但不立刻执行，再次 Enter 执行；输入已经是完整候选时 Enter 正常执行。Tab 仍可补全或循环候选，Esc 先关闭候选列表，不丢弃正在输入的文字。
+
+输入 `/` 时，每个命令只展示一项，别名放在同一项的说明中，例如 `/clear` 的 `/cls`、`/exit` 的 `/quit`、`/stop` 的 `/cancel`、`/keys` 的 `/shortcuts`、`/x` 的 `/expand`、`/skill` 的 `/skills`、`/diagnose` 的 `/diag`。直接输入别名或别名前缀仍可补全、执行和查看帮助；别名的子命令补全保持不变。
 
 授权等待时，输入区附近保留操作、允许/拒绝选项和记住范围的预览，完整授权说明仍留在终端输出中。原有单键回答、Ctrl+C 拒绝并停止、项目范围和权限规则不变；回答、取消或超时后预览清除。
 
@@ -1005,6 +1075,28 @@ Cove 的 REPL 支持异步任务执行：
 任务开始时即把输入保存为中断草稿，任务正常完成后自动清除。因此请求失败、被 Ctrl+C 中断或进程异常退出（崩溃、断电、被杀）后，下次在同一项目目录启动时会提示草稿，输入“继续”回到该草稿所在的会话接着做（请求不会重复写入会话）。草稿只在保存它的项目目录中提示和使用；在其他项目或其他会话中完成对话不会清除它；在同一项目开始新任务会替换它。任务运行期间 `/history detail interrupted` 显示的错误一栏为“任务未完成（cove 在任务运行中退出）”。`-p`/headless 模式不保存草稿。
 
 ---
+
+## 维护任务、竞跑、远程监督与浏览器验收
+
+四个工作流默认都不启动任何守护进程、浏览器或监听端口，只在你显式输入命令时运行；JSON 示例、调度方式与安全边界见 [工作流指南](guide/workflows.md)。
+
+### 维护任务（/automations、/inbox）
+
+`/automations add <spec.json>` 登记一个维护任务（prompt、周期或事件、预算、验证命令），`run <id>` 立即跑一次，`tick` 跑所有到期任务一次，`event <名称> <唯一键>` 显式触发并按键去重，`remove` 删除任务但保留结果。每次运行在临时 Git worktree 里基于已提交的 HEAD 进行，用隔离的 profile 与预算，结果（命令、退出码、输出、补丁）写入配置目录下该项目的 `automations/state.json`。没有 Git 仓库会拒绝；worktree 只隔离 Git 改动，不是系统或网络沙箱。定时运行请用系统计划任务调用 `cove --automation tick <项目目录>`。
+
+`/inbox list|show|patch|review` 查看结果与补丁：`patch <结果ID> <目标.patch>` 只能导出到项目目录和配置目录之外，`review accepted|rejected` 只记录结论，不会应用或合并。交互 REPL 每 5 秒检查一次该项目的状态文件，别的进程写入新结果时在输入行上方提示“维护任务有 N 条新结果，/inbox 查看”，`/cd` 到别的项目后跟着切换。
+
+### 竞跑（/race）
+
+`/race run <spec.json>` 用两个 worktree 分别按两条 prompt 实现，再用同一组验证器（显式 argv，不经 shell，只看退出码）比较；立即返回运行 ID，结束时在输入行上方提示“竞跑 <id> 完成：N/2 个候选通过验证”（超时与取消也会提示）。`/race list`、`/race show <id>` 查看状态、耗时、费用与补丁摘要；只有 `/race select <id> <a|b>` 会把通过的候选补丁应用到工作区，应用前重新校验补丁哈希、项目、分支、提交与工作区干净。要求干净的本地 Git 项目根目录；报告存放在配置目录下。
+
+### 远程监督（/remote）
+
+`/remote start [--bind 127.0.0.1:0] [--token-file 路径] [--public-origin https://主机] [--allow-lan --tls-cert 证书 --tls-key 私钥]` 在当前交互会话里启动一个带令牌认证的 HTTP 端点，打印地址与私有凭据文件路径；`status` 查看，`stop` 关闭。远程端能看到任务状态与证据，可以暂停排队任务、取消当前任务，以及对正在等待的授权提示做一次性批准或拒绝（远程拒绝不带理由）；本地输入的指引、队列变化或 5 分钟远程 TTL 到期只撤销远程的待处理项，不影响本地提示。默认只监听本机回环地址，局域网访问必须同时提供 TLS 证书。
+
+### 浏览器验收（/browser-verify）
+
+`/browser-verify <workflow.json> [--allow-local]` 用 headless Chrome 按工作流执行 navigate、click、fill、assert_text、assert_visible、assert_url 等动作，桌面 1280x800 与移动 390x844 各跑一遍，保存截图与 report.json 到配置目录，并把结果接入本会话的 `/acceptance`。必须有显式断言；fixture 不得含密钥，拒绝填写密码与敏感截图；`--allow-local` 是用户对本机回环地址的显式许可，不能写在 JSON 里。需要用 `go build -tags chromedp` 构建并安装 Chrome/Chromium，否则结果记为 unverified；`results` 与 `artifacts <运行ID>` 查看历史。
 
 ## 单轮上限与 /continue
 
@@ -1151,7 +1243,7 @@ cove 与 gemini-cli、Codex CLI、OpenCode、goose 等开源 Agent 的基准判�
 - 触发：迭代/时间上限（交互模式选 `[s]`，以及 `-p`/headless 撞硬上限）、停滞询问选停止、循环检测询问选停止、循环检测累计 5 次硬停。
 - 这次调用不带工具定义（anthropic provider 例外：历史里有 tool_use 时 API 要求带 tools，提示照样要求不调工具，回复中的工具调用会被丢弃），`max_tokens` 1024，关闭思考，使用本轮实际使用的模型；计费。
 - 总结作为一条助手消息写进历史（提示本身不保留）。交互模式流式显示；`-p` 与 headless 在打印错误前先把总结写到 stdout，退出码与错误不变（仍是上限错误，退出码 1）。
-- 已取消、预算已用尽、回放模式（`--replay`）或调用失败时静默跳过。
+- 已取消、预算已用尽或调用失败时静默跳过。
 
 ### 只汇报当前请求
 
@@ -1307,7 +1399,7 @@ Cove 在对话过程中自动提取记忆、学习技能，并在对话结束后
 每次提取（包括没找到值得保存内容的）都会记录时间和条数，可用 `/memory stats` 查看；交互模式下提取到记忆时会显示在[回合结束摘要行](#回合结束摘要行)里。`cove -p` 回答后最多等待 20 秒让本轮提取完成再退出。
 
 - 新记忆写入**项目记忆目录**（见[记忆系统](#记忆系统)）。追加到已有记忆时，单个文件超过 10KB（或 200 行）就滚动写入 `name-2.md`、`name-3.md`……，不再截断丢掉新内容；与文件末尾完全相同的行不重复追加；只在全局目录存在的同名记忆，以全局内容为底写入项目目录，全局文件不动。
-- 所有写入都经过统一检查（注入检测、单条 25KB、记忆总量上限 300KB）。
+- 所有写入都经过统一检查（注入检测、单条 25KB、记忆总量上限 300KB）；自动提取的单条内容在写入前先裁到 5000 字节，25KB 是 `/memory add` 的上限。
 
 ### 记忆溯源
 
@@ -1349,10 +1441,10 @@ Cove 在对话过程中自动提取记忆、学习技能，并在对话结束后
 
 **`session_end` 模式（默认）**：
 
-- 回合结束时不再检查 dream。退出时（`/exit`、`/restart`、Ctrl+D、`-p` 结束、headless 结束，在 SessionEnd hook 跑完之后）检查：dream 已启用、本次进程完成的回合数 ≥ `min_turns`、上次整理后有会话被修改（含本会话）。`--no-auto` 与 `--replay` 时跳过。
+- 默认模式下，回合后的 Dream 检查不会启动整理。退出时（`/exit`、`/restart`、Ctrl+D、`-p` 结束、headless 结束，在 SessionEnd hook 跑完之后）检查：dream 已启用、本次进程完成的回合数 ≥ `min_turns`、上次整理后有会话被修改（含本会话）。`--no-auto` 时跳过。
 - 满足条件时以**分离的后台进程**整理，stderr 显示“已在后台启动记忆整理（约 1–3 分钟，至多约 30 次后台模型调用，结果见 /dream）”，cove 立即退出。后台进程继承工作目录（项目 `.cove.json` 的模型配置同样生效），使用 `model_fast`（未设则 `model`），最长 5 分钟，调用计费并写入费用历史。
 - 后台进程启动失败时在当前进程内整理，最多 60 秒，每秒打印一个进度点；超时则取消并回滚整理锁。
-- 后台进程的输出追加到配置目录下的 `dream.log`（超过 1MB 时滚动为 `dream.log.1`）；结果写入 `dream-last.json`（`mode`、`pid`、`started_at`、`finished_at`、`result`=running/completed/failed/skipped、`error`、`sessions_reviewed`、`files_touched`、`input_tokens`、`output_tokens`、`cost_usd`）。进程崩溃或被强杀时，下一次检查会把记录改为失败并回滚锁。
+- 后台进程的输出追加到配置目录下的 `dream.log`（超过 1MB 时滚动为 `dream.log.1`）；结果写入 `dream-last.json`（`mode`、`pid`、`started_at`、`finished_at`、`result`=running/completed/failed/skipped、`error`、`sessions_reviewed`、`files_touched`、`input_tokens`、`output_tokens`、`cost_usd`、`prior_consolidated_at`、`project_memory`）。进程崩溃或被强杀时，下一次检查会把记录改为失败并回滚锁。
 
 **`threshold` 模式**：距上次整理至少 `min_hours` 小时，且之后至少有 `min_sessions` 个新会话（正在使用的会话不计入）；整理在回合结束的记忆提取之后进行；`cove -p` 中不自动整理；退出时正在进行的整理被取消并回滚锁。
 
@@ -1366,7 +1458,7 @@ Cove 在对话过程中自动提取记忆、学习技能，并在对话结束后
 
 ### 记忆去重
 
-新记忆与现有记忆相似度 >80% 时自动合并。
+自动提取遇到同名记忆时一律追加，不覆盖；与文件末尾完全相同的行不重复写入。
 
 ### 会话笔记 (Session Notes)
 
@@ -1374,6 +1466,8 @@ Cove 在对话过程中自动提取记忆、学习技能，并在对话结束后
 
 - 决策：“决定、采用、改用、换成”，以及分句开头的“用”（“用户、用例、用法、用途、用于、用来、用以”不算）；发现：“发现、原因是”。关键词前两个字里有“没、未、不、无、你、由”时不记录；记录内容至少 4 个字；同类同文本去重。
 - 不再记录 `File: x` 和工具错误条目。时间格式 `2006-01-02 15:04`，加载时保留。
+- 每次 `todowrite` 后立即保存未完成计划和完成记录，全部完成时清除旧计划。七天内的未完成计划仅在用户明确要求继续时交给模型，否则只提示一次。
+- 会话笔记是同步的任务状态与上下文，不依赖模型提取，也不受 `--no-auto` 影响；长期记忆用于可复用知识，由 `/memory`、自动提取和 Dream 管理。两者不能直接互相替代。
 
 ---
 
@@ -1605,7 +1699,8 @@ headless、普通逐行输入或任务运行中仍使用文本列表。此时执
 /history           # 查看当前项目的历史会话
 /history <编号|id> # 恢复历史会话并美化显式
 /history delete <编号|id>   # 删除一个会话
-/history clear              # 清空当前项目历史（显示数量，需再输入 /history clear confirm）
+/history clear              # 清空当前项目历史（交互模式弹确认框按 y；headless 需再输入 /history clear confirm）
+/history clear all          # 清空所有项目的历史（同样需确认）
 /history clean              # 修复历史文件，不删除
 ```
 
@@ -1623,7 +1718,7 @@ Cove 的会话管理具备低信噪比排除算法。当会自动为您保存的
 ### 会话导出
 
 ```
-/export            # 导出当前对话为 Markdown
+/export [文件名]   # 导出当前对话为 Markdown，可指定文件名
 ```
 
 ### 上下文压缩
@@ -1653,7 +1748,7 @@ Cove 的会话管理具备低信噪比排除算法。当会自动为您保存的
 /memory stats              # 条数、总大小、使用率、单条上限、其中指令文件，以及“上次提取: 时间，保存 N 条”（无记录时“尚无记录”）
 ```
 
-自动提取的记录保存在 `~/.cove/memory/.last-extraction.json`（隐藏文件，不作为记忆加载）。
+自动提取的记录保存在项目记忆目录 `~/.cove/projects/<hash>/memory/.last-extraction.json`（隐藏文件，不作为记忆加载）。
 
 ### 记忆特性
 
@@ -1727,7 +1822,8 @@ Cove 的会话管理具备低信噪比排除算法。当会自动为您保存的
 /doctor             # 快速检查：git、ripgrep、供应商与 API key，外加“后台学习”“权限规则文件”
 /diagnose           # 完整诊断（含网络检测）
 /diagnose quick     # 快速检查（跳过网络）
-/diagnose errors    # 查看运行时记录的错误/卡顿：按诊断码和模型聚合，显示次数、最近时间、建议、已执行的处置
+/diagnose errors    # 查看运行时记录的错误/卡顿：按诊断码和模型聚合，显示次数、最近时间、建议、已执行的处置（别名 log、recent；errors.log 超限后滚动为 errors.log.1）
+/diagnose archive   # 归档已处理的错误（别名 fixed、clear）
 /diagnose archive   # 处理完后归档错误日志，开始新的记录周期（处置器的计数一并清零）
 /diagnose trace [N] # 查看最近 N 条交互轨迹（默认 30）：每次模型调用的消息数、估算 token、耗时、结束原因或错误类别，每次工具调用的耗时、结果大小、是否出错，每次压缩的前后 token 数，超长重试的处理
 ```
@@ -1830,52 +1926,6 @@ cove -p "审查配置" --file config.json
 ### 工作树
 
 Agent 可通过 `worktree` 工具创建隔离的 Git 工作树（位于项目旁的 `../<分支名>`），适合大规模重构。进入后直到 `exit_worktree`，`read`/`edit`/`write`/`glob`/`grep` 和 shell 命令都在工作树里执行，主工作树不可达；检查点与 `/undo` 只覆盖主工作树，工作树里的改动靠 git 自身管理。`exit_worktree` 在原项目目录执行 `git worktree remove`，有未提交改动时会拒绝并保持进入状态。
-
----
-
-## CovePhone (Android)
-
-CovePhone 是 Cove 的 Android 手机伴侣应用。
-
-### 要求
-
-- Android 8.0 (API 26) 或更高
-- 网络连接
-- 支持的提供商 API Key（如 DeepSeek）
-
-### 安装
-
-1. 从 [Releases](https://github.com/liuzhixin405/cove-agent/releases) 下载 APK
-2. 允许安装未知来源应用
-3. 打开 APK 完成安装
-
-### 设置
-
-1. 启动 CovePhone
-2. 进入设置（齿轮图标）
-3. 输入 API Key
-4. 选择模型和提供商
-5. 返回聊天界面开始使用
-
-### 特性
-
-- **原生 Go 引擎**：与桌面版共用同一套 Go 模型接入层（`internal/api`：各提供商、流式解析、工具参数修复、连接重试），通过 `gomobile` 编译为 `cove-core.aar`；工具调用循环是移动端自己的轻量实现，不包含桌面版的工具系统和权限机制
-- **Thinking 显示**：AI 思考过程带平滑滚动显示
-- **持久化设置**：API Key、模型、提供商自动保存
-- **多轮对话**：会话内完整聊天历史
-
-### 问题排查
-
-如果应用返回重复响应：
-1. 检查 API Key 是否正确配置
-2. 确保网络连接正常
-3. 尝试切换模型
-4. 重启应用
-
-### 技术支持
-
-- GitHub Issues: https://github.com/liuzhixin405/cove-agent/issues
-- 邮箱: 164910441@qq.com
 
 ---
 

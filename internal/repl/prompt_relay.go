@@ -20,6 +20,10 @@ var permAccepts func(string) bool
 
 var permHint string
 
+// permAllowEmpty: an empty line answers the waiting prompt (a "reason, or
+// Enter to skip" line). Guarded by consoleMu.
+var permAllowEmpty bool
+
 var permTitle string
 var permPreview []string
 
@@ -34,6 +38,8 @@ func SetPromptInput(ch chan<- string, accepts func(string) bool, hint string) {
 	permInputCh = ch
 	permAccepts = accepts
 	permHint = hint
+	permAllowEmpty = false
+	permArmedToken = 0
 	permTitle, permPreview = "", nil
 	permKeys, permOptions, permOptionIdx = "", nil, -1
 }
@@ -61,7 +67,10 @@ func TakePromptInputFor(line string) (ch chan<- string, state PromptInputState, 
 		return nil, PromptNone, ""
 	}
 	trimmed := strings.TrimSpace(line)
-	if trimmed == "" || (permAccepts != nil && !permAccepts(trimmed)) {
+	if trimmed == "" && !permAllowEmpty {
+		return nil, PromptNotAnswer, permHint
+	}
+	if trimmed != "" && permAccepts != nil && !permAccepts(trimmed) {
 		return nil, PromptNotAnswer, permHint
 	}
 	ch = permInputCh
@@ -87,6 +96,8 @@ func TakePermInputCh() chan<- string {
 
 func clearPromptLocked() {
 	permInputCh, permAccepts, permHint = nil, nil, ""
+	permAllowEmpty = false
+	permArmedToken = 0
 	permKeys, permOptions, permOptionIdx = "", nil, -1
 	permTitle, permPreview = "", nil
 }
@@ -157,6 +168,9 @@ type AskSpec struct {
 	// one shown.
 	Options  []string
 	External func() (<-chan ExternalAnswer, func())
+	// AllowEmpty makes an empty line an answer ("") instead of a repeat of
+	// the hint: for "type a reason, or press Enter to skip".
+	AllowEmpty bool
 }
 
 type ExternalAnswer struct {
@@ -172,6 +186,7 @@ func AskWith(s AskSpec) (answer string, ok bool) {
 	SetPromptInput(ch, s.Accepts, s.Hint)
 	consoleMu.Lock()
 	permKeys, permOptions, permOptionIdx = s.Keys, s.Options, -1
+	permAllowEmpty = s.AllowEmpty
 	permTitle = s.Title
 	permPreview = append([]string(nil), s.Preview[:min(len(s.Preview), panelMaxRows)]...)
 	consoleMu.Unlock()
@@ -225,3 +240,63 @@ var askMu sync.Mutex
 func Ask(text string, accepts func(string) bool, hint string, timeout time.Duration) (answer string, ok bool) {
 	return AskWith(AskSpec{Text: text, Accepts: accepts, Hint: hint, Timeout: timeout})
 }
+
+// ArmPrompt registers a prompt whose answer the front end reads from the
+// next typed line itself: a slash command runs on the input loop, so it
+// cannot block in AskWith waiting for that loop to deliver the answer. The
+// keys answer on their own (no Enter), the panel shows title and preview,
+// and the status row says the prompt is waiting. DisarmPrompt ends it; the
+// front end must call it when it takes the line.
+//
+// It refuses (ok false) while another prompt is waiting: overwriting a
+// permission prompt's registration would send its answer to the wrong
+// place and leave the tool waiting for its timeout. The token identifies
+// this arming; DisarmPrompt with a stale token clears nothing.
+func ArmPrompt(title string, preview []string, hint, keys string) (token uint64, ok bool) {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
+	if permInputCh != nil {
+		return 0, false
+	}
+	// The channel is never read: the line goes to the front end instead.
+	permInputCh = make(chan string, 1)
+	permAccepts, permHint, permAllowEmpty = nil, hint, false
+	permKeys, permOptions, permOptionIdx = keys, nil, -1
+	permTitle = title
+	permPreview = append([]string(nil), preview[:min(len(preview), panelMaxRows)]...)
+	armedSeq++
+	permArmedToken = armedSeq
+	if activeReader != nil && activeReader.reading {
+		activeReader.redrawLocked(activeReader.renderBuf, activeReader.renderCursor)
+	}
+	return permArmedToken, true
+}
+
+// permArmedToken identifies the prompt ArmPrompt registered (0: none, or a
+// prompt AskWith registered since). Guarded by consoleMu.
+var (
+	permArmedToken uint64
+	armedSeq       uint64
+)
+
+// DisarmPrompt ends the prompt ArmPrompt registered under token, and only
+// that one: a permission prompt registered since stays.
+func DisarmPrompt(token uint64) {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
+	if token == 0 || permArmedToken != token {
+		return
+	}
+	clearPromptLocked()
+}
+
+// promptWaiting reports whether any prompt is registered on the relay.
+func promptWaiting() bool {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
+	return permInputCh != nil
+}
+
+// PromptKeyAnswers reports whether r, typed on an empty line, answers the
+// waiting prompt by itself (for front-end tests).
+func PromptKeyAnswers(r rune) bool { return promptKeyAnswers(r) }

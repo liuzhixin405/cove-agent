@@ -41,10 +41,38 @@ func printOutputLocked(s string, ensureTrailingNewline bool) {
 	}
 }
 
+// secretHeld collects output printed while a secret is being typed
+// (ReadSecret), so a background notice does not land in the masked prompt;
+// endSecretHold prints it. Guarded by consoleMu.
+var (
+	secretActive bool
+	secretHeld   []string
+)
+
+func beginSecretHold() {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
+	secretActive = true
+}
+
+func endSecretHold() {
+	consoleMu.Lock()
+	held := secretHeld
+	secretActive, secretHeld = false, nil
+	consoleMu.Unlock()
+	for _, s := range held {
+		PrintAbove(s)
+	}
+}
+
 func PrintAbove(s string) {
 	s = normalizeOutputNewlines(s)
 	consoleMu.Lock()
 	defer consoleMu.Unlock()
+	if secretActive {
+		secretHeld = append(secretHeld, s)
+		return
+	}
 
 	// While a task is streaming the input line is either off screen or pinned
 	// to the last row outside the scroll region, so print inline without

@@ -156,3 +156,31 @@ func TestRepeatedUndoStepsBack(t *testing.T) {
 		t.Fatalf("second undo = %q, want v1 (it must step back, not redo)", got)
 	}
 }
+
+// A checkpoint taken in an empty project (before its first file was written)
+// has an empty tree. Restoring to it must delete the files written since;
+// it used to fail with "pathspec '.' did not match any file(s) known to
+// git", because `checkout <hash> -- .` has nothing to check out.
+func TestUndoToEmptyTreeRemovesEverything(t *testing.T) {
+	isolatedGit(t)
+	dir := t.TempDir()
+	mgr, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := mgr.Create("empty"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "first.txt")
+	writeFile(t, path, "v1")
+	backup, err := mgr.Restore("")
+	if err != nil {
+		t.Fatalf("restore to the empty checkpoint: %v (backup %s)", err, backup)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("first.txt survived the restore: %v", err)
+	}
+	if backup == "" {
+		t.Fatal("no backup of the pre-undo state")
+	}
+}

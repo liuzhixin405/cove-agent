@@ -581,15 +581,16 @@ func TestFlowF3_SessionLifecycle(t *testing.T) {
 		}
 		mark := s.Mark()
 		s.Type("/history clear")
-		s.WaitForSince(mark, fmt.Sprintf("将删除当前项目的 %d 个历史会话", len(records)), e2eTimeout)
-		s.WaitForSince(mark, "/history clear confirm", e2eTimeout)
+		s.WaitForSince(mark, "范围：当前项目", e2eTimeout)
+		s.WaitForSince(mark, fmt.Sprintf("将删除 %d 个历史会话", len(records)), e2eTimeout)
+		s.WaitForSince(mark, "[y] 确认", e2eTimeout)
 		for _, r := range records {
 			if _, err := os.Stat(sessionPath(home, r.ID)); err != nil {
 				f.Fatalf("session %s deleted without confirmation: %v", r.ID, err)
 			}
 		}
 		mark = s.Mark()
-		s.Type("/history clear confirm")
+		s.Type("y")
 		s.WaitForSince(mark, fmt.Sprintf("已删除 %d 个会话", len(records)), e2eTimeout)
 		index := readFile(t, indexPath)
 		for _, r := range records {

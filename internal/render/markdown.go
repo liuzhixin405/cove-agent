@@ -122,6 +122,16 @@ func NewMarkdownStream() *MarkdownStream {
 	return m
 }
 
+// Markdown renders a whole text at once (a plan summary in the approval
+// box). Streaming callers use MarkdownStream directly.
+func Markdown(text string) string {
+	if strings.TrimSpace(text) == "" {
+		return ""
+	}
+	m := NewMarkdownStream()
+	return m.Write(text) + m.Flush()
+}
+
 // Write renders chunk and returns what can be printed now.
 func (m *MarkdownStream) Write(chunk string) string {
 	return m.render(chunk, false)

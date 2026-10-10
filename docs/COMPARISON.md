@@ -18,17 +18,16 @@
 
 | 维度 | cove | Claude Code | 说明 |
 |------|------|-------------|------|
-| **模型绑定** | 多提供商：Anthropic/OpenAI/DeepSeek 原生，GLM/Kimi/Qwen/Doubao/OpenRouter 等 10+ 兼容 | 绑定 Claude（Anthropic），可用代理接第三方但非一等公民 | cove 的核心差异：国内模型是一等公民，不是「兼容接口凑合」 |
+| **模型绑定** | 多提供商：Anthropic/OpenAI/DeepSeek 原生，GLM/Kimi/Qwen/Doubao/OpenRouter/SiliconFlow/Groq/Together/Fireworks/xAI/Mistral 等 12 个兼容 | 绑定 Claude（Anthropic），可用代理接第三方但非一等公民 | cove 的核心差异：国内模型是一等公民，不是「兼容接口凑合」 |
 | **成本** | 用你自己的 key；可走 DeepSeek 等低价模型 | 用你自己的 key 或 Anthropic 订阅 | 用国内模型跑 agent 的单轮成本通常低一个数量级 |
 | **分发** | 单文件静态二进制，零依赖，下载即用 | npm 安装，需要 Node 运行时 | cove 在「裸机/受限环境/容器」里更省心 |
 | **权限模型** | 4 档（default/auto/bypass/plan）+ 项目级永久规则 | 细粒度权限 + 设置 | 两者都成熟，cove 对「只读默认放行」做得更开箱即用 |
-| **工具集** | 文件/shell/PowerShell/grep/glob/web/browser/repo_map/MCP/skills | 文件/shell/grep/glob/web/MCP/skills/hooks | 能力相近，cove 多了 PowerShell、headless 浏览器、repo_map |
+| **工具集** | 文件/shell/PowerShell/grep/glob/web/browser（需 `-tags chromedp` 构建）/repo_map/MCP/skills/hooks | 文件/shell/grep/glob/web/MCP/skills/hooks | 能力相近，cove 多了 PowerShell、headless 浏览器、repo_map |
 | **通用自动化** | 顺带的能力：因为是本地代码助手，自带文件、shell/PowerShell、headless 浏览器、网页抓取/搜索、MCP，所以也能操作电脑 | 有 Bash 等工具，定位以「写代码」为主 | 两者都能操作电脑；cove 的定位是「代码助手 + 顺带自动化」 |
-| **多 agent** | 子 agent + 团队 + 计划执行器（DAG） | subagents（Claude 生态） | 都有，实现思路不同 |
+| **多 agent** | 子 agent + 计划执行器（DAG）；团队协作为实验开关，默认关闭 | subagents（Claude 生态） | 都有，实现思路不同 |
 | **记忆/学习** | **Dream 自学习**：自动提取记忆、跨会话整合、自动生成技能 | CLAUDE.md + 记忆（偏手动） | cove 的差异化亮点，但也因此更「玄」，需要用户信任 |
-| **移动端** | CovePhone（实验性） | 无 | 加分项，但当前是实验性质，别当主卖点 |
 | **中文/国内体验** | 中文文档、国内模型适配、中文社区 | 英文为主 | 对中文开发者 cove 更顺手 |
-| **成熟度/稳定性** | 单人维护，v11 但用户基础小 | 大厂持续迭代，社区反馈海量 | **这是 cove 最大的短板，不回避** |
+| **成熟度/稳定性** | 单人维护，v12 但用户基础小 | 大厂持续迭代，社区反馈海量 | **这是 cove 最大的短板，不回避** |
 | **生态** | MCP/skills/plugin 都有，但社区小、教程少 | 海量社区方案、教程、集成 | Claude Code 明显领先 |
 | **数据自主** | 都本地跑、都用自己的 key | 同左 | 平手 |
 

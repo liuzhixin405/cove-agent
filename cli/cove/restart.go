@@ -18,15 +18,13 @@ const restartArgsEnv = "COVE_RESTART_ARGS_FILE"
 // restartArgs is the command line the restarted cove runs with: the original
 // one, without what only made sense at the first start — -r/--resume (the
 // session to continue is sessionID now), --image/--file (attached to the
-// first message, which was already sent) and --replay (a replay serves its
-// recording from the first response, so the restarted cove used to answer
-// the next message with the recording's opening reply again) — plus -r
+// first message, which was already sent) — plus -r
 // sessionID when there is a saved conversation to continue.
 func restartArgs(orig []string, sessionID string) []string {
 	var out []string
 	for i := 0; i < len(orig); i++ {
 		switch orig[i] {
-		case "-r", "--resume", "--image", "--file", "--replay":
+		case "-r", "--resume", "--image", "--file":
 			i++ // and its value
 			continue
 		}

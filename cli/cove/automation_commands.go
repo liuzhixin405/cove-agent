@@ -17,20 +17,20 @@ import (
 	"github.com/liuzhixin405/cove-agent/internal/fsatomic"
 )
 
-const automationHelp = `/automations list
-/automations add <spec.json> [session]
-/automations run <id>
-/automations tick
-/automations event <name> <unique-key>
-/automations remove <id>
-Spec JSON: {"version":1,"spec":{"id":"maintenance","prompt":"Fix a small test failure","enabled":true,"every_seconds":3600,"event":"tests-failed","timeout_seconds":300,"budget_usd":1,"max_turns":8,"retries":1,"verify":[["go","test","./internal/automation"]]}}
-Runs are opt-in, use committed HEAD in a temporary Git worktree, and may call the configured model. No Git repository means refusal. Tick runs due tasks once; use your OS scheduler to invoke cove --automation tick <project>. Event triggers are explicit and deduplicated by key. Session-scoped tasks require their originating session. Worktrees are not an OS/network sandbox. No automatic apply, merge, or push.`
+const automationHelp = `/automations list                        列出维护任务
+/automations add <spec.json> [session]   添加任务（session 表示只属于当前会话）
+/automations run <id>                    立即运行一次
+/automations tick                        运行所有到期任务一次
+/automations event <名称> <唯一键>        触发事件（按键去重）
+/automations remove <id>                 删除任务（已有结果保留）
+Spec JSON：{"version":1,"spec":{"id":"maintenance","prompt":"修一个小的测试失败","enabled":true,"every_seconds":3600,"event":"tests-failed","timeout_seconds":300,"budget_usd":1,"max_turns":8,"retries":1,"verify":[["go","test","./internal/automation"]]}}
+任务需显式开启，在临时 Git worktree 里基于已提交的 HEAD 运行，可能调用模型；没有 Git 仓库会拒绝。tick 只跑一次到期任务，定时请用系统计划任务调用 cove --automation tick <项目目录>。事件触发是显式的并按键去重；会话范围的任务只能由原会话触发。worktree 不是系统或网络沙箱。不会自动应用、合并或推送。`
 
-const inboxHelp = `/inbox list
-/inbox show <result-id>
-/inbox patch <result-id> [destination.patch]
-/inbox review <result-id> accepted|rejected
-Show includes command argv, exit codes, output, base revision, patch and review state. Review persists a decision only; accepted does not apply or merge. Patch without a destination prints the patch. Export outside the project root, then inspect and apply manually. Expired workers remain uncertain until reviewed.`
+const inboxHelp = `/inbox list                              列出维护结果
+/inbox show <结果ID>                     查看命令、退出码、输出、基准版本、补丁与评审状态
+/inbox patch <结果ID> [目标.patch]        打印补丁，或导出到项目目录之外的文件
+/inbox review <结果ID> accepted|rejected 记录评审结论（accepted 也不会应用或合并）
+请把补丁导出到项目根目录之外，再自行检查与应用。过期的 worker 在评审前保持“不确定”状态。`
 
 type automationSpecFile struct {
 	Version int             `json:"version"`
@@ -51,14 +51,14 @@ func automationStore(project string) (*automation.Store, error) {
 	}
 	dir, err = automation.ExternalPath(project, dir)
 	if err != nil {
-		return nil, fmt.Errorf("automation state/config directory must be outside the original project: %w", err)
+		return nil, fmt.Errorf("维护任务的状态/配置目录必须在原项目之外: %w", err)
 	}
 	return automation.Open(filepath.Join(dir, "automations"), project)
 }
 
 func automationRunner(cfg *config.Config) (automation.Runner, error) {
 	if cfg == nil {
-		return nil, errors.New("automation requires an explicitly loaded model configuration")
+		return nil, errors.New("维护任务需要已明确加载的模型配置")
 	}
 	executable, err := os.Executable()
 	if err != nil {
@@ -117,7 +117,7 @@ func (fe *frontend) automationCommands() []command.Command {
 			run: func(ctx context.Context, in command.Input) bool {
 				message, err := executeAutomationCommand(ctx, name, in, nil)
 				if err != nil {
-					message = "automation: " + err.Error()
+					message = "维护任务: " + err.Error()
 				}
 				if fe != nil && fe.print != nil {
 					fe.print(message)
@@ -126,8 +126,8 @@ func (fe *frontend) automationCommands() []command.Command {
 			}}
 	}
 	return []command.Command{
-		makeCommand("automations", "Opt-in isolated maintenance tasks", automationHelp, []string{"add", "list", "run", "tick", "event", "remove", "help"}),
-		makeCommand("inbox", "Review persisted automation results (never auto-apply)", inboxHelp, []string{"list", "show", "patch", "review", "help"}),
+		makeCommand("automations", "显式维护任务：定时扫描、事件去重、worktree 隔离执行", automationHelp, []string{"add", "list", "run", "tick", "event", "remove", "help"}),
+		makeCommand("inbox", "查看维护任务结果与补丁（从不自动应用）", inboxHelp, []string{"list", "show", "patch", "review", "help"}),
 	}
 }
 
@@ -143,7 +143,7 @@ func executeAutomationCommand(ctx context.Context, name string, in command.Input
 		args = []string{"list"}
 	}
 	if os.Getenv("COVE_AUTOMATION_CHILD") == "1" {
-		return "", errors.New("nested automation commands are disabled inside maintenance workers")
+		return "", errors.New("维护 worker 内禁止嵌套维护命令")
 	}
 	store, err := automationStore(in.Cwd)
 	if err != nil {
@@ -193,23 +193,23 @@ func executeAutomationCommand(ctx context.Context, name string, in command.Input
 		}
 		var extra any
 		if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
-			return "", errors.New("spec must contain exactly one JSON object")
+			return "", errors.New("spec 文件必须只包含一个 JSON 对象")
 		}
 		if envelope.Version != automation.Version {
-			return "", errors.New("unsupported automation spec version")
+			return "", errors.New("不支持的维护任务 spec 版本")
 		}
 		if len(args) == 3 {
 			if sessionID == "" {
-				return "", errors.New("session scope requires an active session")
+				return "", errors.New("session 范围需要一个活动会话")
 			}
 			envelope.Spec.SessionID = sessionID
 		} else if envelope.Spec.SessionID != "" && envelope.Spec.SessionID != sessionID {
-			return "", errors.New("spec session_id does not match the active session")
+			return "", errors.New("spec 的 session_id 与当前会话不符")
 		}
 		if err := store.Add(envelope.Spec, time.Now().UTC()); err != nil {
 			return "", err
 		}
-		return "Added " + envelope.Spec.ID + "; no worker started. State: " + store.Path(), nil
+		return "已添加 " + envelope.Spec.ID + "；未启动 worker。状态文件: " + store.Path(), nil
 	case "remove":
 		if len(args) != 2 {
 			return "", errors.New(automationHelp)
@@ -217,7 +217,7 @@ func executeAutomationCommand(ctx context.Context, name string, in command.Input
 		if err := store.Remove(args[1]); err != nil {
 			return "", err
 		}
-		return "Removed " + args[1] + "; inbox results retained", nil
+		return "已删除 " + args[1] + "；inbox 结果保留", nil
 	case "run", "tick", "event":
 		if (args[0] == "run" && len(args) != 2) || (args[0] == "tick" && len(args) != 1) || (args[0] == "event" && len(args) != 3) {
 			return "", errors.New(automationHelp)
@@ -242,7 +242,7 @@ func executeAutomationCommand(ctx context.Context, name string, in command.Input
 		if err != nil {
 			// The result JSON carries patches and logs of up to 4 MiB each;
 			// name the result IDs, do not print the whole thing as an error.
-			return "", errors.Join(err, marshalErr, fmt.Errorf("persisted result %s; inspect /inbox show <result-id>", automationResultIDs(data)))
+			return "", errors.Join(err, marshalErr, fmt.Errorf("结果已保存 %s；用 /inbox show <结果ID> 查看", automationResultIDs(data)))
 		}
 		return message, marshalErr
 	default:
@@ -296,14 +296,14 @@ func executeInbox(store *automation.Store, state automation.Snapshot, args []str
 			}
 			path = filepath.Join(parent, filepath.Base(path))
 			if _, err := automation.ExternalPath(state.Project, path); err != nil {
-				return "", fmt.Errorf("export patches outside the original project; no automatic root writes: %w", err)
+				return "", fmt.Errorf("补丁请导出到原项目之外，不自动写入项目根目录: %w", err)
 			}
 			configDir, err := config.ConfigDir()
 			if err != nil {
 				return "", err
 			}
 			if _, err := automation.ExternalPath(configDir, path); err != nil {
-				return "", fmt.Errorf("export patches outside the configuration directory: %w", err)
+				return "", fmt.Errorf("补丁请导出到配置目录之外: %w", err)
 			}
 			file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 			if err != nil {
@@ -315,7 +315,7 @@ func executeInbox(store *automation.Store, state automation.Snapshot, args []str
 			if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
 				return "", err
 			}
-			return "Patch exported to " + path + "; nothing applied", nil
+			return "补丁已导出到 " + path + "；未应用", nil
 		case "review":
 			if len(args) != 3 {
 				return "", errors.New(inboxHelp)
@@ -323,12 +323,12 @@ func executeInbox(store *automation.Store, state automation.Snapshot, args []str
 			if err := store.Review(result.ID, args[2]); err != nil {
 				return "", err
 			}
-			return "Review recorded: " + args[2] + "; nothing applied or merged", nil
+			return "评审已记录: " + args[2] + "；未应用也未合并", nil
 		default:
 			return "", errors.New(inboxHelp)
 		}
 	}
-	return "", fmt.Errorf("unknown inbox result %q", args[1])
+	return "", fmt.Errorf("未知的 inbox 结果 %q", args[1])
 }
 
 // automationResultIDs names the persisted results of a run/tick/event so an
@@ -344,7 +344,7 @@ func automationResultIDs(data any) string {
 		}
 	}
 	if len(ids) == 0 {
-		return "(none)"
+		return "（无）"
 	}
 	return strings.Join(ids, ", ")
 }
@@ -394,11 +394,11 @@ func RunAutomationCLI(ctx context.Context, args []string, stdout, stderr io.Writ
 		name = "inbox"
 	}
 	if len(args) < 3 {
-		fmt.Fprintln(stderr, "Usage: cove --automation <list|tick|add|run|event|remove> <project> [arguments]; cove --automation-inbox <list|show|patch|review> <project> [arguments]")
+		fmt.Fprintln(stderr, "用法: cove --automation <list|tick|add|run|event|remove> <项目目录> [参数]；cove --automation-inbox <list|show|patch|review> <项目目录> [参数]")
 		return true, 2
 	}
 	if os.Getenv("COVE_AUTOMATION_CHILD") == "1" {
-		fmt.Fprintln(stderr, "nested automation commands are disabled inside maintenance workers")
+		fmt.Fprintln(stderr, "维护 worker 内禁止嵌套维护命令")
 		return true, 1
 	}
 	in := command.Input{Cwd: args[2], Args: append([]string{args[1]}, args[3:]...)}

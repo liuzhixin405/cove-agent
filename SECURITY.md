@@ -4,9 +4,8 @@
 
 | Version | Supported          |
 | ------- | ------------------ |
-| 2.0.x   | :white_check_mark: |
-| 1.0.x   | :white_check_mark: |
-| < 1.0   | :x:                |
+| 12.x    | :white_check_mark: |
+| < 12    | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -26,9 +25,9 @@
 
 ## Security Best Practices
 
-使用 agentgo 时请注意：
+使用 cove 时请注意：
 
-- **API Key 安全**: 不要在代码中硬编码 API key，使用环境变量或 `~/.agentgo/config.json`
+- **API Key 安全**: 不要在代码中硬编码 API key，使用环境变量或 `~/.cove/config.json`
 - **权限模式**: 生产环境建议使用 `default` 或 `plan` 模式
 - **MCP 服务器**: 仅连接到受信任的 MCP 服务器
 - **会话文件**: 不要分享包含 API key 的会话导出文件

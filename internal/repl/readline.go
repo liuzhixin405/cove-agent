@@ -58,7 +58,19 @@ type LineReader struct {
 	panelLines       []string
 	panelWake        <-chan struct{}
 	panelRefreshed   time.Time
+	// lastCleared is what Esc cleared from the line; Ctrl+Z puts it back.
+	lastCleared []rune
+	// escArmedAt is when Esc was pressed on an empty line while a task ran;
+	// a second Esc within escConfirmWindow interrupts the task.
+	escArmedAt time.Time
 }
+
+// escConfirmWindow is how long the second Esc has to follow the first; a
+// variable so tests can shorten it.
+var escConfirmWindow = 2 * time.Second
+
+// escArmHint is the status-row hint after the first Esc.
+const escArmHint = "再按一次 Esc 中断任务（或 Ctrl+C）"
 
 // SetImageInputHooks installs owner-thread handlers for image paste events.
 func (lr *LineReader) SetImageInputHooks(paste func(string) bool, clipboard func(), remove func()) {
@@ -306,6 +318,16 @@ func (lr *LineReader) editLine() (string, error) {
 				buf, cursor = []rune(line), len([]rune(line))
 			}
 			lr.redraw(buf, cursor)
+		case 26: // Ctrl+Z: restore what Esc cleared
+			if len(buf) == 0 && len(lr.lastCleared) > 0 {
+				buf = append([]rune(nil), lr.lastCleared...)
+				cursor = len(buf)
+				lr.lastCleared = nil
+				consoleMu.Lock()
+				clearHintLocked()
+				consoleMu.Unlock()
+				lr.refresh(buf, cursor)
+			}
 		case 12:
 			// Ctrl+L clears the screen and keeps what is being typed.
 			consoleMu.Lock()
@@ -335,11 +357,54 @@ func (lr *LineReader) editLine() (string, error) {
 					continue
 				}
 				if len(buf) > 0 {
+					// Cleared, not lost: Ctrl+Z brings it back.
+					lr.lastCleared = append(lr.lastCleared[:0], buf...)
 					buf, cursor = nil, 0
+					consoleMu.Lock()
+					hintText = "已清空，Ctrl+Z 恢复"
+					consoleMu.Unlock()
 					lr.redraw(buf, cursor)
 					continue
 				}
+				if !lr.taskRunningLocked() {
+					// Idle: nothing to interrupt, unless a confirmation box
+					// a command left is waiting; Esc cancels that one.
+					if promptWaiting() {
+						consoleMu.Lock()
+						lr.eraseLineLocked()
+						consoleMu.Unlock()
+						return "", ErrEscape
+					}
+					continue
+				}
+				// Interrupting a task is easy to do by accident on an empty
+				// line (an arrow key's escape split across reads, a stray
+				// Esc): the first press only arms, the second within the
+				// window interrupts. Ctrl+C still interrupts at once.
+				now := time.Now()
+				if now.Sub(lr.escArmedAt) > escConfirmWindow {
+					lr.escArmedAt = now
+					consoleMu.Lock()
+					hintText = escArmHint
+					consoleMu.Unlock()
+					lr.redraw(buf, cursor)
+					// The hint leaves with the window; it used to stay until
+					// the next submitted line.
+					time.AfterFunc(escConfirmWindow, func() {
+						consoleMu.Lock()
+						defer consoleMu.Unlock()
+						if hintText == escArmHint && time.Since(lr.escArmedAt) >= escConfirmWindow {
+							clearHintLocked()
+							if activeReader == lr && lr.reading {
+								lr.redrawLocked(lr.renderBuf, lr.renderCursor)
+							}
+						}
+					})
+					continue
+				}
+				lr.escArmedAt = time.Time{}
 				consoleMu.Lock()
+				clearHintLocked()
 				lr.eraseLineLocked()
 				consoleMu.Unlock()
 				return "", ErrEscape
@@ -372,11 +437,20 @@ func (lr *LineReader) editLine() (string, error) {
 	}
 }
 
+// taskRunningLocked reports whether the front end told the editor a task is
+// running (SetInteractionState) or output is streaming.
+func (lr *LineReader) taskRunningLocked() bool {
+	consoleMu.Lock()
+	defer consoleMu.Unlock()
+	return streamingActive || lr.interactionState == "执行中"
+}
+
 // submit ends the line: erases the editor, echoes the line into the
 // transcript, records it in the history and returns it.
 func (lr *LineReader) submit(buf []rune) string {
 	line := string(buf)
 	consoleMu.Lock()
+	clearHintLocked()
 	lr.choices, lr.choiceSearch = nil, false
 	lr.eraseLineLocked()
 	// 关键点：在按下回车后，先把用户输入的内容打印到终端，使之成为历史可见内容。

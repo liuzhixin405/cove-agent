@@ -64,11 +64,12 @@ const keybindingHelp = `输入快捷键
   Ctrl+W / Alt+⌫   删除前一个词（输入为空时 Alt+⌫ 移除最后一个附件）
   Tab              补全命令、参数、@路径；输入为空时 Tab / Shift+Tab 切换 Agent 面板焦点
   Alt+M            展开/收起 Agent 面板          Alt+V   粘贴剪贴板图片（Windows）
-  Esc              清空输入；输入为空时中断当前任务（COVE_ESC_INTERRUPT=0 关闭）
+  Esc              清空输入（Ctrl+Z 恢复）；输入为空且任务运行中时 2 秒内连按两次中断任务（COVE_ESC_INTERRUPT=0 关闭）
   Ctrl+C           中断当前任务  Ctrl+D              空行时退出
-  Ctrl+L           清屏
-授权/上限/提问提示：直接按选项键（y a p n、c s、1-9）即可，无需回车
-工具输出：标题后的 #N 可用 /x N 展开，/x 展开最近一个，/x N all 显示全部`
+  Ctrl+L           清屏          Ctrl+Z              恢复被 Esc 清空的输入
+授权/上限/提问提示：直接按选项键（y a p n、c s、1-9）即可，无需回车；输入 e 并回车可再输入一句拒绝理由
+工具输出：标题后的 #N 可用 /x N 展开，/x 展开最近一个，/x N all 显示全部
+命令列表：/help；/help <命令> 查看单个命令的用法`
 
 // expandDefaultLines is how much of an output /x shows without "all".
 const expandDefaultLines = 200

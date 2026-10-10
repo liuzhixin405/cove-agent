@@ -8,7 +8,7 @@ import (
 	"github.com/liuzhixin405/cove-agent/internal/engine"
 )
 
-func handleSessionCommand(input string, eng *engine.Engine, historyPickPending *bool) bool {
+func handleSessionCommand(input string, eng *engine.Engine, historyPickPending *bool, ask func(string, int, func())) bool {
 	switch {
 	case strings.HasPrefix(input, "/export"):
 		handleExport(input, eng)
@@ -34,7 +34,7 @@ func handleSessionCommand(input string, eng *engine.Engine, historyPickPending *
 			return true
 		}
 		if all, confirm, ok := parseHistoryClear(histID); ok {
-			handleHistoryClear(eng, all, confirm)
+			handleHistoryClear(eng, all, confirm, ask)
 			*historyPickPending = false
 			return true
 		}

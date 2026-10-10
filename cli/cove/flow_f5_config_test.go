@@ -128,7 +128,7 @@ func TestFlowF5_ConfigProfileTrust(t *testing.T) {
 	// profileKeys are the fields a saved profile may hold (config.Profile).
 	profileKeys := map[string]bool{
 		"model": true, "model_fast": true, "provider": true, "permission_mode": true,
-		"max_budget_usd": true, "thinking_tokens": true, "debug": true, "verbose": true,
+		"max_budget_usd": true, "debug": true, "verbose": true,
 		"system_prompt": true, "max_iterations": true, "max_turn_minutes": true,
 		"subagent_max_iterations": true, "max_sessions": true,
 	}

@@ -1,7 +1,7 @@
 # Opt-in active CLI supervision (protocol v1)
 
-This package is not the standalone gomobile provider. It controls an active
-interactive CLI task runner through an owning-thread queue. It starts nothing
+This package controls an active interactive CLI task runner through an
+owning-thread queue. It starts nothing
 automatically, reads no arbitrary files, exposes no shell endpoint, and never
 logs credentials or model transcripts. No additional dependencies are needed.
 
@@ -174,7 +174,7 @@ change those resources. The engine's bool permission API does not expose the
 task context to the callback; cancellation uses its existing local relay and
 remote cancellation hook, with TTL bounding unattended pending approval.
 
-Unsupported in v1: headless/gomobile
+Unsupported in v1: headless or native mobile
 control, multiple simultaneous approvals, arbitrary commands/file access,
 remote queue resume, automatic action retries, event-history replay, browser
 UI, exposure without authenticated tunnel/TLS, undo of tool side effects.

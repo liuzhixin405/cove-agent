@@ -46,7 +46,7 @@ func providerAPIConfig(provider config.ProviderConfig) api.ProviderConfig {
 
 // bootstrapApp builds the session. interactive says whether someone can
 // answer the question tool (main's mode branch: not -p, interactive shell).
-func bootstrapApp(debugMode bool, profileName, recordDir, replayDir string, interactive bool) (*appBootstrap, error) {
+func bootstrapApp(debugMode bool, profileName string, interactive bool) (*appBootstrap, error) {
 	phase := startupPhases()
 	defer phase("total")
 	cfg, err := config.LoadWithProfile(profileName)
@@ -134,8 +134,6 @@ func bootstrapApp(debugMode bool, profileName, recordDir, replayDir string, inte
 		PermissionMode:     cfg.PermissionMode, // engine.New falls back to default for an invalid mode
 		MaxBudget:          cfg.MaxBudgetUsd,
 		Debug:              debugMode || cfg.Debug,
-		RecordingDir:       recordDir,
-		ReplayDir:          replayDir,
 		Tools:              toolReg.All(),
 		Provider:           providerAPIConfig(pc),
 		MemoryStore:        memStore,

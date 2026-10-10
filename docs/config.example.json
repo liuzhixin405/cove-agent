@@ -1,7 +1,7 @@
 ﻿{
     "active_profile": "deepseek",
     "model": "deepseek-v4-pro",
-    "model_fast": "deepseek-v4-flash",
+    "model_fast": "deepseek-flash",
     "provider": {
         "name": "deepseek",
         "api_key": "sk-your-deepseek-api-key-here",
@@ -10,19 +10,17 @@
     },
     "permission_mode": "default",
     "max_budget_usd": 10,
-    "thinking_tokens": 16000,
     "system_prompt": "你是 Cove，一个 AI 编程助手。核心职责：使用工具完成任务，而非描述任务。",
     "profiles": {
         "deepseek": {
             "model": "deepseek-v4-pro",
-            "model_fast": "deepseek-v4-flash",
+            "model_fast": "deepseek-flash",
             "provider": {
                 "name": "deepseek",
                 "api_key": "sk-your-deepseek-api-key-here",
                 "base_url": "https://api.deepseek.com/v1",
                 "image_files_api": false
             },
-            "thinking_tokens": 16000,
             "max_budget_usd": 10
         },
         "local": {
@@ -43,7 +41,6 @@
                 "api_key": "AIzaSy-your-gemini-api-key-here",
                 "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"
             },
-            "thinking_tokens": 16000,
             "max_budget_usd": 10
         }
     },

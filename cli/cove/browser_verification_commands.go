@@ -38,7 +38,7 @@ func (fe *frontend) browserVerificationCommands() []command.Command {
 func (c *BrowserVerificationCommand) Name() string      { return "browser-verify" }
 func (c *BrowserVerificationCommand) Aliases() []string { return nil }
 func (c *BrowserVerificationCommand) Description() string {
-	return "Run guarded DOM assertions and persist desktop/mobile screenshot evidence"
+	return "运行受控的 DOM 断言并保存桌面/移动端截图证据"
 }
 func (c *BrowserVerificationCommand) Category() string   { return catTasks }
 func (c *BrowserVerificationCommand) ArgHints() []string { return []string{"results", "artifacts"} }
@@ -48,13 +48,13 @@ func (c *BrowserVerificationCommand) MutatesEngine(args []string) bool {
 func (c *BrowserVerificationCommand) Help() string {
 	return `/browser-verify <workflow.json> [--allow-local]
 /browser-verify results
-/browser-verify artifacts <run-id>
-Actions: navigate, click, fill (fixture key), assert_text (contains), assert_visible, assert_url (exact).
-Explicit assertions required. Fixtures must be non-secret. Password filling and sensitive screenshots are rejected.
---allow-local is a trusted user opt-in for loopback only, never a workflow JSON setting.
-Requires -tags chromedp and installed Chrome/Chromium; otherwise status is unverified.
-Reports omit fixture values, URLs and DOM text. Desktop 1280x800/mobile 390x844 replay independently.
-Executed outcomes are machine JSON pass/fail/unverified; report.json and PNG artifacts are retained under the config directory.`
+/browser-verify artifacts <运行ID>
+动作：navigate、click、fill（fixture 键）、assert_text（包含）、assert_visible、assert_url（精确）。
+必须有显式断言；fixture 不得含密钥；拒绝填写密码与敏感截图。
+--allow-local 是用户显式的本机回环地址许可，不能写在 workflow JSON 里。
+需要用 -tags chromedp 构建并安装 Chrome/Chromium，否则状态为 unverified。
+报告不含 fixture 值、URL 与 DOM 文本；桌面 1280x800 与移动 390x844 各自独立回放。
+结果为机器可读的 JSON（pass/fail/unverified）；report.json 与 PNG 保存在配置目录下。`
 }
 
 func (c *BrowserVerificationCommand) Execute(ctx context.Context, input command.Input) (command.Output, error) {
@@ -66,17 +66,17 @@ func (c *BrowserVerificationCommand) Execute(ctx context.Context, input command.
 	switch args[0] {
 	case "results":
 		if len(args) != 1 {
-			return command.Output{}, errors.New("usage: /browser-verify results")
+			return command.Output{}, errors.New("用法: /browser-verify results")
 		}
 	case "artifacts":
 		if len(args) != 2 || !validBrowserRunID(args[1]) {
-			return command.Output{}, errors.New("usage: /browser-verify artifacts <run-id>")
+			return command.Output{}, errors.New("用法: /browser-verify artifacts <运行ID>")
 		}
 	default:
 		if len(args) == 2 && args[1] == "--allow-local" {
 			allowLocal = true
 		} else if len(args) != 1 {
-			return command.Output{}, errors.New("usage: /browser-verify <workflow.json> [--allow-local]")
+			return command.Output{}, errors.New("用法: /browser-verify <workflow.json> [--allow-local]")
 		}
 	}
 	directory := c.options.EvidenceDir
@@ -118,12 +118,12 @@ func (c *BrowserVerificationCommand) Execute(ctx context.Context, input command.
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return command.Output{}, errors.New("cannot open browser workflow")
+		return command.Output{}, errors.New("无法打开浏览器工作流文件")
 	}
 	defer file.Close()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() || info.Size() > browser.MaxWorkflowBytes {
-		return command.Output{}, errors.New("browser workflow must be a bounded regular JSON file")
+		return command.Output{}, errors.New("浏览器工作流必须是大小受限的普通 JSON 文件")
 	}
 	workflow, err := browser.DecodeWorkflow(file)
 	if err != nil {
@@ -178,7 +178,7 @@ func validBrowserRunID(id string) bool {
 func readBrowserReport(directory, id string) (browser.Report, error) {
 	var report browser.Report
 	if !validBrowserRunID(id) {
-		return report, errors.New("invalid browser run id")
+		return report, errors.New("浏览器运行 ID 无效")
 	}
 	root, err := os.OpenRoot(directory)
 	if err != nil {
@@ -192,10 +192,10 @@ func readBrowserReport(directory, id string) (browser.Report, error) {
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, browser.MaxWorkflowBytes+1))
 	if err != nil || len(data) > browser.MaxWorkflowBytes {
-		return report, errors.New("browser report exceeds size limit")
+		return report, errors.New("浏览器报告超过大小限制")
 	}
 	if err := json.Unmarshal(data, &report); err != nil {
-		return report, errors.New("invalid browser report")
+		return report, errors.New("浏览器报告格式无效")
 	}
 	return report, nil
 }

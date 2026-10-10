@@ -41,7 +41,7 @@ func TestSnapshotProfileLeavesOutProjectValues(t *testing.T) {
 		t.Fatalf("profile provider = %+v, want the user's", p.Provider)
 	}
 	if p.Model != "user-model" || p.ModelFast != "user-model" || p.PermissionMode != "default" ||
-		p.SystemPrompt != "mine" || p.MaxBudgetUsd != 5 || p.ThinkingTokens != 20000 {
+		p.SystemPrompt != "mine" || p.MaxBudgetUsd != 5 {
 		t.Fatalf("project values saved into the profile: %+v", p)
 	}
 

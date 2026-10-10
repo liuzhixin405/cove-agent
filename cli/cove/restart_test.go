@@ -23,7 +23,6 @@ func TestRestartArgs(t *testing.T) {
 		{[]string{"--tui", "-d"}, "s", []string{"--tui", "-d", "-r", "s"}},
 		// A replay restarted from its first recorded response would answer
 		// the next message with the recording's opening reply again.
-		{[]string{"--replay", "rec", "--no-auto"}, "s", []string{"--no-auto", "-r", "s"}},
 	} {
 		if got := restartArgs(tc.orig, tc.sessionID); !reflect.DeepEqual(got, tc.want) {
 			t.Errorf("restartArgs(%q, %q) = %q, want %q", tc.orig, tc.sessionID, got, tc.want)

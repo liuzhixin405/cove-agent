@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/binary"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -89,6 +90,47 @@ func TestUserManualMemoryAddSyntaxAndTaskModeNotes(t *testing.T) {
 	}
 	if !strings.Contains(manual, "`/stop` 或 `/cancel` | 取消当前任务（TUI）；headless 无后台任务可取消") {
 		t.Fatalf("docs/USER_MANUAL.md must describe /stop /cancel TUI/headless mode difference")
+	}
+}
+
+func TestCurrentDocumentationLocalLinksExist(t *testing.T) {
+	root := repoRootFromThisFile(t)
+	paths := []string{"README.md", "CONTRIBUTING.md", "SECURITY.md", "internal/remote/README.md"}
+	err := filepath.WalkDir(filepath.Join(root, "docs"), func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() && entry.Name() == "superpowers" {
+			return filepath.SkipDir
+		}
+		if !entry.IsDir() && strings.HasSuffix(path, ".md") {
+			relative, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			paths = append(paths, relative)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	links := regexp.MustCompile(`\[[^\]\n]*\]\(([^\s)]+)\)`)
+	for _, relative := range paths {
+		path := filepath.Join(root, relative)
+		for _, match := range links.FindAllStringSubmatch(readTextFile(t, path), -1) {
+			target, err := url.Parse(match[1])
+			if err != nil {
+				t.Errorf("%s: invalid link %q: %v", relative, match[1], err)
+				continue
+			}
+			if target.IsAbs() || target.Host != "" || target.Path == "" {
+				continue
+			}
+			if _, err := os.Stat(filepath.Join(filepath.Dir(path), filepath.FromSlash(target.Path))); err != nil {
+				t.Errorf("%s: local link %q: %v", relative, match[1], err)
+			}
+		}
 	}
 }
 

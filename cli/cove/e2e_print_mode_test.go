@@ -18,7 +18,7 @@ func TestE2E_PrintModeKeepsStdoutForTheAnswer(t *testing.T) {
 	e2eHome(t, model)
 	resetE2EGlobals()
 	t.Cleanup(resetE2EGlobals)
-	app, err := bootstrapApp(false, "", "", "", false)
+	app, err := bootstrapApp(false, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

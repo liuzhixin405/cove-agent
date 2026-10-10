@@ -1,6 +1,38 @@
-﻿## [Unreleased]
+﻿## [12.3.0] - 2026-10-10
 
-## [12.2.0] - 2026-10-09
+### Added（交互改进）
+- `/` 命令候选按主命令合并别名：clear/cls、exit/quit、stop/cancel、keys/shortcuts、x/expand、skill/skills、diagnose/diag 不再重复占行；保留别名前缀、子命令补全和执行兼容性。
+- 授权提示新增 `[e] 拒绝并说明`：输入 e 回车后再输一句理由，理由随工具结果回给模型（`user rejected: <理由>`）；整行 `n <理由>` 同样可用。
+- 退出计划模式的确认框渲染模型写的计划摘要（Markdown，摘要 80 行、列表 40 项上限）与文件/决策/验收列表，选项为执行计划 / 修改计划 / 继续规划。
+- Esc 清空输入后可用 Ctrl+Z 恢复；任务运行中空输入行按 Esc 需 2 秒内连按两次才中断。状态行支持临时提示。
+- `/undo`、`/undo files`、`/history clear` 在交互模式统一为预览加 y/n 确认框（非阻塞，任务运行中拒绝弹出）；headless 保留原有 `/undo apply <预览ID>` 与 `confirm` 字样。
+- `/help <命令>` 显示单个命令的用法、别名与子命令；命令别名进入补全；/help 与 /keys 互链；每个命令都有分组。
+- 竞跑结束与维护任务新结果主动通知（空闲立即打印，回合中延后到回合结束）。
+- 缺 API key 启动时进入三步配置向导（选供应商、掩码输入 key、测试请求验证后保存），新增 `/setup`；`/api-key` 不带参数时掩码输入；`COVE_NO_SETUP=1` 关闭自动进入。
+- 拆任务引导改为教模型用 `execute_plan parallel=true` 与 `depends:`；并行子任务写同一文件时第二个被拒绝并告知归属任务，不再静默覆盖。
+- `race`、`automations`、`inbox`、`remote`、`browser-verify` 的面向用户文案中文化（JSON 字段值不变）。
+- `draw_image` 改为按需提供：只有对话出现画图/图片/PNG/图标/占位图等意图，或本会话已调用过它，才进入模型的工具表；不设开关。它没有文字原语，流程图请走 `write` 写 SVG/Mermaid。
+- 本地业务流测试台：`COVE_TESTPAGE=1 go test ./cli/cove -run TestPage -timeout 0` 起一个网页，选场景、输入（或随机抽取）后对真实 REPL 运行，页面显示终端画面与每项检查结果。
+
+### Fixed（交互改进）
+- `/race show` 在报告被原子替换的瞬间读到“文件不存在”：目录存在时短暂重试（TestRaceCommandOperatorPath 抖动）。远程监督 e2e 的 expiry 用例等已发布的快照变为空闲后再取 scope（409 抖动）。
+- 评审延后项：维护任务结果监视器跟随 `/cd` 与后加的任务；掩码输入期间暂存后台通知，输入结束再打印；原始模式进入失败走回退时不再让选择面板永久失效；"再按一次 Esc"提示过 2 秒窗口自动消失。
+- 空项目里写入第一个文件后 `/undo` 失败（`pathspec '.' did not match any file(s) known to git`）：目标检查点的树为空时跳过 checkout，只执行删除。由测试台的 `/undo` 场景发现。
+- 维护任务 worker 内的嵌套命令、`automation` 等多处英文错误文案改为中文。
+
+### Docs（与代码对账）
+- 清理文档入口，区分现行文档与按日期保留的历史方案；补充同步会话笔记与长期记忆的边界，修正默认 Dream 退出触发和回合后后台流程。新增现行文档本地链接一致性测试。
+- README、USER_MANUAL、COMPARISON、需求说明书、CONTRIBUTING、SECURITY、docs/README、workflows 按代码逐条修正：模型章节的 `model_fast` 默认值与视觉模型回退表、权限表的 `sleep`/`question`、子命令与别名枚举、环境变量专章、记忆合并与 `.last-extraction.json` 位置、README 快速启动示例与被竖线截断的六行表格、需求说明书 FR-09/11/18/20 的夸大描述、SECURITY 的项目名与版本、CONTRIBUTING 的目录树。旧开发指南已删除，架构入口以 CONTRIBUTING 和源码为准。
+
+### Removed
+- 删除已完成使命的 `docs/包与功能精简清单.md` 与 `docs/功能精简分析.md`；删除结果归入本更新日志，现行能力与 notes 保留理由归入使用手册。
+- 删除 `--record`、`--replay`、`/record` 与 `COVE_RECORD_DIR`，移除引擎录制及假响应回放分支；保留 `/replay` 会话审阅和始终开启的 `trace.jsonl` 日志。
+- 删除零引用的 `mobile/` 与 `mobile/mobileapi`，同步移除移动端文档声明；保留独立的 `/remote` CLI 监督工作流。
+- 删除无人引用的 `test_e2e_steer.py`、`mock_openai_compat_server.py`、`test_stability.ps1`、`release_build.py` 及其配套发布测试；保留 `scripts/check.ps1`。
+- 删除无效的 `thinking_tokens` 配置字段、默认值、profile 覆盖与显示；旧配置中的键仍按未知字段兼容加载。
+- 删除 `docs/guide/COVE_COMPLETE_GUIDE.md`、`DEVELOPMENT_DESIGN.md`、`DEVELOPMENT_GUIDE.md`：审计出 39 处与代码脱节（引用不存在的 NextSpeaker/ModelFallback/PolicyEngine/internal/tui，结构体示例与源码不符，主循环描述停在 turn_loop.go 拆分前），且没有一致性测试兜底。架构入口改为 CONTRIBUTING 的目录树与源码注释。
+- 删除零引用的 `internal/state`（CHANGELOG 已列为待删）与 `internal/session/task_runner.go`（11.5.0 已声明删除但文件仍在）。
+- 删除 `internal/telemetry` 目录（776 行，3 个文件）。11.1.0 的 CHANGELOG 已声明删除并移除了配置字段，但包本身一直留在源码树里，全库零引用。
 
 ### Security（第四轮审查）
 - **auto 模式自动放行 curl/wget GET**：URL 或请求头里的 `$ANTHROPIC_API_KEY` 会被 shell 展开，一条 GET 就能把密钥发出去；手册的
@@ -115,65 +147,6 @@
 - `/cd` 不切换记忆存储与 dream 整理的项目根（二者仍指向启动时的项目，退出时的 worker 则按当前目录整理）；手册已说明 `/cd`
   只重载 policies.json。
 - `mobile/mobileapi` 目录仍在源码树中编译，属死代码；是否删除待定。
-
-## [12.1.0] - 2026-10-08
-
-### Added
-- **四类显式工作流（首版，默认全部关闭）**：命令注册在交互 REPL 与 headless 的公共前端，
-  结果存配置目录、不自动写入原项目；JSON 示例、调度入口与安全边界见
-  [工作流指南](docs/guide/workflows.md)。Git worktree 不是 OS/网络/进程沙箱。
-  - **维护任务与结果收件箱**：`/automations list|add|run|tick|event|remove` 定义定时或事件触发的
-    维护任务，`/inbox list|show|patch|review` 审阅结果。每次尝试在新建的 detached worktree 中以
-    committed HEAD 为输入，事件按项目/任务/occurrence key 去重，失败或崩溃不自动重放；收件箱保留基线、
-    命令 argv、退出码、输出、补丁与审阅状态，`accepted` 只记录决定，不应用、合并或推送。
-  - **浏览器实操验收**：`/browser-verify <spec.json>|results|artifacts` 在 Chrome/Chromium
-    （`go build -tags chromedp`）执行 DOM 断言，桌面 1280×800 与移动 390×844 独立重放，保留 PNG、
-    尺寸与 SHA256 并接入 `/acceptance`；无标签或 Chrome 不可用时状态为未验证，不会假绿。
-  - **双方案竞跑**：`/race run|show|cancel|select` 在两个独立 worktree 用同一显式 argv 验证器跑两个
-    方案，模型自评不能决定通过；仅通过候选可显式 `select`，应用前复核项目/分支/commit/干净状态/
-    验证器一致性与补丁哈希，退出时取消 worker 并有界清理 worktree。
-  - **跨设备监督**：`/remote start|status|stop` 起认证远程监督 API（默认随机 loopback 端口、Bearer
-    认证、严格 Host/Origin 校验），可查看任务摘要、排队与引导状态，发送 steer/cancel/pause，并对当前
-    待批工具做一次性 approve/deny；请求 ID 防重放，审批绑定工具、输入摘要与有效期、单次消费，本地
-    答案、取消、状态漂移或停服即撤销 pending。
-  - 独立入口 `cove --automation <action> <项目>` 与 `cove --automation-inbox <action> <项目>` 必须在
-    首位，由 OS 调度器显式调用，不默认启动守护进程。
-- **`/acceptance` 任务验收证据**：展示当前会话最新任务的验收条件、命令退出码、耗时与输出尾部；报告
-  原子保存、切回原会话可查看，每个会话只保留最新一份，后续工具写入或回滚使旧通过证据失效。
-- **持久化任务队列**：运行中任务与待执行消息原子保存到配置目录 `task-queues`，重启仅提示、不自动
-  重放；`/tasks saved|restore|remove|move|retry|skip|run` 显式恢复与管理。存储失败即暂停队列、不启动
-  后续任务并显示错误；崩溃或退出前可能已产生副作用的当前任务标记为“状态不明”，需人工 `/tasks retry`
-  或 `/tasks skip` 处理。
-- **选择性文件回滚**：`/undo files <检查点> <文件>...` 预览（不改工作区）、`/undo apply <预览ID>` 确认、
-  `/undo cancel` 放弃预览。确认令牌绑定本次预览、项目与会话并有有效期；确认前复核全部选中文件漂移，
-  不一致则整批拒绝；只恢复选中文件，未选中文件不动，执行前自动备份。
-- **记忆溯源**：`/memory source <名称>` 查看当前正文版本的来源会话、项目、消息位置、输入 SHA256 与
-  依据片段；手动 `/memory add` 与自动提取都会记录来源，元数据存记忆目录 `.provenance` 隐藏子目录，
-  按记忆名与正文 SHA256 绑定，不改正文、不计入记忆提示、不注入模型上下文。
-- **`verify` 子智能体与 `regression_verify` 工具**：独立反向回归验证（首版支持 Go）——用修复前检查点
-  的旧源码构建 Go overlay，要求同一测试在旧实现上真实失败、在当前实现上通过；子智能体使用独立对话
-  上下文，只获得代码阅读工具与该工具，不能改文件、写测试、执行通用 Shell、联网或再派生子智能体；
-  仅当旧实现退出码 1 且出现真正的具名测试失败、当前实现退出码 0 才记为通过，证据接入 `/acceptance`
-  并在后续文件修改或回滚时失效。
-
-### Fixed
-- **长响应体未做上限检查**：`internal/api` 用 `LimitReader` 截断后不再校验，超过 `maxResponseBytes`
-  的响应被静默截成无效 JSON；现在多读一字节即报错。
-- **取消后的工具调用与重试不响应 context**：工具执行的短暂重试 sleep、并行调度取信号量，以及
-  `edit`/`write` 的入口，此前在 `ctx.Done()` 后仍可能继续跑或睡满；现在这些点都检查取消并立即返回。
-- **`/continue` 在队列暂停时**：队列因状态不明暂停时不再直接重试，改为提示先 `/tasks retry` 或
-  `/tasks skip`。
-- **记忆检索索引重复构建**：BM25 每次搜索都重建、按 ID 线性删除并整表重算平均长度；改为按 ID 定位
-  增量更新并缓存索引、在条目变化时失效，索引构建只做一次。
-- **Windows 原子写入保留属性**：新增 `WriteFileRoot` 走 `os.Root`，root 内替换同样保留隐藏属性与
-  NTFS 备用数据流，相对路径不能逃出 root。
-- **gate 未执行时记录原因**：完成校验因“本轮无文件变更”或“项目未信任”而未执行时，验收报告单独
-  注明，不再与“未验证”混同。
-
-### Changed
-- 前端新增统一的工作流关闭钩子：退出或 headless 结束时停止 remote 与 race，并清理竞跑产生的 worktree。
-- 记忆检索新增可取消的 `SearchContext` 并在各阶段响应 `ctx`；`Store.All` 抽出 `allLocked` 复用缓存。
-- 授权框中新增 `AskSpec.External` 外部答案通道，供远程一次性审批在本机 REPL 线程复核后生效。
 
 ## [12.0.0] - 2026-09-30
 

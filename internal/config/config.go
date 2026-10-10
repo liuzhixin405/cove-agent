@@ -52,7 +52,6 @@ type Profile struct {
 	Provider       *ProviderConfig `json:"provider,omitempty"`
 	PermissionMode string          `json:"permission_mode,omitempty"`
 	MaxBudgetUsd   float64         `json:"max_budget_usd,omitempty"`
-	ThinkingTokens int             `json:"thinking_tokens,omitempty"`
 	// Debug and Verbose are pointers so "absent" is distinguishable from
 	// "false". As plain bools, applyProfile could only ever turn them ON
 	// (`if prof.Debug { cfg.Debug = true }`), so a profile written specifically
@@ -155,7 +154,6 @@ type Config struct {
 	Provider       ProviderConfig `json:"provider"`
 	PermissionMode string         `json:"permission_mode"`
 	MaxBudgetUsd   float64        `json:"max_budget_usd"`
-	ThinkingTokens int            `json:"thinking_tokens"`
 	// ContextWindow is the context window of Model in tokens, for servers
 	// cove cannot recognise by model name (a local llama.cpp with -c 16384).
 	// It sizes compaction; 0 keeps the name-based estimate. The E2008
@@ -373,7 +371,6 @@ func DefaultConfig() *Config {
 		Model:          "claude-sonnet-4-20250514",
 		PermissionMode: "default",
 		MaxBudgetUsd:   10,
-		ThinkingTokens: 16000,
 		MaxSessions:    DefaultMaxSessions,
 
 		MaxIterations:         DefaultMaxIterations,
@@ -640,8 +637,8 @@ func loadProjectOverride(cfg *Config) error {
 	if override.WebSearch != nil && sensitive("web_search") {
 		cfg.WebSearch = override.WebSearch
 	}
-	// Provider and ThinkingTokens were silently dropped here, so a project that
-	// pinned its own endpoint or thinking budget in .cove.json was ignored with
+	// Provider was silently dropped here, so a project that
+	// pinned its own endpoint in .cove.json was ignored with
 	// no message — the user's setting simply had no effect. The provider is
 	// sensitive: a base_url from the project received the user's global API
 	// key, and a name or key from it redirects the session's traffic.
@@ -657,9 +654,6 @@ func loadProjectOverride(cfg *Config) error {
 	if override.Provider.ImageFilesAPI != nil && sensitive("provider.image_files_api") {
 		value := *override.Provider.ImageFilesAPI
 		cfg.Provider.ImageFilesAPI = &value
-	}
-	if override.ThinkingTokens > 0 {
-		cfg.ThinkingTokens = override.ThinkingTokens
 	}
 	// The per-turn limits and max_sessions were only read from config.json.
 	if override.MaxIterations > 0 {
@@ -719,9 +713,6 @@ func applyProfile(cfg *Config, prof *Profile) {
 	if prof.MaxBudgetUsd > 0 {
 		cfg.MaxBudgetUsd = prof.MaxBudgetUsd
 	}
-	if prof.ThinkingTokens > 0 {
-		cfg.ThinkingTokens = prof.ThinkingTokens
-	}
 	if prof.Debug != nil {
 		cfg.Debug = *prof.Debug
 	}
@@ -760,9 +751,6 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.PermissionMode == "" {
 		cfg.PermissionMode = "default"
-	}
-	if cfg.ThinkingTokens < 1024 {
-		cfg.ThinkingTokens = 16000
 	}
 	if cfg.MaxSessions == 0 {
 		cfg.MaxSessions = DefaultMaxSessions
@@ -945,7 +933,6 @@ func syncAppliedProfile(cfg *Config, view map[string]json.RawMessage) (owned []s
 	})
 	own("permission_mode", func() bool { return prof.PermissionMode != "" }, func() { prof.PermissionMode = cfg.PermissionMode })
 	own("max_budget_usd", func() bool { return prof.MaxBudgetUsd > 0 }, func() { prof.MaxBudgetUsd = cfg.MaxBudgetUsd })
-	own("thinking_tokens", func() bool { return prof.ThinkingTokens > 0 }, func() { prof.ThinkingTokens = cfg.ThinkingTokens })
 	own("debug", func() bool { return prof.Debug != nil }, func() { v := cfg.Debug; prof.Debug = &v })
 	own("verbose", func() bool { return prof.Verbose != nil }, func() { v := cfg.Verbose; prof.Verbose = &v })
 	own("system_prompt", func() bool { return prof.SystemPrompt != "" }, func() { prof.SystemPrompt = cfg.SystemPrompt })
@@ -1122,7 +1109,6 @@ func profileOwnedKeys(prof *Profile) []string {
 	add("provider", prof.Provider != nil)
 	add("permission_mode", prof.PermissionMode != "")
 	add("max_budget_usd", prof.MaxBudgetUsd > 0)
-	add("thinking_tokens", prof.ThinkingTokens > 0)
 	add("debug", prof.Debug != nil)
 	add("verbose", prof.Verbose != nil)
 	add("system_prompt", prof.SystemPrompt != "")

@@ -584,3 +584,79 @@ func TestBlockingDepIgnoresDoneAndRunning(t *testing.T) {
 		}
 	}
 }
+
+// Two sibling tasks of a parallel plan writing the same file: the second
+// writer is refused and told who owns the file. The sub-agents share one
+// working tree, so the later write used to win silently. Serial plans and
+// different files are not restricted.
+func TestExecuteParallelRefusesSecondWriterOfSameFile(t *testing.T) {
+	run := func(t *testing.T, parallel bool, paths map[string]string) map[string]string {
+		t.Helper()
+		var mu sync.Mutex
+		results := map[string]string{}
+		p := &scriptedProvider{}
+		p.reply = func(prompt string) (string, error) { return "done", nil }
+		pe, _ := newExecutor(t, p, "a", "b")
+		// The executor stands in for the engine's: it claims the write path
+		// for the task in ctx, as engine.go does before executeTool.
+		pe.delegator.SetExecutor(func(ctx context.Context, tc api.ToolCall) string {
+			return "unused"
+		})
+		// Drive the claim directly through the contexts runTask builds: the
+		// scripted provider never issues tool calls, so the claim table is
+		// exercised with the same ctx the executor would receive.
+		var ctxs []context.Context
+		var ctxMu sync.Mutex
+		pe.onTaskContext = func(ctx context.Context) {
+			ctxMu.Lock()
+			ctxs = append(ctxs, ctx)
+			ctxMu.Unlock()
+		}
+		plan := &Plan{ID: "p", Parallel: parallel, Tasks: []*Task{
+			{ID: "a", Description: "a", Status: "pending"},
+			{ID: "b", Description: "b", Status: "pending"},
+		}}
+		if res := pe.Execute(context.Background(), plan); !res.Success {
+			t.Fatalf("Execute failed: %+v", statusByID(res))
+		}
+		ctxMu.Lock()
+		defer ctxMu.Unlock()
+		for _, ctx := range ctxs {
+			id := taskIDFrom(ctx)
+			ok, owner := ClaimPath(ctx, paths[id])
+			mu.Lock()
+			if ok {
+				results[id] = "ok"
+			} else {
+				results[id] = "refused by " + owner
+			}
+			mu.Unlock()
+		}
+		return results
+	}
+	same := map[string]string{"a": "x.go", "b": "x.go"}
+	got := run(t, true, same)
+	refused := 0
+	for id, r := range got {
+		if strings.HasPrefix(r, "refused by ") {
+			refused++
+			other := map[string]string{"a": "b", "b": "a"}[id]
+			if r != "refused by "+other {
+				t.Fatalf("%s: %s", id, r)
+			}
+		}
+	}
+	if refused != 1 {
+		t.Fatalf("parallel same file: want exactly one refusal, got %v", got)
+	}
+	if got := run(t, true, map[string]string{"a": "x.go", "b": "y.go"}); got["a"] != "ok" || got["b"] != "ok" {
+		t.Fatalf("parallel different files: %v", got)
+	}
+	// Serial plans carry no task in ctx (nothing to coordinate), so every
+	// claim through their contexts is open.
+	for id, r := range run(t, false, same) {
+		if r != "ok" {
+			t.Fatalf("serial plan must not claim: %q -> %s", id, r)
+		}
+	}
+}

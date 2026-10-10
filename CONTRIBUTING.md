@@ -71,11 +71,12 @@ cove/
 │   ├── repl_config_commands.go  # 配置类 REPL 命令
 │   ├── repl_help.go    # 帮助和诊断信息
 │   ├── repl_history.go # 会话历史管理
-│   ├── repl_tui.go     # TUI 交互桥接
+│   ├── repl_loop.go    # 交互式 REPL 主循环
+│   ├── interactive.go  # 交互终端判定
 │   ├── headless.go     # 非交互前端
 │   └── repl_session_commands.go  # 会话命令
 ├── internal/
-│   ├── agent/          # Agent 运行器和子智能体管理
+│   ├── automation/     # 维护任务（worktree 隔离、事件去重）
 │   ├── api/            # AI 提供商接口（Anthropic/OpenAI/DeepSeek 等）
 │   ├── browser/        # Headless Chrome 浏览器集成 (chromedp)
 │   ├── checkpoint/     # Git 检查点管理
@@ -89,7 +90,10 @@ cove/
 │   ├── engine/         # 核心引擎（对话循环）
 │   ├── extract/        # 自动记忆提取
 │   ├── guardrail/      # 护栏（循环检测、断路器等）
-│   ├── session/        # 会话存储与 TaskRunner 队列
+│   ├── race/           # 双 worktree 竞跑
+│   ├── remote/         # 认证远程监督（HTTP）
+│   ├── render/         # Markdown/diff/工具块渲染
+│   ├── repomap/        # 符号级代码库地图
 │   ├── hooks/          # 事件钩子系统
 │   ├── log/            # 日志
 │   ├── mcp/            # MCP 协议客户端
@@ -102,19 +106,20 @@ cove/
 │   ├── repl/           # REPL 终端 UI
 │   ├── session/        # 会话管理
 │   ├── skills/         # 技能系统
-│   ├── state/          # 应用状态
+│   ├── safety/ safepath/ safeurl/  # 危险命令、路径与 URL 守卫
+│   ├── shell/          # shell 命令解析与只读判定
+│   ├── termui/ uiout/ textmode/ textutil/  # 终端输出与文本工具
+│   ├── workspace/ filelock/ fsatomic/ proctree/  # worktree、文件锁、原子写、进程树
 │   ├── token/          # Token 计数
 │   └── tool/           # 工具注册与实现 (20+ 工具)
-│       ├── advanced_tools.go  # 计划/任务/团队/Agent/Cron/Worktree 工具
+│       ├── advanced_tools_*.go  # 计划/任务/团队/Agent/Worktree 工具（按主题拆分）
 │       ├── extra_tools.go     # WebSearch/Question/TodoWrite 工具
 │       ├── browser_tools.go   # Headless 浏览器工具
 │       ├── skill_tools.go     # 技能工具
 │       ├── mcp_tool.go        # MCP 工具桥接
 │       └── ...
-├── mobile/             # CovePhone Android Go 引擎
 ├── docs/               # 文档（使用手册等）
-├── dist/               # 发布产物
-└── scripts/            # 构建/发布脚本
+└── scripts/            # 一键验证入口 check.ps1
 ```
 
 ### 代码风格
@@ -131,6 +136,16 @@ cove/
 - [ ] 添加了必要的测试
 - [ ] 更新了相关文档
 - [ ] 遵循 commit 规范
+
+## 业务流测试台
+
+单元测试之外，`cli/cove/testpage_test.go` 提供一个本地网页：
+
+```bash
+COVE_TESTPAGE=1 go test ./cli/cove -run TestPage -timeout 0
+```
+
+它复用 e2e 夹具（假模型按脚本应答、管道喂输入），左侧选场景，输入框填输入或点"随机输入"从场景候选里抽一个，运行后右侧显示真实终端输出（ANSI 还原）和每项检查的通过与否，顶部是通过数。场景定义在同一文件的 `tpScenarios`，每个场景是一个 Go 函数：起 REPL、喂输入、返回检查项。加场景就是加一个结构体。
 
 ## 许可证
 

@@ -44,8 +44,6 @@ type cliOptions struct {
 	attachments []string
 	resumeID    string
 	profile     string
-	recordDir   string
-	replayDir   string
 	// dreamWorkerDir is the sessions directory given to --dream-worker.
 	dreamWorkerDir string
 	// dreamProjectRoot is the hidden --dream-project <root> given before
@@ -66,7 +64,7 @@ var cliFlags = map[string]bool{
 	"--dump-system-prompt": true, "--no-auto": true, "-d": true, "--debug": true,
 	"-p": true, "--print": true, "--image": true, "--file": true,
 	"-r": true, "--resume": true, "--tui": true, "--no-tui": true,
-	"--profile": true, "--record": true, "--replay": true, "--max-turns": true,
+	"--profile": true, "--max-turns": true,
 }
 
 // parseCLIArgs parses os.Args[1:].
@@ -154,7 +152,7 @@ func parseCLIArgs(args []string) (cliOptions, error) {
 				return opts, fmt.Errorf("--max-turns 需要一个非负整数（0 表示不限制），收到 %q", v)
 			}
 			opts.maxTurns, opts.maxTurnsSet = n, true
-		case "--image", "--file", "-r", "--resume", "--profile", "--record", "--replay":
+		case "--image", "--file", "-r", "--resume", "--profile":
 			v, err := value(i)
 			if err != nil {
 				return opts, err
@@ -167,10 +165,6 @@ func parseCLIArgs(args []string) (cliOptions, error) {
 				opts.resumeID = v
 			case "--profile":
 				opts.profile = v
-			case "--record":
-				opts.recordDir = v
-			case "--replay":
-				opts.replayDir = v
 			}
 		default:
 			if strings.HasPrefix(arg, "-") && len(arg) > 1 {

@@ -20,6 +20,7 @@ import (
 	"github.com/liuzhixin405/cove-agent/internal/repl"
 	"github.com/liuzhixin405/cove-agent/internal/session"
 	"github.com/liuzhixin405/cove-agent/internal/skills"
+	"github.com/liuzhixin405/cove-agent/internal/termui"
 	"github.com/liuzhixin405/cove-agent/internal/tool"
 )
 
@@ -69,6 +70,12 @@ type frontend struct {
 	print   func(string)
 	enqueue func(api.Message)
 	choose  func(string, []repl.Choice) bool
+	// pendingConfirm is a confirmation box waiting for the next line
+	// (confirmThen / takePendingConfirm).
+	pendingConfirm *pendingConfirm
+	// reader is the REPL's line editor (nil in headless): /setup and a bare
+	// /api-key read the key through it without echo.
+	reader *repl.LineReader
 }
 
 func (fe *frontend) interactive() bool { return fe.tasks != nil }
@@ -77,7 +84,7 @@ func (fe *frontend) running() bool { return fe.tasks != nil && fe.tasks.IsRunnin
 
 func (fe *frontend) closeWorkflows() {
 	if err := fe.stopRemote(context.Background()); err != nil && fe.print != nil {
-		fe.print("remote shutdown: " + err.Error())
+		fe.print("远程监督关闭失败: " + err.Error())
 	}
 	if fe.reg == nil {
 		return
@@ -85,7 +92,7 @@ func (fe *frontend) closeWorkflows() {
 	if entry, exists := fe.reg.Find("race"); exists {
 		if closer, ok := entry.(interface{ Close() error }); ok {
 			if err := closer.Close(); err != nil && fe.print != nil {
-				fe.print("race shutdown: " + err.Error())
+				fe.print("竞跑关闭失败: " + err.Error())
 			}
 		}
 	}
@@ -163,7 +170,7 @@ func withArgs(args []string) bool { return len(args) > 0 }
 const (
 	catModel   = "供应商 / 模型"
 	catSession = "会话"
-	catTasks   = "后台任务"
+	catTasks   = "任务与自动化"
 	catSystem  = "系统"
 )
 
@@ -208,9 +215,19 @@ func (fe *frontend) install(reg *command.Registry) *command.Registry {
 				return true
 			}
 		}
-		return handleSessionCommand(in.Raw, fe.eng, &fe.historyPickPending)
+		var ask func(string, int, func())
+		if fe.interactive() && replInteractive {
+			ask = func(scope string, n int, onYes func()) {
+				fe.confirmThen("清除历史会话", []string{
+					"范围：" + scope,
+					fmt.Sprintf("将删除 %d 个历史会话（当前会话除外），删除后不可恢复。", n),
+				}, onYes)
+			}
+		}
+		return handleSessionCommand(in.Raw, fe.eng, &fe.historyPickPending, ask)
 	}
 
+	undoBase := base("undo")
 	for _, c := range []*feCmd{
 		// Provider and model.
 		{name: "model", desc: "设置模型", category: catModel, mutates: withArgs, run: usage("/model <名称>")},
@@ -226,7 +243,34 @@ func (fe *frontend) install(reg *command.Registry) *command.Registry {
 				}
 				return true
 			}},
-		{name: "api-key", desc: "设置 API 密钥", category: catModel, mutates: withArgs, run: usage("/api-key <密钥>")},
+		{name: "setup", desc: "配置向导：选供应商、掩码输入 API key、自动验证并保存", category: catModel, mutates: always,
+			run: func(ctx context.Context, in command.Input) bool {
+				if !fe.interactive() || fe.reader == nil {
+					fe.print("headless 模式没有向导：请用 /provider、/api-key 或编辑 config.json。")
+					return true
+				}
+				runSetupWizard(fe, fe.reader, fe.cfg, fe.eng)
+				return true
+			}},
+		{name: "api-key", desc: "设置 API 密钥（不带参数时掩码输入）", category: catModel, mutates: always,
+			run: func(ctx context.Context, in command.Input) bool {
+				if len(in.Args) == 0 && fe.interactive() && fe.reader != nil {
+					key, err := fe.reader.ReadSecret("API key（输入不回显）: ")
+					if err != nil || strings.TrimSpace(key) == "" {
+						fe.print("未修改 API 密钥。")
+						return true
+					}
+					return handleBuiltinConfigCommand("/api-key "+strings.TrimSpace(key), fe.cfg, fe.eng)
+				}
+				if handleBuiltinConfigCommand(in.Raw, fe.cfg, fe.eng) {
+					if len(in.Args) > 0 && fe.interactive() {
+						fe.print(termui.Styled(termui.Dim, "提示：直接输入 /api-key（不带参数）可掩码输入，避免 key 留在屏幕上"))
+					}
+					return true
+				}
+				fe.print("用法: /api-key [密钥]")
+				return true
+			}},
 		// mutates like /model and /api-key: it reloads the provider, and
 		// without it "/base-url <地址>" swapped the client mid-turn.
 		{name: "base-url", desc: "设置 API 地址", category: catModel, mutates: withArgs, run: usage("/base-url <地址>")},
@@ -240,12 +284,87 @@ func (fe *frontend) install(reg *command.Registry) *command.Registry {
 				return true
 			}},
 		{name: "budget", desc: "本会话预算上限 ($)；save 写入配置", category: catModel, run: config},
-		{name: "record", desc: "录制会话事件 (status/start/stop)", category: catModel,
-			hints: []string{"status", "start", "stop"}, run: config},
 		{name: "config", desc: "查看完整配置；/config <键> <值> 修改", category: catModel, base: base("config"), run: config},
 		{name: "cost", desc: "查看用量和费用", category: catModel, base: base("cost"), run: config},
+		{name: "workflow", desc: "开发流程：direct 直接执行（默认），review 先确认方案再实现，once 只启用下一次任务", category: catModel,
+			hints: []string{"direct", "review", "once"}, mutates: withArgs,
+			run: func(ctx context.Context, in command.Input) bool {
+				if len(in.Args) > 1 {
+					fe.print("用法: /workflow [direct|review|once]")
+					return true
+				}
+				if len(in.Args) == 1 {
+					if err := fe.eng.SetWorkflowMode(in.Args[0]); err != nil {
+						fe.print("设置开发流程失败: " + err.Error())
+						return true
+					}
+				}
+				state := fe.eng.WorkflowStatus()
+				if state.Error != "" {
+					fe.print(state.Error)
+					return true
+				}
+				labels := map[string]string{"direct": "直接执行", "review": "先确认方案，再实现", "once": "仅下一次任务先确认方案"}
+				text := "开发流程: " + labels[state.Mode]
+				if state.Pending {
+					text += "；当前任务尚未批准实现"
+				}
+				fe.print(text + "。流程设置仅作用于当前会话，不改变工具权限模式。")
+				return true
+			}},
 
 		// Session.
+		// /undo rewrites the working tree; interactively it shows what it is
+		// about to do and waits for one key. The generic command used to run
+		// at once, while /history clear wanted a typed word and /undo files a
+		// preview ID typed back: three ways to say "really?".
+		{name: "undo", desc: "回退到检查点（交互模式先预览再确认）", category: catSession, base: undoBase, mutates: always,
+			hints: []string{"files", "apply", "cancel"},
+			run: func(ctx context.Context, in command.Input) bool {
+				if !fe.interactive() || !replInteractive || undoBase == nil {
+					return false // headless: the generic command, unconfirmed as before
+				}
+				switch {
+				case len(in.Args) == 0 || (len(in.Args) == 1 && in.Args[0] != "files" && in.Args[0] != "apply" && in.Args[0] != "cancel"):
+					hash := ""
+					if len(in.Args) == 1 {
+						hash = in.Args[0]
+					}
+					return fe.confirmThen("整树回退到检查点", undoPreviewLines(fe.eng, hash), func() {
+						out, err := undoBase.Execute(ctx, in)
+						if err != nil {
+							fe.print("错误: " + err.Error())
+							return
+						}
+						fe.print("[undo] " + out.Message)
+					})
+				case in.Args[0] == "files":
+					out, err := undoBase.Execute(ctx, in)
+					if err != nil {
+						return false
+					}
+					uc, isUndo := undoBase.(*command.UndoCmd)
+					if !isUndo || uc.PendingPreviewID() == "" {
+						fe.print(out.Message) // the usage line or "预览失败: …"
+						return true
+					}
+					previewID := uc.PendingPreviewID()
+					lines := strings.Split(strings.TrimSpace(out.Message), "\n")
+					if fe.confirmThen("按预览回滚文件", lines, func() {
+						applied, err := undoBase.Execute(ctx, command.Input{Args: []string{"apply", previewID}, Engine: in.Engine, Cwd: in.Cwd, Config: in.Config})
+						if err != nil {
+							fe.print("文件级回滚失败: " + err.Error())
+							return
+						}
+						fe.print("[undo] " + applied.Message)
+					}) {
+						return true
+					}
+					fe.print(out.Message)
+					return true
+				}
+				return false
+			}},
 		{name: "new", desc: "保存当前会话并开始新会话（清空对话上下文）", category: catSession, mutates: always,
 			run: func(ctx context.Context, in command.Input) bool {
 				saved := startNewSession(fe.eng, fe.tasks, &fe.attachedFiles)
@@ -297,6 +416,12 @@ func (fe *frontend) install(reg *command.Registry) *command.Registry {
 				fe.print(expandCommand(in.Args))
 				return true
 			}},
+		{name: "replay", desc: "按任务回放改动：/replay 1 播放整个任务，/replay 1.2 播放单次改动；/replay list [关键词] 筛选和选择，/replay search <关键词> 回放匹配记录，支持 title: 和 file:；/replay overview [任务序号] 查看方案、文件摘要与历史验收证据；交互回放首次生成并缓存 AI 解读，COVE_REPLAY_EXPLAIN=0 关闭；省略参数播放最近任务，兼容完整编号", category: catSession,
+			hints: []string{"list", "search", "overview", "title:", "file:"},
+			run: func(ctx context.Context, in command.Input) bool {
+				fe.replayFilePreview(ctx, in.Args)
+				return true
+			}},
 
 		// Background tasks.
 		{name: "acceptance", desc: "查看当前会话最新任务的验收证据", category: catTasks,
@@ -328,8 +453,12 @@ func (fe *frontend) install(reg *command.Registry) *command.Registry {
 			}},
 
 		// System.
-		{name: "help", desc: "显示帮助", category: catSystem,
+		{name: "help", desc: "显示帮助；/help <命令> 查看单个命令的用法", category: catSystem,
 			run: func(ctx context.Context, in command.Input) bool {
+				if len(in.Args) > 0 {
+					printCommandHelp(fe.reg, in.Args[0])
+					return true
+				}
 				printHelp(fe.reg, fe.toolReg, fe.pluginMgr)
 				return true
 			}},

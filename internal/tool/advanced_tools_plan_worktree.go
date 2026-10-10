@@ -38,7 +38,7 @@ func NewExitPlanModeTool() Tool {
 	return &ExitPlanModeTool{baseTool{def: Def{
 		Name: "exit_plan_mode", Aliases: []string{"ExitPlanMode"},
 		Description: "Exit plan mode. Full tool access restored.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"}}}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"summary":{"type":"string"},"files":{"type":"array","items":{"type":"string"}},"decisions":{"type":"array","items":{"type":"string"}},"checks":{"type":"array","items":{"type":"string"}}}`),
 		IsReadOnly:  false, UserFacingName: "Exit Plan Mode",
 	}}}
 }

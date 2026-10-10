@@ -47,7 +47,7 @@ func TestTaskDecompositionGuidance_NonEmptyForComplexMessage(t *testing.T) {
 	if g == "" {
 		t.Fatal("expected guidance for a complex-looking message")
 	}
-	if !strings.Contains(g, "3-5 concrete steps") {
+	if !strings.Contains(g, "3-8 tasks") {
 		t.Fatalf("expected guidance to mention step decomposition, got: %q", g)
 	}
 }
@@ -62,5 +62,20 @@ func TestSuggestsComplexTaskCountsRunes(t *testing.T) {
 	long := strings.Repeat("中", 300)
 	if !suggestsComplexTask(long) {
 		t.Fatal("300 Chinese characters not counted as a long message")
+	}
+}
+
+// The guidance teaches the parallel path: independent steps run through
+// execute_plan, ordering is declared with depends:. It used to tell the model
+// to work one step at a time, which argued against the concurrency cove has.
+func TestTaskDecompositionGuidanceTeachesParallelExecution(t *testing.T) {
+	g := taskDecompositionGuidance("请重构一下权限模块")
+	for _, want := range []string{"execute_plan", "depends:", "parallel"} {
+		if !strings.Contains(g, want) {
+			t.Errorf("guidance lacks %q:\n%s", want, g)
+		}
+	}
+	if strings.Contains(g, "one at a time") {
+		t.Errorf("guidance still tells the model to work serially:\n%s", g)
 	}
 }

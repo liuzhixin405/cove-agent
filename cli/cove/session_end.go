@@ -111,10 +111,9 @@ var dreamNotice = func(s string) { fmt.Fprint(os.Stderr, s) }
 // enough turns and there is something new to consolidate, it starts a
 // detached worker process and returns at once (the consolidation survives
 // this process). If the worker cannot be started it consolidates inline with
-// runner, bounded by dreamInlineBudget, showing progress dots. --no-auto and
-// --replay skip it.
+// runner, bounded by dreamInlineBudget, showing progress dots. --no-auto skips it.
 func startSessionEndDream(turns int, runner *dream.Runner) {
-	if noAuto || replayDir != "" {
+	if noAuto {
 		return
 	}
 	sessionsDir := dream.DefaultSessionsDir()

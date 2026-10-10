@@ -27,7 +27,7 @@ func TestRaceCommandsLazyAndArguments(t *testing.T) {
 	cmd := commands[0].(*RaceCommand)
 	defer cmd.Close()
 	output, err := cmd.Execute(context.Background(), command.Input{})
-	if err != nil || !strings.Contains(output.Message, "/race select <runID> <a|b>") {
+	if err != nil || !strings.Contains(output.Message, "/race select <运行ID> <a|b>") {
 		t.Fatalf("missing operator help: %v", err)
 	}
 	if cmd.service != nil {

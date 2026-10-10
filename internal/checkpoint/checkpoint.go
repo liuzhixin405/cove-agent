@@ -282,8 +282,15 @@ func (m *Manager) Restore(commitHash string) (string, error) {
 	}
 	// From here on the working tree is being rewritten, so the backup is
 	// returned with every error: it is the only way back.
-	if err := m.gitCmd(env, "checkout", target, "--", "."); err != nil {
-		return backup, err
+	//
+	// A checkpoint of an empty tree (taken in a fresh project before its
+	// first file was written) has nothing to check out: `checkout <hash>
+	// -- .` then fails with "pathspec '.' did not match any file(s)", and the
+	// restore is the deletions below alone.
+	if names, lsErr := m.gitOutput(env, "ls-tree", "-r", "--name-only", target); lsErr != nil || strings.TrimSpace(names) != "" {
+		if err := m.gitCmd(env, "checkout", target, "--", "."); err != nil {
+			return backup, err
+		}
 	}
 	// Per-path failures are collected rather than returned on the first one:
 	// the checkout above has already rewritten the tree, and stopping midway

@@ -56,7 +56,7 @@ type chatRunner interface {
 }
 
 var (
-	Version = "12.2.0"
+	Version = "12.3.0"
 
 	BuildTime = "pro"
 
@@ -71,10 +71,6 @@ var (
 	noTUI = false
 
 	profileName = ""
-
-	recordDir = ""
-
-	replayDir = ""
 )
 
 func main() {
@@ -116,7 +112,6 @@ func main() {
 
 	debugMode := opts.debug
 	dumpPrompt, noAuto, tuiMode, noTUI = opts.dumpPrompt, opts.noAuto, opts.tui, opts.noTUI
-	recordDir, replayDir = opts.recordDir, opts.replayDir
 
 	printPrompt := opts.printPrompt
 	if opts.printMode {
@@ -145,7 +140,7 @@ func main() {
 		}
 	}
 
-	app, err := bootstrapApp(debugMode, profileName, recordDir, replayDir, toolsInteractiveFor(opts.printMode))
+	app, err := bootstrapApp(debugMode, profileName, toolsInteractiveFor(opts.printMode))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Engine start error: %v\n", err)
 		os.Exit(1)
@@ -412,9 +407,9 @@ func isPositiveNumber(input string) bool {
 
 // runNeedsAPIKey reports whether a run must stop for a missing API key. -p
 // used to send the request anyway, so the user got a 401 or a connection
-// error instead of the setup guidance; a --replay run never calls the API.
-func runNeedsAPIKey(apiKey string, replaying bool) bool {
-	return strings.TrimSpace(apiKey) == "" && !replaying
+// error instead of the setup guidance.
+func runNeedsAPIKey(apiKey string) bool {
+	return strings.TrimSpace(apiKey) == ""
 }
 
 // printPromptIsSlashCommand reports whether the prompt typed after -p is a
@@ -438,7 +433,7 @@ func runPrintMode(eng *engine.Engine, argPrompt, prompt string, debug bool, atta
 		return 1
 	}
 
-	if runNeedsAPIKey(cfg.EffectiveProvider().APIKey, replayDir != "") {
+	if runNeedsAPIKey(cfg.EffectiveProvider().APIKey) {
 		fmt.Fprintln(os.Stderr, missingAPIKeyMessage(cfg.EffectiveProvider().Name))
 		return 1
 	}
@@ -706,7 +701,7 @@ func (fe *frontend) execute(ctx context.Context, input string) {
 
 	if err != nil {
 
-		termui.PrintAbove(fmt.Sprintf("Error: %v\r\n", err))
+		termui.PrintAbove(fmt.Sprintf("错误: %v\r\n", err))
 
 		return
 
@@ -1094,10 +1089,6 @@ func printCLIHelp() {
 
  cove --profile <name>      使用指定 profile 启动
 
- cove --record <dir>        开启会话录制并写入目录
-
- cove --replay <dir>        使用录制数据回放（不调用真实 API）
-
  cove --list-sessions [all] 列出当前目录的会话记录（all: 所有项目）
 
  cove --automation <action> <project> [arguments]  独立维护入口（开关必须在首位）
@@ -1143,7 +1134,7 @@ func printCLIHelp() {
 REPL 内置命令:
 
 
- /model, /profile, /provider, /api-key, /base-url, /record, /mode, /budget
+ /model, /profile, /provider, /api-key, /base-url, /mode, /budget
 
 
  /cost, /config, /system, /context, /compact

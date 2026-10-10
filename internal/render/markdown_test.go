@@ -220,3 +220,19 @@ func TestMarkdownTableASCIIMode(t *testing.T) {
 		}
 	}
 }
+
+func TestMarkdownRendersWholeText(t *testing.T) {
+	out := Markdown("# 标题\n\n- 第一步\n- 第二步\n")
+	if !strings.Contains(out, "标题") || !strings.Contains(out, "第一步") || !strings.Contains(out, "第二步") {
+		t.Fatalf("content lost: %q", out)
+	}
+	// The heading is rendered (bold), so the text went through the renderer
+	// rather than being returned verbatim. (The bullet glyph depends on the
+	// console: "-" in ASCII mode, so it is not asserted.)
+	if !strings.Contains(out, "[1m标题[0m") {
+		t.Fatalf("heading not rendered: %q", out)
+	}
+	if Markdown("") != "" {
+		t.Fatal("empty input must render to nothing")
+	}
+}

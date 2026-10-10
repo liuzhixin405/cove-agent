@@ -65,6 +65,7 @@ fixtures 只用非敏感测试值，不接受密码输入，敏感页面截图�
 
 ```text
 /race run C:\Temp\race.json
+/race list
 /race show <run-id>
 /race cancel <run-id>
 /race select <run-id> a
@@ -86,7 +87,7 @@ run 立即返回 ID，两个独立 worktree 使用同一显式 argv 验证器；
 
 请求 ID 防重放，scope 绑定会话、项目、任务与状态版本。审批额外绑定工具、实际输入摘要、有效期和单次消费；本地答案、取消、状态漂移、停服与退出都撤销 pending。远程 cancel、停服与退出会拒绝本地待答的授权提示；状态漂移（本地插入指引、队列变化）与远程有效期到期只撤销远程审批，本地提示继续按自己的超时等待。HTTP 线程仅入队，真实 REPL 所在线程复核并执行，不需要按 Enter 才处理。
 
-API 与不把 token 放进参数/聊天记录的 PowerShell 客户端例子见 [远程协议说明](../../internal/remote/README.md)。当前首版是认证 API，不包含手机原生监督界面；已有 gomobile 聊天 Provider 不等于此活跃 CLI 服务。
+API 与不把 token 放进参数/聊天记录的 PowerShell 客户端例子见 [远程协议说明](../../internal/remote/README.md)。当前首版是认证 API，不包含手机原生监督界面。
 
 ## 安全边界
 

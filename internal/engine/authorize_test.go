@@ -135,3 +135,56 @@ func TestAuthorizeToolCallWithoutPromptNamesTheMissingHandler(t *testing.T) {
 		t.Errorf("error = %v, want it to carry the tool's own reason", err)
 	}
 }
+
+// A handler that returns a reason is preferred over the bool one, and the
+// reason reaches the model in the denial.
+func TestAuthorizeUsesPermissionPromptExAndCarriesReason(t *testing.T) {
+	bash := &mockTool{name: "bash", readOnly: false, result: "ran"}
+	eng := newTestEngine(&mockProvider{}, bash)
+	eng.config.PermissionMode = "default"
+	eng.perm.SetMode(permission.Default)
+	oldCalled := false
+	eng.PermissionPrompt = func(string, map[string]any, string) bool { oldCalled = true; return true }
+	eng.PermissionPromptEx = func(string, map[string]any, string) PermissionAnswer {
+		return PermissionAnswer{Allow: false, DenyReason: "用 switch 别用 checkout"}
+	}
+	err := eng.authorizeToolCall(api.ToolCall{ID: "tc1", Name: "bash", Input: map[string]any{"command": "git checkout x"}}, tool.Context{}, nil)
+	if err == nil {
+		t.Fatal("denied answer must be an error")
+	}
+	if oldCalled {
+		t.Fatal("the bool callback must not be consulted when PermissionPromptEx is set")
+	}
+	want := "permission denied for bash (user rejected: 用 switch 别用 checkout)."
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("error = %q, want it to contain %q", err.Error(), want)
+	}
+}
+
+func TestAuthorizeFallsBackToBoolPrompt(t *testing.T) {
+	bash := &mockTool{name: "bash", readOnly: false, result: "ran"}
+	eng := newTestEngine(&mockProvider{}, bash)
+	eng.config.PermissionMode = "default"
+	eng.perm.SetMode(permission.Default)
+	eng.PermissionPrompt = func(string, map[string]any, string) bool { return false }
+	err := eng.authorizeToolCall(api.ToolCall{ID: "tc1", Name: "bash", Input: map[string]any{"command": "rm x"}}, tool.Context{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "(user rejected).") {
+		t.Fatalf("error = %v, want the plain user-rejected text", err)
+	}
+}
+
+// Denying exit_plan_mode with a reason tells the model it is still planning.
+func TestAuthorizePlanExitDenyReasonKeepsPlanWording(t *testing.T) {
+	eng := planEngine(t, tool.NewPlanModeTool(), tool.NewExitPlanModeTool())
+	run1(t, eng, "plan_mode", nil)
+	eng.PermissionPromptEx = func(string, map[string]any, string) PermissionAnswer {
+		return PermissionAnswer{DenyReason: "先补测试"}
+	}
+	err := eng.authorizeToolCall(api.ToolCall{ID: "tc1", Name: "exit_plan_mode", Input: map[string]any{"summary": "x"}}, tool.Context{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "user asked to revise the plan: 先补测试") || !strings.Contains(err.Error(), "still in plan mode") {
+		t.Fatalf("error = %v", err)
+	}
+	if eng.effectiveMode() != permission.Plan {
+		t.Fatal("a denied exit must leave the model in plan mode")
+	}
+}

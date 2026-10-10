@@ -146,13 +146,17 @@ type Service struct {
 	Directory string
 	Runner    Runner
 	OnSelect  func()
-	mu        sync.Mutex
-	active    map[string]context.CancelFunc
-	selectMu  sync.Mutex
-	workers   sync.WaitGroup
-	shutdown  context.Context
-	stop      context.CancelFunc
-	closed    bool
+	// OnFinish, when set, receives the final report once a run ends
+	// (completed, timeout or cancelled), after it was saved. The report used
+	// to be dropped by Start, so a race finished with nobody told.
+	OnFinish func(*Report)
+	mu       sync.Mutex
+	active   map[string]context.CancelFunc
+	selectMu sync.Mutex
+	workers  sync.WaitGroup
+	shutdown context.Context
+	stop     context.CancelFunc
+	closed   bool
 }
 
 func token(value string) bool {
@@ -199,9 +203,20 @@ func (s *Service) Load(id string) (*Report, error) {
 		return nil, err
 	}
 	defer root.Close()
-	file, err := root.Open(filepath.Join(id, "report.json"))
-	if err != nil {
-		return nil, err
+	// The report is rewritten atomically when the run ends; a reader that
+	// arrives in that instant sees no file although the run's directory
+	// exists. Such a report is retried briefly; a run that never existed
+	// (no directory) is not.
+	var file *os.File
+	for attempt := 0; ; attempt++ {
+		file, err = root.Open(filepath.Join(id, "report.json"))
+		if err == nil {
+			break
+		}
+		if _, dirErr := root.Stat(id); dirErr != nil || attempt >= 10 {
+			return nil, err
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 	defer file.Close()
 	var report Report
@@ -390,8 +405,12 @@ func (s *Service) run(ctx context.Context, project string, spec Spec, ready func
 	} else if runCtx.Err() != nil {
 		report.Status = "cancelled"
 	}
-	if err := s.save(report); err != nil {
-		return report, err
+	saveErr := s.save(report)
+	if s.OnFinish != nil {
+		s.OnFinish(report)
+	}
+	if saveErr != nil {
+		return report, saveErr
 	}
 	return report, nil
 }

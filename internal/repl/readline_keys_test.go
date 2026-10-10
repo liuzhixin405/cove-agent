@@ -705,3 +705,32 @@ func TestInputDisplayWindowFitsSupplementaryIdeographs(t *testing.T) {
 		t.Fatalf("visible window is %d columns, budget 20: %q", w, string(disp))
 	}
 }
+
+// A hint shows in the status row until the next line is submitted.
+func TestHintShowsUntilSubmit(t *testing.T) {
+	restore := captureStdout(t)
+	defer restore()
+	reader := typed("")
+	SetHint("已清空，Ctrl+Z 恢复")
+	consoleMu.Lock()
+	status := reader.statusLineLocked()
+	consoleMu.Unlock()
+	if !strings.Contains(status, "Ctrl+Z 恢复") {
+		t.Fatalf("status = %q", status)
+	}
+	reader.interactionState = "执行中"
+	consoleMu.Lock()
+	status = reader.statusLineLocked()
+	consoleMu.Unlock()
+	if !strings.Contains(status, "正在处理任务") || !strings.Contains(status, "Ctrl+Z 恢复") {
+		t.Fatalf("status with a task = %q", status)
+	}
+	reader.submit([]rune("next"))
+	consoleMu.Lock()
+	status = reader.statusLineLocked()
+	consoleMu.Unlock()
+	if strings.Contains(status, "Ctrl+Z") {
+		t.Fatalf("hint survived submit: %q", status)
+	}
+	SetHint("")
+}

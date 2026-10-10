@@ -507,3 +507,196 @@ func TestPermanentAnswerPersistsAllPrefixesInOneCall(t *testing.T) {
 // /cd looks for PolicyLoadError on the engine view it is given; the real
 // program hands it a replEngineAdapter.
 var _ interface{ PolicyLoadError() error } = replEngineAdapter{}
+
+func TestPermissionDenyReasonParsing(t *testing.T) {
+	cases := map[string]string{
+		"n":                      "",
+		"n 用 switch 别用 checkout": "用 switch 别用 checkout",
+		"no  keep the file":      "keep the file",
+		"拒绝 先补测试":                "先补测试",
+		"y":                      "",
+		"e":                      "",
+	}
+	for in, want := range cases {
+		if got := permissionDenyReason(in); got != want {
+			t.Errorf("permissionDenyReason(%q) = %q, want %q", in, got, want)
+		}
+	}
+	for _, in := range []string{"n 理由", "拒绝 理由", "e", "说明"} {
+		if !permissionAnswerAccepted(in) {
+			t.Errorf("%q must be accepted as an answer", in)
+		}
+	}
+	if permissionAnswerAccepted("帮我改成 switch") {
+		t.Error("an ordinary sentence must still be the next instruction, not an answer")
+	}
+}
+
+// "e" asks for a reason on a second line; the reason reaches the engine.
+func TestPermissionPromptExplainedDenialCarriesReason(t *testing.T) {
+	var buf lockedBuffer
+	termui.SetWriter(&buf)
+	oldInteractive := replInteractive
+	replInteractive = true
+	t.Cleanup(func() { replInteractive = oldInteractive; repl.ClearPermInputCh(); termui.SetWriter(nil) })
+
+	done := make(chan engine.PermissionAnswer, 1)
+	go func() {
+		done <- askToolPermissionAnswer(nil, "bash", map[string]any{"command": "git checkout x"}, "")
+	}()
+	waitForPermInputCh(t) <- "e"
+	waitForOutput(t, &buf, "拒绝理由")
+	waitForPermInputCh(t) <- "用 switch\x1b[2J 别用 checkout"
+	select {
+	case got := <-done:
+		if got.Allow || got.DenyReason != "用 switch\x1b[2J 别用 checkout" {
+			t.Fatalf("answer = %+v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("prompt did not return")
+	}
+	out := buf.String()
+	if strings.Contains(out, "\x1b[2J") || !strings.Contains(out, `\e[2J`) {
+		t.Errorf("reason echoed raw: %q", out)
+	}
+	if !strings.Contains(out, "[e] 拒绝并说明") {
+		t.Errorf("option missing: %q", out)
+	}
+}
+
+// Enter on the reason line is a plain denial.
+func TestPermissionPromptExplainedDenialEmptyReason(t *testing.T) {
+	var buf lockedBuffer
+	termui.SetWriter(&buf)
+	oldInteractive := replInteractive
+	replInteractive = true
+	t.Cleanup(func() { replInteractive = oldInteractive; repl.ClearPermInputCh(); termui.SetWriter(nil) })
+
+	done := make(chan engine.PermissionAnswer, 1)
+	go func() { done <- askToolPermissionAnswer(nil, "write", map[string]any{"file_path": "a.go"}, "") }()
+	waitForPermInputCh(t) <- "e"
+	waitForOutput(t, &buf, "拒绝理由")
+	waitForPermInputCh(t) <- ""
+	select {
+	case got := <-done:
+		if got.Allow || got.DenyReason != "" {
+			t.Fatalf("answer = %+v, want a plain denial", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("prompt did not return")
+	}
+}
+
+// Ctrl+C at the reason line denies without a reason.
+func TestPermissionPromptExplainedDenialInterrupted(t *testing.T) {
+	var buf lockedBuffer
+	termui.SetWriter(&buf)
+	oldInteractive := replInteractive
+	replInteractive = true
+	t.Cleanup(func() { replInteractive = oldInteractive; repl.ClearPermInputCh(); termui.SetWriter(nil) })
+
+	done := make(chan engine.PermissionAnswer, 1)
+	go func() { done <- askToolPermissionAnswer(nil, "write", map[string]any{"file_path": "a.go"}, "") }()
+	waitForPermInputCh(t) <- "e"
+	waitForOutput(t, &buf, "拒绝理由")
+	waitForPermInputCh(t) <- promptInterrupt
+	got := <-done
+	if got.Allow || got.DenyReason != "" {
+		t.Fatalf("answer = %+v", got)
+	}
+}
+
+// The hint names only the keys that were offered.
+func TestPermissionAnswerHintFollowsOptions(t *testing.T) {
+	if h := permissionAnswerHintFor(false, false); strings.Contains(h, "本会话记住") || !strings.Contains(h, "e 拒绝并说明") {
+		t.Errorf("hint without a/p: %q", h)
+	}
+	if h := permissionAnswerHintFor(true, true); !strings.Contains(h, "a 本会话记住") || !strings.Contains(h, "p 本项目记住") {
+		t.Errorf("hint with a/p: %q", h)
+	}
+}
+
+func TestPlanExitDescription(t *testing.T) {
+	if got := planExitDescription(map[string]any{}); !strings.Contains(got, "模型未提供计划摘要") {
+		t.Errorf("empty summary: %q", got)
+	}
+	got := planExitDescription(map[string]any{"summary": "## 计划\n- 改 A\n- 改 B\x1b[2J"})
+	if !strings.Contains(got, "改 A") || !strings.Contains(got, "改 B") || strings.Contains(got, "\x1b[2J") || !strings.Contains(got, `\e[2J`) {
+		t.Errorf("summary rendering: %q", got)
+	}
+	long := strings.Repeat("- 行\n", planSummaryMaxLines+5)
+	got = planExitDescription(map[string]any{"summary": long})
+	if !strings.Contains(got, "还有 5 行") {
+		t.Errorf("truncation marker missing: %q", got)
+	}
+}
+
+// The plan-exit prompt shows the summary and its own options; "e" asks for
+// the revision the model should make.
+func TestPlanExitPromptShowsSummaryAndRevisionOption(t *testing.T) {
+	var buf lockedBuffer
+	termui.SetWriter(&buf)
+	oldInteractive := replInteractive
+	replInteractive = true
+	t.Cleanup(func() { replInteractive = oldInteractive; repl.ClearPermInputCh(); termui.SetWriter(nil) })
+
+	done := make(chan engine.PermissionAnswer, 1)
+	go func() {
+		done <- askToolPermissionAnswer(nil, "exit_plan_mode", map[string]any{"summary": "1. 先写测试\n2. 再改实现"}, "exiting plan mode requires confirmation")
+	}()
+	waitForOutput(t, &buf, "再改实现")
+	out := buf.String()
+	for _, want := range []string{"[y] 执行计划", "[e] 修改计划", "[n] 继续规划"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in %q", want, out)
+		}
+	}
+	for _, unwanted := range []string{"[a]", "[p]", "exiting plan mode requires confirmation"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("unexpected %q in %q", unwanted, out)
+		}
+	}
+	waitForPermInputCh(t) <- "e"
+	waitForOutput(t, &buf, "修改意见")
+	waitForPermInputCh(t) <- "第 2 步拆成两步"
+	got := <-done
+	if got.Allow || got.DenyReason != "第 2 步拆成两步" {
+		t.Fatalf("answer = %+v", got)
+	}
+}
+
+// The plan box bounds what the model listed: at most 40 items, each clipped.
+func TestPlanExitDescriptionBoundsLists(t *testing.T) {
+	files := make([]any, 0, 50)
+	for i := 0; i < 50; i++ {
+		files = append(files, strings.Repeat("f", 300)+".go")
+	}
+	got := planExitDescription(map[string]any{"summary": "s", "files": files})
+	if n := strings.Count(got, "\n  • "); n != 40 {
+		t.Fatalf("items shown = %d, want 40", n)
+	}
+	if strings.Contains(got, strings.Repeat("f", 300)) {
+		t.Fatal("long items must be clipped")
+	}
+	if !strings.Contains(got, "还有 10 项") {
+		t.Fatalf("omitted count missing: %q", got[len(got)-200:])
+	}
+}
+
+// "e" is a typed answer, not a single key: with a prompt waiting, a line
+// starting with e ("edit the test first") must not become a denial.
+func TestExplainIsNotASingleKey(t *testing.T) {
+	var buf lockedBuffer
+	termui.SetWriter(&buf)
+	oldInteractive := replInteractive
+	replInteractive = true
+	t.Cleanup(func() { replInteractive = oldInteractive; repl.ClearPermInputCh(); termui.SetWriter(nil) })
+	done := make(chan engine.PermissionAnswer, 1)
+	go func() { done <- askToolPermissionAnswer(nil, "bash", map[string]any{"command": "ls"}, "") }()
+	waitForOutput(t, &buf, "需要授权")
+	if repl.PromptKeyAnswers('e') {
+		t.Fatal("e must not answer on its own")
+	}
+	waitForPermInputCh(t) <- "n"
+	<-done
+}

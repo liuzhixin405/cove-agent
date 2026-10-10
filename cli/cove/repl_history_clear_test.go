@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
@@ -82,5 +83,36 @@ func TestHistoryClearInDeletesHiddenSessionsToo(t *testing.T) {
 	}
 	if deleted != 1 {
 		t.Fatalf("deleted %d, want 1", deleted)
+	}
+}
+
+// Interactive /history clear asks through the confirmation box instead of
+// demanding a typed "confirm"; headless (no asker) keeps the typed word.
+func TestHistoryClearAsksInteractively(t *testing.T) {
+	buf := captureOut(t)
+	eng := steerTestEngine(t)
+	cwd := currentProjectDir()
+	saveHistoryRecord(t, eng.Store(), "a", cwd)
+	saveHistoryRecord(t, eng.Store(), "b", cwd)
+	asked := 0
+	var proceed func()
+	handleHistoryClear(eng, false, false, func(scope string, n int, onYes func()) {
+		asked++
+		proceed = onYes
+		if scope != "当前项目" || n != 2 {
+			t.Errorf("ask(%q, %d), want (当前项目, 2)", scope, n)
+		}
+	})
+	if asked != 1 || proceed == nil || strings.Contains(buf.String(), "已删除") {
+		t.Fatalf("asked = %d, out = %q", asked, buf.String())
+	}
+	proceed()
+	if !strings.Contains(buf.String(), "已删除 2 个会话") {
+		t.Fatalf("out = %q", buf.String())
+	}
+	saveHistoryRecord(t, eng.Store(), "c", cwd)
+	handleHistoryClear(eng, false, false, nil)
+	if !strings.Contains(buf.String(), "确认请输入: /history clear confirm") {
+		t.Fatalf("headless wording missing: %q", buf.String())
 	}
 }

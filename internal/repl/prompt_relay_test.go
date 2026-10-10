@@ -1,6 +1,7 @@
 package repl
 
 import (
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -150,5 +151,75 @@ func TestTakePromptInputForDistinguishesAnswers(t *testing.T) {
 func TestLightningIsTwoCellsWide(t *testing.T) {
 	if w := runeCellWidth('⚡'); w != 2 {
 		t.Fatalf("width(⚡) = %d, want 2", w)
+	}
+}
+
+// A prompt that allows an empty answer takes Enter on an empty line as "".
+func TestTakePromptInputForAllowsEmptyWhenAsked(t *testing.T) {
+	ch := make(chan string, 1)
+	SetPromptInput(ch, nil, "hint")
+	consoleMu.Lock()
+	permAllowEmpty = true
+	consoleMu.Unlock()
+	got, state, _ := TakePromptInputFor("   ")
+	if state != PromptAnswer || got == nil {
+		t.Fatalf("empty line with AllowEmpty: state = %v", state)
+	}
+	// Without the flag an empty line is still not an answer.
+	SetPromptInput(ch, nil, "hint")
+	if _, state, hint := TakePromptInputFor(""); state != PromptNotAnswer || hint != "hint" {
+		t.Fatalf("empty line without AllowEmpty: state = %v hint = %q", state, hint)
+	}
+	ClearPermInputCh()
+}
+
+// A front end that cannot block (a slash command on the input loop) arms a
+// prompt and reads the next line itself: the keys still answer on their own
+// and the status row says a confirmation is waiting, until it is disarmed.
+func TestArmPromptOffersKeysUntilDisarmed(t *testing.T) {
+	token, ok := ArmPrompt("等待确认", []string{"确认: x"}, "y 确认 / n 取消", "yn")
+	if !ok {
+		t.Fatal("arming on an idle relay must succeed")
+	}
+	if !promptKeyAnswers('y') || !promptKeyAnswers('N') || promptKeyAnswers('a') {
+		t.Fatal("armed keys must answer on their own")
+	}
+	lr := typed("")
+	lr.interactionState = "空闲"
+	consoleMu.Lock()
+	status := lr.statusLineLocked()
+	consoleMu.Unlock()
+	if !strings.Contains(status, "等待你确认") {
+		t.Fatalf("status = %q", status)
+	}
+	DisarmPrompt(token)
+	if promptKeyAnswers('y') {
+		t.Fatal("keys must stop answering once disarmed")
+	}
+	if ch := TakePermInputCh(); ch != nil {
+		t.Fatal("nothing may stay registered after DisarmPrompt")
+	}
+}
+
+// Arming refuses while another prompt waits (a permission prompt must not be
+// overwritten), and disarming only clears the prompt that was armed.
+func TestArmPromptRefusesWhenAPromptWaitsAndDisarmsOnlyItself(t *testing.T) {
+	ch := make(chan string, 1)
+	SetPromptInput(ch, nil, "perm")
+	if _, ok := ArmPrompt("等待确认", nil, "h", "yn"); ok {
+		t.Fatal("must not arm over a waiting prompt")
+	}
+	if got := TakePermInputCh(); got != ch {
+		t.Fatal("the waiting prompt's channel must survive a refused arm")
+	}
+	token, ok := ArmPrompt("等待确认", nil, "h", "yn")
+	if !ok || token == 0 {
+		t.Fatal("arming on an idle relay must succeed")
+	}
+	// A permission prompt registered afterwards owns the relay now.
+	SetPromptInput(ch, nil, "perm")
+	DisarmPrompt(token)
+	if got := TakePermInputCh(); got != ch {
+		t.Fatal("disarming a stale token must not clear another prompt")
 	}
 }

@@ -24,7 +24,7 @@ func TestAutomationCommandsLazyMetadataAndOperatorFlow(t *testing.T) {
 	fe := &frontend{print: func(message string) { output = message }}
 	var nilFrontend *frontend
 	commands := nilFrontend.automationCommands()
-	if len(commands) != 2 || commands[0].Name() != "automations" || !strings.Contains(commands[1].Help(), "accepted does not apply or merge") {
+	if len(commands) != 2 || commands[0].Name() != "automations" || !strings.Contains(commands[1].Help(), "accepted 也不会应用或合并") {
 		t.Fatalf("metadata=%v", commands)
 	}
 	commands = fe.automationCommands()
@@ -71,7 +71,7 @@ func TestAutomationCLIExplicitDispatchAndNestedRefusal(t *testing.T) {
 	}
 	t.Setenv("COVE_AUTOMATION_CHILD", "1")
 	_, err := executeAutomationCommand(context.Background(), "automations", command.Input{Cwd: t.TempDir(), Args: []string{"tick"}}, nil)
-	if err == nil || !strings.Contains(err.Error(), "nested") {
+	if err == nil || !strings.Contains(err.Error(), "嵌套") {
 		t.Fatalf("nested error=%v", err)
 	}
 }
@@ -150,11 +150,11 @@ func TestAutomationInboxFailedResultReviewAndExport(t *testing.T) {
 		t.Fatalf("show=%s err=%v", message, err)
 	}
 	message, err = executeAutomationCommand(context.Background(), "inbox", command.Input{Cwd: project, Args: []string{"review", id, "rejected"}}, nil)
-	if err != nil || !strings.Contains(message, "nothing applied or merged") {
+	if err != nil || !strings.Contains(message, "未应用也未合并") {
 		t.Fatalf("review=%s err=%v", message, err)
 	}
 	_, err = executeAutomationCommand(context.Background(), "inbox", command.Input{Cwd: project, Args: []string{"patch", id, filepath.Join(project, "result.patch")}}, nil)
-	if err == nil || !strings.Contains(err.Error(), "outside the original project") {
+	if err == nil || !strings.Contains(err.Error(), "原项目之外") {
 		t.Fatalf("root export accepted: %v", err)
 	}
 	state, err = store.Read()
@@ -240,7 +240,7 @@ func TestAutomationRealCLIStartup(t *testing.T) {
 	}
 	run(0, "null", false, "--automation", "list", project)
 	run(0, "null", false, "--automation", "tick", project)
-	run(0, "Added manual", false, "--automation", "add", project, "spec.json")
+	run(0, "已添加 manual", false, "--automation", "add", project, "spec.json")
 	run(0, `"id": "manual"`, false, "--automation", "list", project)
 	run(1, "requires a Git repository", false, "--automation", "run", project, "manual")
 	store, err := automation.Open(filepath.Join(configDir, "automations"), project)
@@ -254,10 +254,10 @@ func TestAutomationRealCLIStartup(t *testing.T) {
 	resultID := state.Results[0].ID
 	run(0, resultID, false, "--automation-inbox", "list", project)
 	run(0, `"state": "failed"`, false, "--automation-inbox", "show", project, resultID)
-	run(0, "nothing applied or merged", false, "--automation-inbox", "review", project, resultID, "rejected")
+	run(0, "未应用也未合并", false, "--automation-inbox", "review", project, resultID, "rejected")
 	run(0, `"review": "rejected"`, false, "--automation-inbox", "show", project, resultID)
-	run(1, "outside the original project", false, "--automation-inbox", "patch", project, resultID, filepath.Join(project, "unsafe.patch"))
-	run(0, "nothing applied", false, "--automation-inbox", "patch", project, resultID, "export.patch")
+	run(1, "原项目之外", false, "--automation-inbox", "patch", project, resultID, filepath.Join(project, "unsafe.patch"))
+	run(0, "未应用", false, "--automation-inbox", "patch", project, resultID, "export.patch")
 	if _, err := os.Stat(filepath.Join(caller, "export.patch")); err != nil {
 		t.Fatalf("CLI export did not use caller cwd: %v", err)
 	}
@@ -277,18 +277,18 @@ func TestAutomationRealCLIStartup(t *testing.T) {
 	if err != nil || len(state.Results) != 3 || state.Results[2].Trigger != "schedule" || state.Results[2].State != "failed" {
 		t.Fatalf("noGit scheduled failure not persisted: %+v %v", state, err)
 	}
-	run(1, "nested", true, "--automation", "list", project)
-	run(1, "nested", true, "--automation", "tick", project)
-	run(1, "nested", true, "--automation-inbox", "list", project)
-	run(2, "Usage:", false, "--automation", "list")
+	run(1, "嵌套", true, "--automation", "list", project)
+	run(1, "嵌套", true, "--automation", "tick", project)
+	run(1, "嵌套", true, "--automation-inbox", "list", project)
+	run(2, "用法:", false, "--automation", "list")
 	run(2, "--not-a-real-option", false, "--not-a-real-option", "--automation", "list", project)
 	run(1, "/automations list", false, "--automation", "list", project, "--not-a-real-option")
-	run(1, "active session", false, "--automation", "add", project, "spec.json", "session")
+	run(1, "活动会话", false, "--automation", "add", project, "spec.json", "session")
 	if err := os.WriteFile(filepath.Join(project, ".cove.json"), []byte("invalid target configuration"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	run(1, "parse project config", false, "--automation", "tick", project)
-	run(1, "nested", true, "--automation", "tick", project)
+	run(1, "嵌套", true, "--automation", "tick", project)
 }
 
 func TestAutomationInboxExportAndConfigBoundaries(t *testing.T) {

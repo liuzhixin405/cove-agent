@@ -85,7 +85,6 @@ func renderConfig(cfg *config.Config) string {
 		"base_url":        pc.BaseURL,
 		"permission_mode": cfg.PermissionMode,
 		"max_budget_usd":  cfg.MaxBudgetUsd,
-		"thinking_tokens": cfg.ThinkingTokens,
 		"debug":           cfg.Debug,
 		"api_key_set":     pc.APIKey != "",
 		"system_prompt":   cfg.SystemPrompt,

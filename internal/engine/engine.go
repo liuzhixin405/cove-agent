@@ -1,15 +1,14 @@
 package engine
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -56,8 +55,6 @@ type Config struct {
 	PermissionMode        string
 	MaxBudget             float64
 	Debug                 bool
-	RecordingDir          string
-	ReplayDir             string
 	Tools                 []tool.Tool
 	Provider              api.ProviderConfig
 	MemoryStore           *memory.Store
@@ -168,6 +165,9 @@ type Engine struct {
 	hooks atomic.Pointer[TurnHooks]
 
 	PermissionPrompt func(toolName string, input map[string]any, reason string) bool
+	// PermissionPromptEx is PermissionPrompt with the person's reason for a
+	// denial. When set it is used instead of PermissionPrompt.
+	PermissionPromptEx func(toolName string, input map[string]any, reason string) PermissionAnswer
 	// IterationLimitPrompt, if set, is asked whether a turn may go on when it
 	// reaches its iteration cap (Reason "iterations"), its time limit
 	// ("time") or looks stuck ("stagnation", once per turn). Continue grants
@@ -221,15 +221,6 @@ type Engine struct {
 	acceptanceMu       sync.Mutex
 	acceptance         *AcceptanceReport
 	fastOutcomes       *fastModelOutcomeWindow // recent fast-model success/failure, feeds router scoring
-	recordingEnabled   bool
-	recordingDir       string
-	recordingSeq       int
-	recordingReady     bool
-	recordingMu        sync.Mutex
-	replayEnabled      bool
-	replayDir          string
-	replayResponses    []api.ChatResponse
-	replayIndex        int
 
 	// Activity tracking powers the stall monitor: every blocking stage (model
 	// call, tool execution, compaction) registers an activity so that, when the
@@ -287,6 +278,7 @@ type Engine struct {
 	// (cove -p, SetNonInteractive): the skill review would be abandoned
 	// at exit after its paid request, so it never starts.
 	nonInteractive bool
+	workflow       reviewWorkflow
 
 	// turnFilesChanged records whether this turn wrote or edited a file, for
 	// the automatic verification gate. Guarded by fileMu.
@@ -346,11 +338,6 @@ const interruptMarkerFmt = "[system: The previous turn was interrupted (%s). Com
 const interruptedToolNote = "[系统未执行此工具调用：本轮在执行前被中断。]"
 
 func New(config Config) (*Engine, error) {
-	recordDir := config.RecordingDir
-	if recordDir == "" {
-		recordDir = os.Getenv("COVE_RECORD_DIR")
-	}
-	replayDir := strings.TrimSpace(config.ReplayDir)
 	reg := tool.NewRegistry()
 	for _, t := range config.Tools {
 		reg.Register(t)
@@ -405,26 +392,8 @@ func New(config Config) (*Engine, error) {
 			SkillManager: config.SkillManager,
 			SkillPrompts: make(map[string]string),
 		},
-		fileHistory:      make(map[string]bool),
-		turnTimeUnit:     time.Minute,
-		recordingEnabled: recordDir != "",
-		recordingDir:     recordDir,
-		replayEnabled:    replayDir != "",
-		replayDir:        replayDir,
-	}
-	if e.recordingEnabled {
-		if err := os.MkdirAll(e.recordingDir, 0o755); err != nil {
-			return nil, fmt.Errorf("init recording dir: %w", err)
-		}
-		if err := e.writeRecordingMeta(); err != nil {
-			return nil, fmt.Errorf("write recording meta: %w", err)
-		}
-		e.recordingReady = true
-	}
-	if e.replayEnabled {
-		if err := e.loadReplayResponses(); err != nil {
-			return nil, fmt.Errorf("load replay responses: %w", err)
-		}
+		fileHistory:  make(map[string]bool),
+		turnTimeUnit: time.Minute,
 	}
 
 	if !config.LoopDetectionDisabled {
@@ -640,116 +609,6 @@ func (e *Engine) ReloadProviderConfig(cfg api.ProviderConfig, model string) erro
 		e.dreamRunner.SetModel(bg)
 	}
 	return nil
-}
-
-func (e *Engine) EnableRecording(dir string) error {
-	dir = strings.TrimSpace(dir)
-	if dir == "" {
-		return fmt.Errorf("recording dir is empty")
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	e.recordingMu.Lock()
-	e.recordingEnabled = true
-	e.recordingDir = dir
-	e.recordingSeq = 0
-	e.recordingReady = false
-	e.recordingMu.Unlock()
-	if err := e.writeRecordingMeta(); err != nil {
-		return err
-	}
-	e.recordingMu.Lock()
-	e.recordingReady = true
-	e.recordingMu.Unlock()
-	return nil
-}
-
-func (e *Engine) DisableRecording() {
-	e.recordingMu.Lock()
-	defer e.recordingMu.Unlock()
-	e.recordingEnabled = false
-	e.recordingReady = false
-}
-
-func (e *Engine) RecordingStatus() (bool, string) {
-	e.recordingMu.Lock()
-	defer e.recordingMu.Unlock()
-	return e.recordingEnabled, e.recordingDir
-}
-
-func (e *Engine) loadReplayResponses() error {
-	path := filepath.Join(e.replayDir, "events.jsonl")
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-
-	type replayEntry struct {
-		Event   string         `json:"event"`
-		Payload map[string]any `json:"payload"`
-	}
-
-	responses := make([]api.ChatResponse, 0)
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 8*1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var entry replayEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
-		}
-		if entry.Event != "llm_response" {
-			continue
-		}
-		rawResp, ok := entry.Payload["response"]
-		if !ok {
-			continue
-		}
-		data, err := json.Marshal(rawResp)
-		if err != nil {
-			continue
-		}
-		var resp api.ChatResponse
-		if err := json.Unmarshal(data, &resp); err != nil {
-			continue
-		}
-		responses = append(responses, resp)
-	}
-	if err := scanner.Err(); err != nil {
-		return err
-	}
-	if len(responses) == 0 {
-		return fmt.Errorf("no replayable responses found in %s", path)
-	}
-	e.replayResponses = responses
-	e.replayIndex = 0
-	return nil
-}
-
-func (e *Engine) nextReplayResponse(useStream bool, onDelta func(string), onReasoning func(string)) (*api.ChatResponse, error) {
-	if !e.replayEnabled {
-		return nil, fmt.Errorf("replay mode is disabled")
-	}
-	if e.replayIndex >= len(e.replayResponses) {
-		return nil, io.EOF
-	}
-	resp := e.replayResponses[e.replayIndex]
-	e.replayIndex++
-	if useStream {
-		if onReasoning != nil && strings.TrimSpace(resp.ReasoningContent) != "" {
-			onReasoning(resp.ReasoningContent)
-		}
-		if onDelta != nil && strings.TrimSpace(resp.Content) != "" {
-			onDelta(resp.Content)
-		}
-	}
-	return &resp, nil
 }
 
 func (e *Engine) Store() *session.Store      { return e.store }
@@ -1674,6 +1533,24 @@ func (e *Engine) authorizeToolCall(tc api.ToolCall, tctx tool.Context, setWaitin
 		defaultDecision = permission.DAllow
 	}
 	decision, reason := e.perm.Check(tc.Name, tc.Input, defaultDecision)
+	var implementationPlan *ImplementationPlan
+	var reviewSnapshots map[string]string
+	if tc.Name == "exit_plan_mode" && e.reviewPending() && decision != permission.DDeny {
+		var err error
+		implementationPlan, err = reviewPlan(tc.Input)
+		if err != nil {
+			return err
+		}
+		reviewSnapshots, err = reviewFileSnapshots(e.projectCwd(), implementationPlan.Files)
+		if err != nil {
+			return permissionDenied(tc.Name, err.Error())
+		}
+		if err := e.recordReviewPlan(implementationPlan); err != nil {
+			return permissionDenied(tc.Name, "方案保存失败，未解锁实现")
+		}
+		decision = permission.DAsk
+		reason = "请确认实现方案（批准后才开始修改）\n" + implementationPlan.Summary + "\n涉及文件: " + strings.Join(implementationPlan.Files, ", ") + "\n关键决策: " + strings.Join(implementationPlan.Decisions, "; ") + "\n验收标准: " + strings.Join(implementationPlan.Checks, "; ")
+	}
 	switch decision {
 	case permission.DAllow, permission.DBypass:
 		return nil
@@ -1695,7 +1572,10 @@ func (e *Engine) authorizeToolCall(tc api.ToolCall, tctx tool.Context, setWaitin
 		reason = "permission denied"
 	}
 
-	if e.PermissionPrompt == nil {
+	if e.PermissionPrompt == nil && e.PermissionPromptEx == nil {
+		if implementationPlan != nil {
+			return permissionDenied(tc.Name, "方案已保存，但没有交互审批处理器（no interactive approval handler）；保持待确认，请在交互会话中确认方案。/mode bypass 或 allow 规则不能代替确认")
+		}
 		// No interactive handler is installed, so this call can never be approved.
 		// Say so plainly instead of blaming the user for a rejection they never saw.
 		return &deniedError{text: fmt.Sprintf(
@@ -1705,7 +1585,7 @@ func (e *Engine) authorizeToolCall(tc api.ToolCall, tctx tool.Context, setWaitin
 	// Pause, prompt and resume under one lock: with the resume outside it, a
 	// parallel call's prompt finishing restarted the spinner over a prompt
 	// that was still open.
-	approved := func() bool {
+	answer := func() PermissionAnswer {
 		// Deferred: a prompt callback that panics is recovered by the tool
 		// runner and the turn goes on; a lock left held here would block
 		// every later approval and limit prompt for the session.
@@ -1722,9 +1602,41 @@ func (e *Engine) authorizeToolCall(tc api.ToolCall, tctx tool.Context, setWaitin
 		if hooks.PermissionDone != nil {
 			defer hooks.PermissionDone()
 		}
-		return e.PermissionPrompt(tc.Name, tc.Input, reason)
+		if e.PermissionPromptEx != nil {
+			return e.PermissionPromptEx(tc.Name, tc.Input, reason)
+		}
+		return PermissionAnswer{Allow: e.PermissionPrompt(tc.Name, tc.Input, reason)}
 	}()
+	approved := answer.Allow
+	if implementationPlan != nil {
+		if approved {
+			current, err := reviewFileSnapshots(e.projectCwd(), implementationPlan.Files)
+			if err != nil {
+				approved = false
+			}
+			for path, snapshot := range reviewSnapshots {
+				if current[path] != snapshot {
+					approved = false
+				}
+			}
+			if !approved {
+				if err := e.recordReviewDecision(implementationPlan, false); err != nil {
+					return err
+				}
+				return permissionDenied(tc.Name, "确认期间方案文件发生变化，必须重新调查并提交方案")
+			}
+		}
+		if err := e.recordReviewDecision(implementationPlan, approved); err != nil {
+			return permissionDenied(tc.Name, "审批状态保存失败，未解锁实现")
+		}
+	}
 	if !approved {
+		if feedback := strings.TrimSpace(render.StripControls(answer.DenyReason)); feedback != "" {
+			if tc.Name == "exit_plan_mode" {
+				return permissionDenied(tc.Name, "user asked to revise the plan: "+feedback+"; still in plan mode, revise the plan and call exit_plan_mode again")
+			}
+			return permissionDenied(tc.Name, "user rejected: "+feedback)
+		}
 		return permissionDenied(tc.Name, "user rejected")
 	}
 	return nil
@@ -1738,6 +1650,9 @@ func (e *Engine) authorizeToolCall(tc api.ToolCall, tctx tool.Context, setWaitin
 // plan_mode set was read by nothing, so "Plan mode active. Read-only
 // operations only." restricted nothing.
 func (e *Engine) effectiveMode() permission.Mode {
+	if e.reviewPending() {
+		return permission.Plan
+	}
 	if e.runtime != nil && e.runtime.IsPlanMode() {
 		return permission.Plan
 	}
@@ -1759,6 +1674,8 @@ func (e *Engine) planModeGate(d tool.Def, toolDecision tool.PermissionDecision) 
 			return &deniedError{text: "plan mode was set by the user (/mode plan) and only they can leave it: finish the plan and ask them to switch the mode."}
 		}
 		return nil
+	case e.reviewPending() && d.PlanSafe && !d.IsReadOnly && d.Name != "plan_mode":
+		return permissionDenied(d.Name, "先确认实现方案，待确认期间不得委托执行或运行有副作用的工具")
 	case d.IsReadOnly || d.PlanSafe:
 		return nil
 	case permission.IsShellTool(d.Name) && toolDecision.Decision == tool.Allow:
@@ -1778,6 +1695,14 @@ func policyDenied(toolName string) error {
 
 // deniedNextStep follows every denial the model reads.
 const deniedNextStep = " Do not call this tool again with the same input; explain the situation to the user or choose a different approach."
+
+// PermissionAnswer is an interactive approval handler's decision. DenyReason
+// is what the person said when denying ("" when they said nothing); the
+// model reads it in the tool result.
+type PermissionAnswer struct {
+	Allow      bool
+	DenyReason string
+}
 
 // deniedError carries a denial text for the model. It is a full sentence
 // pair, not a wrappable Go error phrase, so it ends with punctuation.
@@ -2087,7 +2012,59 @@ func (e *Engine) buildAPIToolDefs() []api.ToolDef {
 	e.cachedToolDefs = defs
 	e.cachedToolDefsVersion = e.registry.Version()
 	e.cachedToolDefsExtra = extra
-	return defs
+	return e.withOnDemandTools(defs)
+}
+
+// onDemandTools are offered only when the conversation calls for them: a
+// coding turn never needs draw_image, yet its 40-line schema went into
+// every request. The pattern is matched against the user's messages; a tool
+// already called in the conversation stays offered.
+var onDemandTools = map[string]*regexp.Regexp{
+	"draw_image": regexp.MustCompile(`(?i)画|图片|图像|图标|占位图|示意图|插图|logo|\bimage\b|\bimages\b|\bpng\b|\bicon\b|\bdraw\b|\bplaceholder\b|\bpicture\b`),
+}
+
+// withOnDemandTools drops the on-demand tools the conversation has not asked
+// for. It filters after the cache so the cached list stays complete.
+func (e *Engine) withOnDemandTools(defs []api.ToolDef) []api.ToolDef {
+	var drop map[string]bool
+	for name, want := range onDemandTools {
+		if !e.conversationWantsTool(name, want) {
+			if drop == nil {
+				drop = map[string]bool{}
+			}
+			drop[name] = true
+		}
+	}
+	if drop == nil {
+		return defs
+	}
+	out := make([]api.ToolDef, 0, len(defs))
+	for _, d := range defs {
+		if !drop[d.Name] {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// conversationWantsTool reports whether a user message matches want or the
+// tool was already called in this conversation.
+func (e *Engine) conversationWantsTool(name string, want *regexp.Regexp) bool {
+	for _, m := range e.messages {
+		switch m.Role {
+		case "user":
+			if !looksSynthetic(m) && want.MatchString(m.Content) {
+				return true
+			}
+		case "assistant":
+			for _, tc := range m.ToolCalls {
+				if tc.Name == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // SetToolDefsVersion adds v to the tool-definition cache key. The cache
@@ -2114,62 +2091,6 @@ func (e *Engine) Messages() []api.Message { return e.messages }
 // MessageCount is len(Messages()) as of the last token recount, published
 // atomically so /status and /stats can show it while a turn is running.
 func (e *Engine) MessageCount() int { return int(e.messageCount.Load()) }
-
-func (e *Engine) recordEvent(_ context.Context, eventType string, payload map[string]any) {
-	e.recordingMu.Lock()
-	defer e.recordingMu.Unlock()
-	if !e.recordingEnabled || e.recordingDir == "" {
-		return
-	}
-	if !e.recordingReady {
-		if err := e.writeRecordingMeta(); err != nil {
-			return
-		}
-		e.recordingReady = true
-	}
-	e.recordingSeq++
-	entry := map[string]any{
-		"seq":       e.recordingSeq,
-		"event":     eventType,
-		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
-		"payload":   payload,
-	}
-	if err := os.MkdirAll(e.recordingDir, 0o755); err != nil {
-		return
-	}
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return
-	}
-	f, err := os.OpenFile(filepath.Join(e.recordingDir, "events.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
-	if err != nil {
-		return
-	}
-	defer func() { _ = f.Close() }()
-	_, _ = f.Write(append(data, '\n'))
-}
-
-func (e *Engine) writeRecordingMeta() error {
-	if !e.recordingEnabled || e.recordingDir == "" {
-		return nil
-	}
-	if err := os.MkdirAll(e.recordingDir, 0o755); err != nil {
-		return err
-	}
-	meta := map[string]any{
-		"created_at": time.Now().UTC().Format(time.RFC3339Nano),
-		"version":    "v0.1",
-	}
-	data, err := json.MarshalIndent(meta, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(filepath.Join(e.recordingDir, "meta.json"), data, 0o644); err != nil {
-		return err
-	}
-	e.recordingReady = true
-	return nil
-}
 
 func (e *Engine) saveSession() {
 	if e.store == nil || e.session == nil {
@@ -2641,6 +2562,16 @@ func (e *Engine) WirePlanExecutor() {
 		// (with the session's current mode and cwd), checkpoints, output
 		// limits and untrusted-content marking — exactly like top-level ones.
 		d.SetExecutor(func(ctx context.Context, tc api.ToolCall) string {
+			// Inside a parallel plan the sibling sub-agents share this
+			// working tree: a file one task wrote is refused to another,
+			// with the owner named, instead of the later write winning.
+			if tc.Name == "write" || tc.Name == "edit" {
+				if fp := toolTargetPath(tc.Input); fp != "" {
+					if ok, owner := plan.ClaimPath(ctx, writeClaimKey(fp, e.projectCwd())); !ok {
+						return fmt.Sprintf("Error: 文件 %s 已由并行任务 %s 修改；请只改动本任务范围内的文件，或把这处改动交给依赖它的任务。", fp, owner)
+					}
+				}
+			}
 			out, _ := e.executeTool(ctx, tc)
 			return out
 		})

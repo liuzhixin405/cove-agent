@@ -485,7 +485,7 @@ func headlessRunHere(t *testing.T, input string) (failed bool, stdout, stderr st
 	t.Helper()
 	resetE2EGlobals()
 	t.Cleanup(resetE2EGlobals)
-	app, err := bootstrapApp(false, "", "", "", false)
+	app, err := bootstrapApp(false, "", false)
 	if err != nil {
 		t.Fatal(err)
 	}

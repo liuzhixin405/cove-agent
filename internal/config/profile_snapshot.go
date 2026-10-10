@@ -7,7 +7,6 @@ type profileValues struct {
 	providerName, providerKey, providerURL string
 	permissionMode, systemPrompt           string
 	maxBudgetUsd                           float64
-	thinkingTokens                         int
 	imageFilesAPI                          bool
 }
 
@@ -16,9 +15,8 @@ func profileValuesOf(c *Config) profileValues {
 		model: c.Model, modelFast: c.ModelFast,
 		providerName: c.Provider.Name, providerKey: c.Provider.APIKey, providerURL: c.Provider.BaseURL,
 		permissionMode: c.PermissionMode, systemPrompt: c.SystemPrompt,
-		maxBudgetUsd:   c.MaxBudgetUsd,
-		thinkingTokens: c.ThinkingTokens,
-		imageFilesAPI:  c.Provider.ImageFilesEnabled(),
+		maxBudgetUsd:  c.MaxBudgetUsd,
+		imageFilesAPI: c.Provider.ImageFilesEnabled(),
 	}
 }
 
@@ -67,9 +65,6 @@ func (c *Config) SnapshotProfile() *Profile {
 		if v.maxBudgetUsd == l.maxBudgetUsd && l.maxBudgetUsd != u.maxBudgetUsd {
 			v.maxBudgetUsd = u.maxBudgetUsd
 		}
-		if v.thinkingTokens == l.thinkingTokens && l.thinkingTokens != u.thinkingTokens {
-			v.thinkingTokens = u.thinkingTokens
-		}
 	}
 	// Copies, not &c.Debug: pointing the profile at the live config would
 	// let a later /debug toggle silently rewrite the saved profile.
@@ -81,7 +76,6 @@ func (c *Config) SnapshotProfile() *Profile {
 		Provider:       &ProviderConfig{Name: v.providerName, APIKey: v.providerKey, BaseURL: v.providerURL, ImageFilesAPI: &imageFilesAPI},
 		PermissionMode: v.permissionMode,
 		MaxBudgetUsd:   v.maxBudgetUsd,
-		ThinkingTokens: v.thinkingTokens,
 		// Explicit pointers so the profile records the current state
 		// faithfully, including off.
 		Debug:        &debug,

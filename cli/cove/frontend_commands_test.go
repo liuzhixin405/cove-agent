@@ -26,6 +26,23 @@ func TestParallelWorkflowCommandsUseRealFrontendRegistry(t *testing.T) {
 	}
 }
 
+func TestDevelopmentWorkflowCommand(t *testing.T) {
+	fe, notices := headlessFrontend(t)
+	if commandMutatesEngine("/workflow") || !commandMutatesEngine("/workflow once") {
+		t.Fatal("workflow command mutation metadata is incorrect")
+	}
+	for _, test := range []struct{ command, mode string }{
+		{"/workflow", "direct"},
+		{"/workflow once", "once"},
+		{"/workflow review", "review"},
+		{"/workflow direct", "direct"},
+	} {
+		if !fe.dispatch(test.command) || fe.eng.WorkflowStatus().Mode != test.mode {
+			t.Fatalf("workflow command failed: %s %v", test.command, *notices)
+		}
+	}
+}
+
 func TestFrontendHistoryPickerKeepsHeadlessTextPath(t *testing.T) {
 	history := setupProjectHistory(t)
 	called := false
@@ -159,6 +176,12 @@ func TestCompletionAndHelpComeFromTheRegistry(t *testing.T) {
 	}
 	if hints := entries["/tasks"].ArgHints[""]; strings.Join(hints, ",") != "saved,restore,remove,move,run,retry,skip" {
 		t.Errorf("/tasks completion hints = %v", hints)
+	}
+	if e := entries["/clear"]; !contains(e.Aliases, "/cls") {
+		t.Errorf("alias /cls missing from /clear: %+v", e)
+	}
+	if _, ok := entries["/cls"]; ok {
+		t.Error("alias /cls must not have a separate command entry")
 	}
 }
 

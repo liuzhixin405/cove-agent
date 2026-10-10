@@ -56,6 +56,10 @@ func runChatInteractionMessage(ctx context.Context, runner chatRunner, userMsg a
 	maxAttempts := 3
 	p := newTurnPrinter()
 	p.compactTools = replInteractive
+	p.previewTask = filePreviewTask{
+		ID:    time.Now().UTC().Format("20060102T150405.000000000"),
+		Title: textutil.TruncateWidth(render.StripControls(taskPreview(userMsg)), 48, "..."),
+	}
 	defer p.stop()
 	turnStart := time.Now()
 	var usage *turnUsage
@@ -84,7 +88,13 @@ func runChatInteractionMessage(ctx context.Context, runner chatRunner, userMsg a
 			eng.SetOutput(uiout.NewFuncs(uiout.Funcs{
 				OnBlock: func(b render.Block) {
 					sessionBlocks.add(b)
+					if state := eng.WorkflowStatus(); state.TaskID != "" {
+						p.mu.Lock()
+						p.previewTask.ID = state.TaskID
+						p.mu.Unlock()
+					}
 					p.engineLine(engine.RenderBlock(b) + "\n")
+					p.fileChange(ctx, eng.SessionID(), b, replInteractive)
 				},
 				OnLine: p.engineLine,
 			}))
@@ -144,6 +154,20 @@ func runChatInteractionMessage(ctx context.Context, runner chatRunner, userMsg a
 		p.system(color + errMsg + termui.Reset)
 		totalOutput.WriteString(errMsg)
 	}
+	if eng, ok := runner.(*engine.Engine); ok {
+		state := eng.WorkflowStatus()
+		if report, err := eng.LastAcceptance(); err == nil && report != nil && report.Request == userMsg.Content && !report.StartedAt.Before(turnStart) && state.TaskID != "" {
+			p.mu.Lock()
+			task := p.previewTask
+			p.mu.Unlock()
+			task.ID = state.TaskID
+			if dir, err := filePreviewDir(eng.SessionID()); err == nil {
+				if err := saveFilePreviewTaskReview(dir, filePreviewTaskReview{Task: task, Plan: state.Plan, Acceptance: report}); err != nil {
+					p.engineLine("任务审阅记录保存失败: " + err.Error())
+				}
+			}
+		}
+	}
 	// One dim line of what the turn took: time, tokens, cost, context use.
 	if usage != nil {
 		if line := usage.summary(); line != "" {
@@ -201,6 +225,7 @@ type turnPrinter struct {
 	previewLines   int
 	previewCells   int
 	previewFolded  bool
+	previewTask    filePreviewTask
 
 	// One sanitiser per stream, so a sequence split across two chunks of
 	// the same stream is reassembled rather than half-printed. A command's

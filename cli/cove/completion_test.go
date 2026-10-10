@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/liuzhixin405/cove-agent/internal/tool"
 )
 
 // names strips the "\tdescription" suffix that complete() appends, so tests can
@@ -72,6 +74,51 @@ func TestCompleteExcludesToolsForSlashInput(t *testing.T) {
 	got = names(complete("re", testCommands, nil))
 	if !contains(got, "read") {
 		t.Fatalf("complete(\"re\") = %v, want the read tool", got)
+	}
+}
+
+func TestCompleteGroupsRegisteredAliases(t *testing.T) {
+	reg := (&frontend{}).install(registerAllCommands())
+	commands := buildCommandList(reg, tool.NewRegistry())
+	suggestions := complete("/", commands, nil)
+	values := names(suggestions)
+	if len(values) != len(reg.All()) {
+		t.Fatalf("got %d candidates for %d commands", len(values), len(reg.All()))
+	}
+	for _, command := range reg.All() {
+		if !contains(values, "/"+command.Name()) {
+			t.Errorf("missing canonical command /%s", command.Name())
+		}
+		for _, alias := range command.Aliases() {
+			if contains(values, "/"+alias) {
+				t.Errorf("alias /%s offered separately", alias)
+			}
+			entry, ok := findCompletionEntry("/"+alias, commands)
+			if !ok || entry.Name != "/"+command.Name() {
+				t.Errorf("alias /%s does not resolve to /%s", alias, command.Name())
+			}
+		}
+	}
+	for _, pair := range [][2]string{{"/cl", "/clear"}, {"/cls", "/cls"}, {"/qu", "/quit"}, {"/can", "/cancel"}, {"/short", "/shortcuts"}, {"/expa", "/expand"}} {
+		got := complete(pair[0], commands, nil)
+		if len(got) != 1 || names(got)[0] != pair[1] || !strings.Contains(got[0], "\t") {
+			t.Errorf("complete(%q) = %v, want one %s candidate with description", pair[0], got, pair[1])
+		}
+	}
+	if got := names(complete("/exp", commands, nil)); len(got) != 2 || !contains(got, "/expand") || !contains(got, "/export") {
+		t.Errorf("distinct commands sharing a prefix must remain available: %v", got)
+	}
+}
+
+func TestCompleteAliasArgumentsAndSkillCollision(t *testing.T) {
+	commands := []cmdEntry{{Name: "/keys", Aliases: []string{"/shortcuts"}, Desc: "keys", ArgHints: map[string][]string{"": {"all"}}}}
+	got := complete("/SHORTCUTS a", commands, nil)
+	if len(got) != 1 || got[0] != "/SHORTCUTS all" {
+		t.Fatalf("alias argument completion = %v", got)
+	}
+	got = complete("/", commands, map[string]string{"shortcuts": "skill"})
+	if len(got) != 1 || names(got)[0] != "/keys" || !strings.Contains(got[0], "/shortcuts") {
+		t.Fatalf("alias grouping and skill collision = %v", got)
 	}
 }
 

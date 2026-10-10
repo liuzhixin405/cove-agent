@@ -44,7 +44,7 @@ type remoteOwnerCall struct {
 
 func (fe *frontend) remoteCommands() []command.Command {
 	return []command.Command{&remoteCommand{fe: fe, ownerCalls: make(chan remoteOwnerCall, 32), ownerWake: make(chan struct{}, 1), ownerDone: make(chan struct{}), feCmd: &feCmd{
-		name: "remote", desc: "Opt-in authenticated remote supervision", category: catSystem,
+		name: "remote", desc: "显式开启的认证远程监督", category: catSystem,
 		hints: []string{"start", "status", "stop"},
 		help:  "/remote start [--bind 127.0.0.1:0] [--token-file NEW_PATH] [--public-origin https://HOST] [--allow-lan --tls-cert CERT --tls-key KEY] | status | stop",
 	}}}
@@ -52,7 +52,7 @@ func (fe *frontend) remoteCommands() []command.Command {
 
 func (c *remoteCommand) Execute(ctx context.Context, in command.Input) (command.Output, error) {
 	if c.fe == nil || c.fe.eng == nil || c.fe.tasks == nil {
-		return command.Output{}, errors.New("remote requires an active interactive CLI session")
+		return command.Output{}, errors.New("remote 需要一个交互式 CLI 会话")
 	}
 	args := in.Args
 	if len(args) == 0 {
@@ -61,7 +61,7 @@ func (c *remoteCommand) Execute(ctx context.Context, in command.Input) (command.
 	switch args[0] {
 	case "start":
 		if c.controller != nil {
-			return command.Output{}, errors.New("remote already started")
+			return command.Output{}, errors.New("远程监督已经启动")
 		}
 		var cfg remote.Config
 		flags := flag.NewFlagSet("remote", flag.ContinueOnError)
@@ -73,7 +73,7 @@ func (c *remoteCommand) Execute(ctx context.Context, in command.Input) (command.
 		flags.StringVar(&cfg.TLSCert, "tls-cert", "", "")
 		flags.StringVar(&cfg.TLSKey, "tls-key", "", "")
 		if err := flags.Parse(args[1:]); err != nil || flags.NArg() != 0 {
-			return command.Output{}, errors.New("invalid /remote start options; see /help remote")
+			return command.Output{}, errors.New("/remote start 选项无效；输入 /help remote 查看用法")
 		}
 		hub := remote.NewHubWithWake(c.ownerWake)
 		snapshot, err := c.fe.remoteSnapshot()
@@ -87,32 +87,32 @@ func (c *remoteCommand) Execute(ctx context.Context, in command.Input) (command.
 			return command.Output{}, err
 		}
 		c.controller = &remoteController{hub: hub, server: server}
-		return command.Output{Message: fmt.Sprintf("Remote: %s\nPrivate credential file: %s\nPause stops queued tasks only.", server.URL, server.TokenFile)}, nil
+		return command.Output{Message: fmt.Sprintf("远程地址: %s\n私有凭据文件: %s\n暂停只影响排队任务。", server.URL, server.TokenFile)}, nil
 	case "status":
 		if len(args) != 1 {
-			return command.Output{}, errors.New("status takes no arguments")
+			return command.Output{}, errors.New("status 不接受参数")
 		}
 		if c.controller == nil {
-			return command.Output{Message: "Remote disabled"}, nil
+			return command.Output{Message: "远程监督未开启"}, nil
 		}
 		if err := c.controller.server.Err(); err != nil {
 			return command.Output{}, err
 		}
-		return command.Output{Message: "Remote: " + c.controller.server.URL + "\nPrivate credential file: " + c.controller.server.TokenFile}, nil
+		return command.Output{Message: "远程地址: " + c.controller.server.URL + "\n私有凭据文件: " + c.controller.server.TokenFile}, nil
 	case "stop":
 		if len(args) != 1 {
-			return command.Output{}, errors.New("stop takes no arguments")
+			return command.Output{}, errors.New("stop 不接受参数")
 		}
 		if c.controller == nil {
-			return command.Output{Message: "Remote disabled"}, nil
+			return command.Output{Message: "远程监督未开启"}, nil
 		}
 		stopCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		err := c.controller.server.Stop(stopCtx)
 		c.controller = nil
-		return command.Output{Message: "Remote stopped"}, err
+		return command.Output{Message: "远程监督已停止"}, err
 	default:
-		return command.Output{}, errors.New("expected /remote start|status|stop")
+		return command.Output{}, errors.New("应为 /remote start|status|stop")
 	}
 }
 
@@ -233,10 +233,13 @@ func (fe *frontend) installRemotePermissionPrompt() {
 		return
 	}
 	eng := fe.eng
-	eng.PermissionPrompt = func(toolName string, input map[string]any, reason string) bool {
-		return askToolPermissionExternal(eng, toolName, input, reason, func() (<-chan repl.ExternalAnswer, func()) {
+	eng.PermissionPromptEx = func(toolName string, input map[string]any, reason string) engine.PermissionAnswer {
+		return askToolPermissionExternalAnswer(eng, toolName, input, reason, func() (<-chan repl.ExternalAnswer, func()) {
 			return cmd.permissionAnswer(eng, toolName, input, reason)
 		})
+	}
+	eng.PermissionPrompt = func(toolName string, input map[string]any, reason string) bool {
+		return eng.PermissionPromptEx(toolName, input, reason).Allow
 	}
 }
 
@@ -391,13 +394,13 @@ func (r *replTaskRunner) remoteSnapshotLocked(session, project string) remote.Sn
 		evidence = fmt.Sprintf("running=false paused=%t queued=%d", r.paused, len(r.queue))
 	}
 	if r.running {
-		evidence += "\nTask: " + taskPreview(r.current)
+		evidence += "\n任务: " + taskPreview(r.current)
 	}
 	if pending != "" {
-		evidence += "\nPending guidance: " + taskPreviewMessage(pending)
+		evidence += "\n待生效指引: " + taskPreviewMessage(pending)
 	}
 	if r.persistenceError != "" {
-		evidence += "\nQueue persistence failed"
+		evidence += "\n队列持久化失败"
 	}
 	return remote.Snapshot{Scope: scope, Running: r.running, Paused: r.paused, Evidence: evidence}
 }
@@ -429,14 +432,14 @@ func (fe *frontend) applyRemote(action remote.Action) error {
 	switch action.Kind {
 	case "steer":
 		if !r.running || r.eng == nil || strings.TrimSpace(action.Text) == "" {
-			return errors.New("steer requires a running task and nonempty text")
+			return errors.New("steer 需要正在运行的任务与非空文本")
 		}
 		r.eng.Steer(action.Text)
 		_, count := r.eng.PendingSteer()
 		repl.SetSteerCount(count)
 	case "cancel":
 		if !r.running || r.cancel == nil {
-			return errors.New("no cancellable task")
+			return errors.New("没有可取消的任务")
 		}
 		r.cancel()
 		fe.revokeRemoteApproval()
@@ -444,10 +447,10 @@ func (fe *frontend) applyRemote(action remote.Action) error {
 	case "pause":
 		r.paused = true
 		if !r.persistQueueLocked() {
-			return errors.New("queue persistence failed; queue remains paused")
+			return errors.New("队列持久化失败；队列保持暂停")
 		}
 	default:
-		return errors.New("unsupported runner action")
+		return errors.New("不支持的远程动作")
 	}
 	return nil
 }

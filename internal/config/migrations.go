@@ -15,9 +15,6 @@ type migrateRule struct {
 
 var migrateRules = []migrateRule{
 	{Version: 1, Apply: func(cfg *Config) error {
-		if cfg.ThinkingTokens < 1024 {
-			cfg.ThinkingTokens = 16000
-		}
 		if cfg.PermissionMode == "" {
 			cfg.PermissionMode = "default"
 		}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
 	"github.com/liuzhixin405/cove-agent/internal/permission"
+	"github.com/liuzhixin405/cove-agent/internal/session"
 	"github.com/liuzhixin405/cove-agent/internal/tool"
 )
 
@@ -137,5 +138,194 @@ func TestPlanModeRunsReadOnlyShellLines(t *testing.T) {
 		if out, failed := run1(t, eng, "bash", map[string]any{"command": cmd}); !failed {
 			t.Fatalf("%q ran in plan mode: %s", cmd, out)
 		}
+	}
+}
+
+func TestReviewWorkflowRequiresExplicitApproval(t *testing.T) {
+	writer := &sideEffectTool{name: "sidefx"}
+	eng := planEngine(t, writer, tool.NewExitPlanModeTool())
+	eng.SetPermissionMode(permission.Bypass)
+	if eng.WorkflowStatus().Mode != "direct" {
+		t.Fatal("review enabled by default")
+	}
+	if err := eng.SetWorkflowMode("once"); err != nil {
+		t.Fatal(err)
+	}
+	eng.beginReviewWorkflow(false)
+	if !eng.reviewPending() || eng.WorkflowStatus().Mode != "direct" {
+		t.Fatal("once did not arm just this task")
+	}
+	if _, failed := run1(t, eng, "sidefx", nil); !failed || writer.calls != 0 {
+		t.Fatal("implementation ran without review")
+	}
+	if _, failed := run1(t, eng, "exit_plan_mode", map[string]any{"summary": "incomplete"}); !failed {
+		t.Fatal("incomplete plan was approved")
+	}
+	input := map[string]any{"summary": "实现功能", "files": []string{"main.go"}, "decisions": []string{"不引入新依赖"}, "checks": []string{"go test ./..."}}
+	asks := 0
+	eng.PermissionPrompt = func(string, map[string]any, string) bool { asks++; return false }
+	if _, failed := run1(t, eng, "exit_plan_mode", input); !failed || !eng.reviewPending() || asks != 1 {
+		t.Fatal("rejected plan unlocked implementation")
+	}
+	eng.PermissionPrompt = func(string, map[string]any, string) bool { asks++; return true }
+	if _, failed := run1(t, eng, "exit_plan_mode", input); failed || eng.reviewPending() || asks != 2 {
+		t.Fatal("approved plan did not unlock implementation")
+	}
+	if _, failed := run1(t, eng, "sidefx", nil); failed || writer.calls != 1 {
+		t.Fatal("approved implementation still blocked")
+	}
+	eng.beginReviewWorkflow(true)
+	if eng.reviewPending() {
+		t.Fatal("resume forgot approval")
+	}
+	eng.beginReviewWorkflow(false)
+	if eng.reviewPending() {
+		t.Fatal("once enabled review for another task")
+	}
+}
+
+func TestReviewWorkflowRejectsFileDrift(t *testing.T) {
+	writer := &sideEffectTool{name: "sidefx"}
+	eng := planEngine(t, writer, tool.NewExitPlanModeTool())
+	eng.SetPermissionMode(permission.Bypass)
+	if err := eng.SetWorkflowMode("review"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.beginReviewWorkflow(false); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile("main.go", []byte("old"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	eng.PermissionPrompt = func(string, map[string]any, string) bool {
+		if err := os.WriteFile("main.go", []byte("changed-by-user"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return true
+	}
+	input := map[string]any{"summary": "修改返回值", "files": []any{"main.go"}, "decisions": []any{"保留接口"}, "checks": []any{"测试通过"}}
+	if out, failed := run1(t, eng, "exit_plan_mode", input); !failed || !strings.Contains(out, "发生变化") || !eng.reviewPending() {
+		t.Fatalf("file drift did not reject approval: %q", out)
+	}
+	if _, failed := run1(t, eng, "sidefx", nil); !failed || writer.calls != 0 {
+		t.Fatal("implementation ran after stale approval")
+	}
+}
+
+func TestReviewWorkflowPersistsPendingTask(t *testing.T) {
+	eng := planEngine(t)
+	if err := eng.SetWorkflowMode("once"); err != nil {
+		t.Fatal(err)
+	}
+	msg := api.Message{Role: "user", Content: "实现棋盘"}
+	if err := eng.beginReviewWorkflow(false, msg); err != nil {
+		t.Fatal(err)
+	}
+	id := eng.WorkflowStatus().TaskID
+	reloaded := &Engine{session: &session.Record{ID: eng.SessionID()}}
+	if err := reloaded.beginReviewWorkflow(false, msg); err != nil {
+		t.Fatal(err)
+	}
+	if state := reloaded.WorkflowStatus(); !state.Pending || state.TaskID != id || state.Mode != "direct" {
+		t.Fatalf("pending once task lost on restart: %+v", state)
+	}
+	reloaded.session.ID = "different-session"
+	if state := reloaded.WorkflowStatus(); state.Pending || state.Mode != "direct" {
+		t.Fatal("workflow leaked across sessions")
+	}
+	path, err := workflowPath(eng.SessionID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("broken"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	broken := &Engine{session: &session.Record{ID: eng.SessionID()}}
+	if err := broken.beginReviewWorkflow(false, msg); err == nil {
+		t.Fatal("corrupt workflow silently enabled implementation")
+	}
+}
+
+func TestReviewWorkflowCannotDelegateBeforeApproval(t *testing.T) {
+	delegate := &sideEffectTool{name: "agent", planSafe: true}
+	eng := planEngine(t, delegate)
+	eng.SetPermissionMode(permission.Bypass)
+	if err := eng.SetWorkflowMode("once"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.beginReviewWorkflow(false); err != nil {
+		t.Fatal(err)
+	}
+	if out, failed := run1(t, eng, "agent", nil); !failed || delegate.calls != 0 || !strings.Contains(out, "先确认") {
+		t.Fatalf("delegate bypassed review: calls=%d out=%q", delegate.calls, out)
+	}
+}
+
+func TestReviewWorkflowNoHandlerKeepsOfferedPlan(t *testing.T) {
+	eng := planEngine(t, tool.NewExitPlanModeTool())
+	eng.SetPermissionMode(permission.Bypass)
+	if err := eng.SetWorkflowMode("review"); err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.beginReviewWorkflow(false); err != nil {
+		t.Fatal(err)
+	}
+	input := map[string]any{"summary": "修改返回值", "files": []string{"main.go"}, "decisions": []string{"保留接口"}, "checks": []string{"go test ./..."}}
+	if out, failed := run1(t, eng, "exit_plan_mode", input); !failed || !strings.Contains(out, "保持待确认") {
+		t.Fatalf("missing handler enabled implementation: %q", out)
+	}
+	state := eng.WorkflowStatus()
+	if !state.Pending || state.Plan == nil || state.Plan.Summary != "修改返回值" || state.Plan.Decision != "pending" {
+		t.Fatal("unanswered plan was not saved as pending")
+	}
+}
+
+func TestReviewWorkflowRunMessageApprovalThenImplementation(t *testing.T) {
+	eng := planEngine(t, tool.NewWriteTool(), tool.NewExitPlanModeTool())
+	eng.SetPermissionMode(permission.Bypass)
+	if err := eng.SetWorkflowMode("once"); err != nil {
+		t.Fatal(err)
+	}
+	target, err := filepath.Abs("main.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := map[string]any{"summary": "写入实现", "files": []string{"main.go"}, "decisions": []string{"不引入依赖"}, "checks": []string{"检查内容"}}
+	write := api.ToolCall{Name: "write", Input: map[string]any{"filePath": target, "content": "implementation"}}
+	write.ID = "early"
+	provider := &mockProvider{responses: []mockResponse{
+		{toolCalls: []api.ToolCall{write}},
+		{toolCalls: []api.ToolCall{{ID: "plan", Name: "exit_plan_mode", Input: plan}}},
+		{toolCalls: []api.ToolCall{{ID: "approved-write", Name: "write", Input: write.Input}}},
+		{content: "done"},
+	}}
+	eng.SetProvider(provider)
+	asked := 0
+	eng.PermissionPrompt = func(name string, _ map[string]any, reason string) bool {
+		asked++
+		if name != "exit_plan_mode" || !strings.Contains(reason, "不引入依赖") || !strings.Contains(reason, "检查内容") {
+			t.Fatalf("incomplete approval prompt: %s %s", name, reason)
+		}
+		if _, err := os.Stat(target); !os.IsNotExist(err) {
+			t.Fatal("file was already mutated before approval")
+		}
+		if !strings.Contains(provider.lastReq.SystemBase+provider.lastReq.System, "先确认后实现") {
+			t.Fatal("review instructions missing")
+		}
+		return true
+	}
+	if _, err := eng.RunMessageWithStream(context.Background(), api.Message{Role: "user", Content: "实现功能"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(target)
+	if err != nil || string(data) != "implementation" || asked != 1 || eng.WorkflowStatus().Pending || eng.WorkflowStatus().Plan.Decision != "approved" {
+		t.Fatalf("approved task did not complete: data=%q err=%v asked=%d", data, err, asked)
+	}
+	eng.SetProvider(&mockProvider{responses: []mockResponse{{content: "next task"}}})
+	if _, err := eng.RunMessageWithStream(context.Background(), api.Message{Role: "user", Content: "另一个任务"}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if eng.WorkflowStatus().Active || eng.WorkflowStatus().Plan != nil || asked != 1 {
+		t.Fatal("once applied to a second task")
 	}
 }

@@ -64,9 +64,10 @@ func taskDecompositionGuidance(userMessage string) string {
 # This looks like a multi-step task
 
 Before making changes, lay out a short plan first:
-1. List the distinct sub-tasks (aim for 3-5 concrete steps), e.g. via todowrite.
-2. Tackle them one at a time — finish and verify one step before starting the next.
-3. Prefer several small, verifiable changes over one large, hard-to-verify change.
+1. Split the work into independent change sets, each with its own verification command (a package, a module): 3-8 tasks, no deeper. List them with todowrite.
+2. Mark ordering with a "depends: <id>" prefix only where one task needs another's result (types before implementations, an interface before its callers).
+3. Run them with execute_plan parallel=true: independent tasks run concurrently, dependent ones wait. Read-only investigation or review can be fanned out to agent calls directly.
+4. Prefer several small, verifiable changes over one large, hard-to-verify change.
 
 If, after looking closer, this turns out to be simpler than it first looked, it's fine to skip the plan and just do it directly.`
 }

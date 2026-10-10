@@ -22,9 +22,6 @@ func handleBuiltinConfigCommand(input string, cfg *config.Config, eng *engine.En
 	case input == "/profile" || strings.HasPrefix(input, "/profile "):
 		handleProfileCommand(input, cfg, eng)
 		return true
-	case input == "/record" || strings.HasPrefix(input, "/record "):
-		handleRecordCommand(input, eng)
-		return true
 	case strings.HasPrefix(input, "/model "):
 		if err := applyProviderConfigChange(cfg, eng, func() error {
 			cfg.Model = config.ResolveModelForProvider(strings.TrimPrefix(input, "/model "), cfg.Provider.Name)
@@ -316,35 +313,4 @@ func handleProfileCommand(input string, cfg *config.Config, eng *engine.Engine) 
 	default:
 		outln("用法: /profile list | /profile switch <name> | /profile save <name> | /profile delete <name> | /profile show <name>")
 	}
-}
-
-func handleRecordCommand(input string, eng *engine.Engine) {
-	args := strings.Fields(strings.TrimSpace(strings.TrimPrefix(input, "/record")))
-	if len(args) == 0 || strings.EqualFold(args[0], "status") {
-		enabled, dir := eng.RecordingStatus()
-		if enabled {
-			outf("recording: on (%s)\n", dir)
-		} else {
-			outf("recording: off (%s)\n", dir)
-		}
-		return
-	}
-	if strings.EqualFold(args[0], "start") {
-		dir := "./recordings"
-		if len(args) > 1 {
-			dir = args[1]
-		}
-		if err := eng.EnableRecording(dir); err != nil {
-			outf("启动录制失败: %v\n", err)
-			return
-		}
-		outf("recording 已开启: %s\n", dir)
-		return
-	}
-	if strings.EqualFold(args[0], "stop") {
-		eng.DisableRecording()
-		outln("recording 已关闭")
-		return
-	}
-	outln("用法: /record status | /record start <dir> | /record stop")
 }

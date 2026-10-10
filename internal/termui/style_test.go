@@ -359,3 +359,21 @@ func TestBannerEmitsNoStrayEscapeBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestGutterBoxKeepsPreRenderedBody(t *testing.T) {
+	body := "\x1b[1m计划\x1b[0m\n  • 第一步"
+	out := GutterBox("需要确认", "整树回退", body, false)
+	if !strings.Contains(out, "需要确认") || !strings.Contains(out, "整树回退") {
+		t.Fatalf("header missing: %q", out)
+	}
+	if !strings.Contains(out, "\x1b[1m计划\x1b[0m") {
+		t.Fatalf("pre-rendered styles must survive: %q", out)
+	}
+	if strings.Count(out, "┃") < 4 {
+		t.Fatalf("every body line needs the gutter: %q", out)
+	}
+	escaped := GutterBox("需要授权", "bash", "echo \x1b[2J", true)
+	if strings.Contains(escaped, "\x1b[2J") {
+		t.Fatalf("escapeBody must make controls visible: %q", escaped)
+	}
+}

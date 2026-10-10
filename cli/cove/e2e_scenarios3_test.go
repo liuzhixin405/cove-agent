@@ -137,10 +137,10 @@ func TestE2E_BrokenStreamIsRetriedTransparently(t *testing.T) {
 	}
 }
 
-// /history clear empties the current project's history: the confirm step
-// names the count, "confirm" deletes, and /history afterwards lists nothing.
-// (/history clean only repairs files, which is what the person mistook for
-// clearing.)
+// /history clear empties the current project's history: the confirmation
+// box names the count, "n" keeps everything, "y" deletes, and /history
+// afterwards lists nothing. (/history clean only repairs files, which is
+// what the person mistook for clearing.)
 func TestE2E_HistoryClearEmptiesTheList(t *testing.T) {
 	model := newFakeModel(t, fakeStep{Content: "这是关于解析器结构的说明，先从词法分析开始讲。"})
 	e2eHome(t, model)
@@ -154,11 +154,16 @@ func TestE2E_HistoryClearEmptiesTheList(t *testing.T) {
 	second.Type("/history")
 	second.WaitFor("讲讲解析器的结构", e2eTimeout)
 	second.Type("/history clear")
-	second.WaitFor("/history clear confirm", e2eTimeout)
+	second.WaitFor("清除历史会话", e2eTimeout)
+	second.WaitFor("将删除 1 个历史会话", e2eTimeout)
 	if strings.Contains(second.Output(), "已删除") {
 		t.Fatalf("history deleted without confirmation:\n%s", second.Output())
 	}
-	second.Type("/history clear confirm")
+	second.Type("n")
+	second.WaitFor("已取消：清除历史会话", e2eTimeout)
+	second.Type("/history clear")
+	second.WaitFor("[y] 确认", e2eTimeout)
+	second.Type("y")
 	second.WaitFor("已删除 1 个会话", e2eTimeout)
 	second.Type("/history")
 	second.WaitFor("当前项目暂无历史", e2eTimeout)

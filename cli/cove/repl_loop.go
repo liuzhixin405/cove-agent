@@ -85,7 +85,11 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 	})
 	images := newImageInput(&fe.attachedFiles)
 	defer images.close()
+	// Maintenance results written by another process (the scheduler's
+	// --automation tick) are announced instead of waiting for /inbox.
+	inbox := newInboxWatcher()
 	configureRemoteReader := func(reader *repl.LineReader) {
+		fe.reader = reader
 		fe.choose = reader.ShowChoices
 		reader.SetPanelSource(func(selected int) ([]string, int) {
 			return agentMapLines(eng.AgentActivities(), selected, tasks.IsRunning(), time.Now())
@@ -115,6 +119,11 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 		})
 		reader.SetOwnerEventHook(fe.remoteWake, func() {
 			fe.pollRemote()
+			if cwd, err := os.Getwd(); err == nil {
+				if n := inbox.pollFor(cwd, time.Now()); n > 0 {
+					notify(fmt.Sprintf("维护任务有 %d 条新结果", n), "/inbox 查看")
+				}
+			}
 			reader.RefreshPanel()
 			if tasks.IsRunning() {
 				reader.SetPrompt(repl.PromptRunning())
@@ -211,6 +220,13 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 
 	}
 
+	// No key yet: offer the three-step setup before the first line, instead
+	// of reporting the missing key when the first message is sent (and
+	// dropping that message). COVE_NO_SETUP=1 keeps the old behaviour.
+	if os.Getenv("COVE_NO_SETUP") != "1" && runNeedsAPIKey(cfg.EffectiveProvider().APIKey) {
+		runSetupWizard(fe, reader, cfg, eng)
+	}
+
 	for {
 		images.prune()
 		reader.SetInputStatus(images.summary())
@@ -225,6 +241,7 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 
 		if errors.Is(err, repl.ErrInterrupt) {
 			fe.revokeRemoteApproval()
+			fe.cancelPendingConfirm()
 
 			denyPendingPermissionPrompt()
 
@@ -249,6 +266,7 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 		// Esc on an empty line interrupts the running task, like Ctrl+C;
 		// with nothing running it does nothing.
 		if errors.Is(err, repl.ErrEscape) {
+			fe.cancelPendingConfirm()
 			if tasks.IsRunning() {
 				fe.revokeRemoteApproval()
 				denyPendingPermissionPrompt()
@@ -286,6 +304,13 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 
 			continue
 
+		}
+
+		// A confirmation box a slash command left waiting (/undo, /history
+		// clear) takes the line first: y runs it, n cancels, anything else
+		// cancels and is handled below as usual.
+		if fe.takePendingConfirm(input) {
+			continue
 		}
 
 		// If a permission prompt is waiting for an answer, route this line to it
@@ -381,8 +406,7 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 
 			}
 
-			// The same test as -p and headless: a --replay run needs no key.
-			if runNeedsAPIKey(pc.APIKey, replayDir != "") {
+			if runNeedsAPIKey(pc.APIKey) {
 
 				repl.PrintAbove(missingAPIKeyMessage(pc.Name) + "\r\n")
 

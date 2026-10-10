@@ -76,34 +76,53 @@ type Store struct {
 var validID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$`)
 
 func Open(stateRoot, project string) (*Store, error) {
-	abs, err := filepath.Abs(project)
+	dir, abs, err := storeDir(stateRoot, project)
 	if err != nil {
 		return nil, err
+	}
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return nil, err
+	}
+	return &Store{dir: dir, project: abs}, nil
+}
+
+// StatePath is where Open(stateRoot, project) keeps its state.json, without
+// creating anything: a watcher asks for it on every project the REPL
+// starts in, and most of them never had a maintenance task.
+func StatePath(stateRoot, project string) (string, error) {
+	dir, _, err := storeDir(stateRoot, project)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "state.json"), nil
+}
+
+// storeDir is the per-project state directory and the canonical project path.
+func storeDir(stateRoot, project string) (dir, abs string, err error) {
+	abs, err = filepath.Abs(project)
+	if err != nil {
+		return "", "", err
 	}
 	abs, err = filepath.EvalSymlinks(abs)
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
 	if !info.IsDir() {
-		return nil, errors.New("automation project must be a directory")
+		return "", "", errors.New("automation project must be a directory")
 	}
 	if runtime.GOOS == "windows" {
 		abs = strings.ToLower(abs)
 	}
 	root, err := ExternalPath(abs, stateRoot)
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
 	sum := sha256.Sum256([]byte(abs))
-	dir := filepath.Join(root, hex.EncodeToString(sum[:16]))
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return nil, err
-	}
-	return &Store{dir: dir, project: abs}, nil
+	return filepath.Join(root, hex.EncodeToString(sum[:16])), abs, nil
 }
 
 func canonicalPath(path string) (string, error) {

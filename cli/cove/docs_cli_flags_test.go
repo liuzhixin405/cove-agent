@@ -39,7 +39,7 @@ func manualFlags(t *testing.T) map[string]bool {
 }
 
 // The 启动参数 table listed -r as working when it did nothing, and left out
-// --no-tui, --profile, --record and --replay. Keep the table, the parser and
+// --no-tui and --profile. Keep the table, the parser and
 // --help in step.
 func TestManualFlagTableMatchesParser(t *testing.T) {
 	documented := manualFlags(t)

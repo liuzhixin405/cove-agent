@@ -24,14 +24,12 @@ func TestLoadWithProfileAppliesOverrides(t *testing.T) {
 	cfg.Provider.Name = "openai"
 	cfg.Provider.APIKey = "sk-base"
 	cfg.MaxBudgetUsd = 3.5
-	cfg.ThinkingTokens = 2048
 	cfg.Profiles = map[string]*Profile{
 		"work": {
-			Model:          "work-model",
-			ModelFast:      "work-fast",
-			Provider:       &ProviderConfig{Name: "deepseek", APIKey: "sk-work"},
-			ThinkingTokens: 4096,
-			MaxBudgetUsd:   8,
+			Model:        "work-model",
+			ModelFast:    "work-fast",
+			Provider:     &ProviderConfig{Name: "deepseek", APIKey: "sk-work"},
+			MaxBudgetUsd: 8,
 		},
 	}
 	cfg.ActiveProfile = "work"
@@ -56,9 +54,6 @@ func TestLoadWithProfileAppliesOverrides(t *testing.T) {
 	}
 	if loaded.Provider.APIKey != "sk-work" {
 		t.Fatalf("expected provider API key override, got %q", loaded.Provider.APIKey)
-	}
-	if loaded.ThinkingTokens != 4096 {
-		t.Fatalf("expected profile thinking tokens override, got %d", loaded.ThinkingTokens)
 	}
 	if loaded.MaxBudgetUsd != 8 {
 		t.Fatalf("expected profile max budget override, got %v", loaded.MaxBudgetUsd)

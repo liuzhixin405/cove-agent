@@ -1,11 +1,14 @@
 package repl
 
 import (
+	"bufio"
 	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
+	"time"
 )
 
 func TestEditingKeys(t *testing.T) {
@@ -37,14 +40,81 @@ func TestEditingKeys(t *testing.T) {
 	}
 }
 
-// A bare Esc (nothing behind it in the read) clears the line; on an empty
-// line it is ErrEscape, which the front end turns into an interrupt.
+// typedKeyByKey is typed with the keys delivered one byte per read, the way
+// separate keypresses arrive: a bare Esc is then followed by nothing in the
+// buffer and is the Esc key, not the start of an escape sequence.
+func typedKeyByKey(keys string) *LineReader {
+	lr := New(nil)
+	lr.rawReader = bufio.NewReader(iotest.OneByteReader(strings.NewReader(keys)))
+	return lr
+}
+
+func editKeyByKey(t *testing.T, keys string) (string, error) {
+	t.Helper()
+	restore := captureStdout(t)
+	line, err := typedKeyByKey(keys).editLine()
+	restore()
+	return line, err
+}
+
+// Esc on a line with text clears it and Ctrl+Z brings it back; on an empty
+// line while a task runs, a second Esc within two seconds is ErrEscape.
 func TestEscKey(t *testing.T) {
-	if _, err := editOnce(t, "\x1b"); !errors.Is(err, ErrEscape) {
-		t.Fatalf("bare Esc on an empty line: err = %v", err)
+	SetHint("")
+	if got, err := editKeyByKey(t, "abc"); err != nil || got != "abc" {
+		t.Fatalf("Esc then Ctrl+Z: %q, %v", got, err)
+	}
+	if got, err := editKeyByKey(t, "abcxy"); err != nil || got != "xy" {
+		t.Fatalf("Ctrl+Z on a non-empty line must do nothing: %q, %v", got, err)
+	}
+	if got, err := editKeyByKey(t, ""); err != nil || got != "" {
+		t.Fatalf("Ctrl+Z with nothing cleared: %q, %v", got, err)
+	}
+	consoleMu.Lock()
+	hint := currentHintLocked()
+	consoleMu.Unlock()
+	if strings.Contains(hint, "Ctrl+Z") {
+		t.Fatalf("the clear hint must go when the line is submitted: %q", hint)
+	}
+
+	running := func(keys string) *LineReader {
+		lr := typedKeyByKey(keys)
+		lr.interactionState = "执行中"
+		return lr
+	}
+	restore := captureStdout(t)
+	defer restore()
+	if _, err := running("").editLine(); !errors.Is(err, ErrEscape) {
+		t.Fatalf("two Esc while running: err = %v", err)
+	}
+	lr := running("")
+	if _, err := lr.editLine(); errors.Is(err, ErrEscape) {
+		t.Fatal("one Esc while running must only arm")
+	}
+	consoleMu.Lock()
+	hint = currentHintLocked()
+	consoleMu.Unlock()
+	if !strings.Contains(hint, "再按一次 Esc") {
+		t.Fatalf("hint after first Esc = %q", hint)
+	}
+	SetHint("")
+	lr = running("")
+	lr.escArmedAt = time.Now().Add(-3 * time.Second)
+	if _, err := lr.editLine(); errors.Is(err, ErrEscape) {
+		t.Fatal("an Esc older than the window must not count")
+	}
+	SetHint("")
+	if _, err := typedKeyByKey("").editLine(); errors.Is(err, ErrEscape) {
+		t.Fatal("Esc with no task running must do nothing")
+	}
+	consoleMu.Lock()
+	hint = currentHintLocked()
+	consoleMu.Unlock()
+	if strings.Contains(hint, "再按一次") {
+		t.Fatalf("idle Esc must not show the interrupt hint: %q", hint)
 	}
 	t.Setenv("COVE_ESC_INTERRUPT", "0")
-	if _, err := editOnce(t, "\x1b"); errors.Is(err, ErrEscape) {
+	if _, err := running("").editLine(); errors.Is(err, ErrEscape) {
 		t.Fatal("COVE_ESC_INTERRUPT=0 did not turn Esc off")
 	}
 }
@@ -143,4 +213,34 @@ func TestLayoutInput(t *testing.T) {
 	if rows[1].prefix != "  " {
 		t.Fatalf("continuation prefix %q", rows[1].prefix)
 	}
+}
+
+// The "press Esc again" hint goes away by itself once the window closes;
+// it used to sit in the status row until the next submitted line.
+func TestEscHintClearsAfterWindow(t *testing.T) {
+	old := escConfirmWindow
+	escConfirmWindow = 30 * time.Millisecond
+	t.Cleanup(func() { escConfirmWindow = old; SetHint("") })
+	restore := captureStdout(t)
+	defer restore()
+	lr := typedKeyByKey("\x1b")
+	lr.interactionState = "执行中"
+	_, _ = lr.editLine()
+	consoleMu.Lock()
+	hint := currentHintLocked()
+	consoleMu.Unlock()
+	if !strings.Contains(hint, "再按一次 Esc") {
+		t.Fatalf("hint not armed: %q", hint)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		consoleMu.Lock()
+		hint = currentHintLocked()
+		consoleMu.Unlock()
+		if hint == "" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("hint still shown after the window: %q", hint)
 }

@@ -505,3 +505,61 @@ func TestOutsideProjectAcrossVolumes(t *testing.T) {
 		t.Fatal("sibling directory judged inside")
 	}
 }
+
+// OnFinish hands the final report to the front end once the run is over,
+// however it ended: the report used to be dropped and nobody was told.
+func TestOnFinishCalledOnceWithFinalReport(t *testing.T) {
+	project := fixture(t)
+	finished := make(chan *Report, 2)
+	svc := &Service{Directory: t.TempDir(), Runner: RunnerFunc(func(ctx context.Context, request Request) Execution {
+		if err := os.WriteFile(filepath.Join(request.Directory, "value.txt"), []byte(request.Prompt+"\n"), 0600); err != nil {
+			return Execution{Status: "start_error", Error: err.Error()}
+		}
+		return Execution{Status: "passed", ExitCode: 0}
+	}), OnFinish: func(r *Report) { finished <- r }}
+	defer svc.Close()
+	report, err := svc.Run(context.Background(), project, testSpec(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-finished:
+		if got.ID != report.ID || got.Status != "completed" {
+			t.Fatalf("OnFinish got %+v", got)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("OnFinish not called")
+	}
+	select {
+	case <-finished:
+		t.Fatal("OnFinish called twice")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// Load tolerates the moment a report is being replaced: the final save
+// rewrites report.json atomically, and a reader that opened the directory
+// in that instant saw "file not found" (TestRaceCommandOperatorPath flaked
+// on it). A report whose directory exists is retried briefly.
+func TestLoadRetriesWhileReportIsBeingReplaced(t *testing.T) {
+	dir := t.TempDir()
+	svc := &Service{Directory: dir}
+	id := "abcdefghijklmnopqrstuvwxyz"
+	if err := os.MkdirAll(filepath.Join(dir, id), 0700); err != nil {
+		t.Fatal(err)
+	}
+	report := &Report{Version: Version, ID: id, Status: "completed"}
+	report.Candidates[0].ID, report.Candidates[1].ID = "a", "b"
+	data, _ := json.Marshal(report)
+	go func() {
+		time.Sleep(60 * time.Millisecond)
+		_ = os.WriteFile(filepath.Join(dir, id, "report.json"), data, 0600)
+	}()
+	got, err := svc.Load(id)
+	if err != nil || got.ID != id {
+		t.Fatalf("Load during replace: %v %+v", err, got)
+	}
+	if _, err := svc.Load("zzzzzzzzzzzzzzzzzzzzzzzzzz"); err == nil {
+		t.Fatal("a run that never existed must not be retried into success")
+	}
+}

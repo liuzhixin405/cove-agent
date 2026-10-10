@@ -24,7 +24,6 @@ func TestSavePreservesAPIKey(t *testing.T) {
 	cfg.Provider.APIKey = "sk-234...cdef"
 	cfg.Provider.BaseURL = "https://api.deepseek.com/v1"
 	cfg.MaxBudgetUsd = 5.0
-	cfg.ThinkingTokens = 1024
 	cfg.Debug = true
 	cfg.SystemPrompt = "You are a helpful assistant."
 
@@ -69,6 +68,42 @@ func TestSavePreservesAPIKey(t *testing.T) {
 	}
 	if strings.Contains(dispStr, "sk-234...cdef") {
 		t.Errorf("display leaked full key: %s", dispStr)
+	}
+}
+
+func TestRetiredThinkingTokensCompatibility(t *testing.T) {
+	global, project := isolate(t)
+	writeFile(t, filepath.Join(global, "config.json"), `{
+		"model":"base-model", "thinking_tokens":16000,
+		"active_profile":"work",
+		"profiles":{"work":{"model":"work-model","thinking_tokens":4096}}
+	}`)
+	writeFile(t, filepath.Join(project, ".cove.json"), `{"thinking_tokens":30000}`)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Model != "work-model" {
+		t.Fatalf("profile model = %q, want work-model", cfg.Model)
+	}
+	for _, value := range []any{DefaultConfig(), cfg.SnapshotProfile()} {
+		data, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatal(err)
+		}
+		if _, exists := fields["thinking_tokens"]; exists {
+			t.Fatalf("retired field emitted in %s", data)
+		}
+	}
+	if err := Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(); err != nil {
+		t.Fatalf("load after save: %v", err)
 	}
 }
 

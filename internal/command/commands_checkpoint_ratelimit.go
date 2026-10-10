@@ -46,6 +46,17 @@ func (c *UndoCmd) Help() string {
 	return "/undo [commit] - 整树回退并备份；/undo files <commit> <文件>... 预览文件级回滚；/undo apply <预览ID> 确认；/undo cancel 放弃预览"
 }
 func (c *UndoCmd) ArgHints() []string { return []string{"files", "apply", "cancel"} }
+
+// PendingPreviewID is the token of the file-level preview waiting for
+// approval ("" when there is none); the front end confirms it in one key.
+func (c *UndoCmd) PendingPreviewID() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.preview == nil {
+		return ""
+	}
+	return c.preview.ID()
+}
 func (c *UndoCmd) Execute(ctx context.Context, in Input) (Output, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
