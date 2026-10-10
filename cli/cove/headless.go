@@ -32,8 +32,7 @@ import (
 // before the input did. main exits 1 then, after
 // finishSession. The run used to exit 0 whatever happened, so a script
 // piping prompts into cove could not tell a run whose every turn failed
-// from one that worked. Slash commands do not count: they report their own
-// errors as text and have no status to go by.
+// from one that worked. Slash-command errors stop subsequent input.
 func runHeadless(app *appBootstrap, cmdReg *command.Registry, bannerText string) (failed bool) {
 	return runHeadlessFrom(os.Stdin, app, cmdReg, bannerText)
 }
@@ -105,6 +104,11 @@ func runHeadlessFrom(in io.Reader, app *appBootstrap, cmdReg *command.Registry, 
 			break
 		}
 		if fe.dispatch(input) {
+			if fe.commandFailed {
+				fmt.Fprintln(os.Stderr, "[命令失败] 不再执行后续输入")
+				failed = true
+				break
+			}
 			if fe.terminated {
 				terminated = true
 			}

@@ -56,7 +56,7 @@ type chatRunner interface {
 }
 
 var (
-	Version = "12.3.0"
+	Version = "12.3.1"
 
 	BuildTime = "pro"
 
@@ -585,6 +585,10 @@ func (a replEngineAdapter) SystemPrompt() string { return a.eng.SystemPrompt() }
 
 func (a replEngineAdapter) CostTracker() command.CostTrackerView { return a.eng.CostTracker() }
 
+func (a replEngineAdapter) VerifyCommit(ctx context.Context, paths []string) error {
+	return a.eng.VerifyCommit(ctx, paths)
+}
+
 // ContextUsage forwards Engine.ContextUsage for /context.
 func (a replEngineAdapter) ContextUsage() (tokens, window int) { return a.eng.ContextUsage() }
 
@@ -649,9 +653,10 @@ func (fe *frontend) execute(ctx context.Context, input string) {
 	parts := strings.Fields(input)
 
 	name := strings.TrimPrefix(parts[0], "/")
-	if len(parts) > 1 && ((name == "undo" && parts[1] == "files") || (name == "memory" && parts[1] == "source")) {
+	if name == "commit" || len(parts) > 1 && ((name == "undo" && parts[1] == "files") || (name == "memory" && parts[1] == "source")) {
 		quoted, err := splitQuotedFields(input)
 		if err != nil {
+			fe.commandFailed = true
 			fe.print("参数解析失败: " + err.Error())
 			return
 		}
@@ -697,9 +702,11 @@ func (fe *frontend) execute(ctx context.Context, input string) {
 		MCPPool: mcpPool,
 
 		ProjectContext: projCtx,
+		CommitPreview:  fe.print,
 	})
 
 	if err != nil {
+		fe.commandFailed = true
 
 		termui.PrintAbove(fmt.Sprintf("错误: %v\r\n", err))
 

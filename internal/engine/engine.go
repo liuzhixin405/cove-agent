@@ -1317,6 +1317,12 @@ func (e *Engine) executeToolWithParts(ctx context.Context, tc api.ToolCall, part
 	if err := e.authorizeToolCall(tc, tctx, tctx.SetWaiting); err != nil {
 		return "Error: " + err.Error(), true
 	}
+	if permission.IsShellTool(tc.Name) {
+		line, _ := tc.Input["command"].(string)
+		if err := e.verifyShellCommit(ctx, line, cwd, e.perm.ShellKindFor(tc.Name)); err != nil {
+			return "Error: 提交前验证未通过: " + err.Error(), true
+		}
+	}
 	// Warning-level findings (git push --force, git reset --hard) do not stop
 	// a call; they are shown once the call is really going to run. They used
 	// to be computed and dropped, so in auto or bypass mode such a command

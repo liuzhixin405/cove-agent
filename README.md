@@ -105,7 +105,7 @@ cove -p "添加一个新的 API 接口并更新 README"   # 或直接运行 cove
 | `/undo files <检查点> <文件>...` | 预览文件级回滚，交互模式按 y 直接应用；headless 用 `/undo apply <预览ID>` 确认；执行前检测选中文件漂移 |
 | `/checkpoints`      | 列出所有检查点                                                  |
 | `/diff`             | 显示 git diff                                                   |
-| `/commit [msg]`     | Git add + commit                                                |
+| `/commit [msg]`     | 预览并验证已暂存内容后提交，不推送；`--all` 明确全部提交，`--only <路径>... -- [msg]` 只提交选中文件；`--preview` 仅预览 |
 | `/review`           | 审查工作区变更                                                  |
 | `/init [apply\|discard]` | 让模型起草 CLAUDE.md 并以 diff 展示；`apply` 写入，`discard` 放弃 |
 | `/cd <路径>`        | 切换工作目录（按新目录重新加载 `policies.json` 规则）         |

@@ -111,7 +111,7 @@ go build -o cove ./cli/cove
 | `--list-sessions [all]` | 列出当前项目的会话；加 `all` 列出所有项目的会话 |
 | `--dump-system-prompt` | 打印系统提示词 |
 | `--no-auto` | 禁用后台自学习功能 |
-| `--no-tui` | 使用 headless 模式（按行读 stdin，答案写 stdout，提示写 stderr）；任一轮失败（请求出错、取消、缺 API key、超预算、附件读不到）时以退出码 1 结束；收到 SIGTERM 时（含执行斜杠命令期间）保存会话后结束，不再读后续输入 |
+| `--no-tui` | 使用 headless 模式（按行读 stdin，答案写 stdout，提示写 stderr）；任一轮失败（请求出错、取消、缺 API key、超预算、附件读不到）时以退出码 1 结束；斜杠命令返回错误时停止后续输入并退出 1；收到 SIGTERM 时（含执行斜杠命令期间）保存会话后结束，不再读后续输入 |
 | `--tui` | 即使 stdin/stdout 不是终端也强制使用交互界面 |
 | `--profile <name>` | 使用指定 profile 启动 |
 | `-h, --help` | 帮助信息 |
@@ -352,9 +352,22 @@ DeepSeek Flash 原生支持图片，`deepseek-v4-pro` 不支持。只要当前�
 
 | 命令 | 说明 |
 |------|------|
-| `/commit [msg]` | Git add + commit |
-| `/review` | 审查工作区变更 |
+| `/commit [msg]` | 默认仅提交已暂存内容，先显示范围、检查暂存差异并执行配置的构建/测试验证；不推送 |
+| `/commit --all [msg]` | 明确提交当前仓库全部更改（不含 Git 忽略文件） |
+| `/commit --only <路径>... -- [msg]` | 只提交所选路径的工作区内容，支持新增、删除、空格和中文路径；保留其他已暂存文件 |
+| `/commit --preview [--all]` | 只预览拟提交文件，不运行测试、不创建提交；也支持 `--preview --only <路径>... --` |
+| `/review` | 分区显示已暂存、未暂存与未跟踪文件 |
 | `/diff` | 显示 git diff |
+
+建议先 `/review`，再用 `/commit --preview` 检查范围，最后 `/commit 修复说明`。选择文件示例：`/commit --only "src/file with spaces.go" -- "fix: 修复边界条件"`。不指定消息时仍使用 `auto-commit`。
+
+`--all` 和 `--only` 使用临时 Git 暂存区准备内容，测试或 Git hook 拒绝时不将这些文件加入原暂存区；成功后只同步本次提交涉及的路径。默认提交不会自动执行 `git add -A`。所有提交先执行 `git diff --cached --check`，空暂存区、差异检查失败和 Git 失败都返回错误。
+
+提交前复用 `done_verify_commands` 或自动检测的验证命令及其超时；自动验证需要项目受信任（`/trust`）或 auto/bypass 模式，未信任时拒绝提交而非跳过检查。未配置或未检测到验证命令时，只执行 Git 检查，不能据此宣称测试通过。验证结果不跨提交复用，Git hook 可能改动文件。
+
+验证在当前工作区运行，不是独立的干净检出测试；选中文件的暂存内容与工作区不同，或验证期间选中文件、暂存快照改变，会拒绝提交。其他未提交文件仍可能影响测试结果；需要验证独立可复现的提交时，还应在干净检出或 CI 中测试。
+
+模型通过 shell 工具执行可识别的 `git commit` 时，开启验证也会执行提交前检查。应将暂存、提交和推送拆成独立工具调用；门禁拒绝串行提交命令、切换验证目录或在 `git commit` 中再选择/暂存文件。它不是任意脚本、变量或自定义 Git 别名的安全沙箱。推送仍走原有权限确认，不会由 `/commit` 自动执行。
 
 ### 系统
 

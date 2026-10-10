@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/liuzhixin405/cove-agent/internal/permission"
+	"github.com/liuzhixin405/cove-agent/internal/safety"
 	"github.com/liuzhixin405/cove-agent/internal/shell"
 	"github.com/liuzhixin405/cove-agent/internal/tool"
 )
@@ -170,6 +171,141 @@ func (g *VerifyGate) MaxRetries() int {
 // are not run again and count as passed.
 func (g *VerifyGate) Run(ctx context.Context, alreadyPassed func(cmd string) bool) (results []VerifyResult, allPassed bool) {
 	return g.run(ctx, alreadyPassed, nil)
+}
+
+func (e *Engine) VerifyCommit(ctx context.Context, paths []string) error {
+	if e.verifyGate == nil || !e.verifyGate.Enabled() {
+		return ctx.Err()
+	}
+	gate := *e.verifyGate
+	if !e.verifyTrusted(&gate) {
+		return fmt.Errorf("项目未受信任，请先 /trust 再提交")
+	}
+	if gate.dynamic != nil {
+		gate.dynamic = func() []string { return testCommandsFor(gate.workDir, paths) }
+	}
+	e.engineOutput("提交前验证: " + strings.Join(gate.turnCommands(), "；"))
+	results, passed := gate.run(ctx, nil, e.recordAcceptanceResults)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !passed {
+		return fmt.Errorf("%s", Summary(results))
+	}
+	e.engineOutput(fmt.Sprintf("提交前验证通过（%d 项）", len(results)))
+	return nil
+}
+
+func (e *Engine) verifyShellCommit(ctx context.Context, command, cwd string, kind permission.ShellKind) error {
+	if e.verifyGate == nil || !e.verifyGate.Enabled() {
+		return nil
+	}
+	top := safety.SimpleCommands(command)
+	if kind == permission.ShellPOSIX {
+		top = safety.SimpleCommandsPOSIX(command)
+	}
+	readings := append(append([]safety.SimpleCommand(nil), top...), safety.NestedCommands(command)...)
+	var commitWords []string
+	for _, reading := range readings {
+		words := safety.StripCommandRunners(reading.Words)
+		if len(words) < 2 || strings.TrimSuffix(strings.ToLower(filepath.Base(strings.ReplaceAll(words[0], "\\", "/"))), ".exe") != "git" {
+			continue
+		}
+		args := words[1:]
+		for len(args) > 0 && strings.HasPrefix(args[0], "-") {
+			if gitGlobalOptsWithValue[args[0]] {
+				if len(args) < 2 {
+					break
+				}
+				args = args[1:]
+			}
+			args = args[1:]
+		}
+		if len(args) > 0 && args[0] == "commit" {
+			commitWords = words
+			break
+		}
+	}
+	if commitWords == nil {
+		return nil
+	}
+	if len(top) != 1 || len(safety.NestedCommands(command)) != 0 || len(top[0].Redirects) != 0 || len(top[0].Words) != len(commitWords) || commitWords[1] != "commit" || safety.HasHostileCharacters(command) {
+		return fmt.Errorf("提交前验证要求拆分命令：先单独暂存，再单独 git commit；切目录和推送也必须分开")
+	}
+	for args := commitWords[2:]; len(args) > 0; args = args[1:] {
+		option := strings.SplitN(args[0], "=", 2)[0]
+		switch option {
+		case "-m", "--message", "-F", "--file", "--author", "--date", "--cleanup":
+			if !strings.Contains(args[0], "=") {
+				if len(args) < 2 {
+					return fmt.Errorf("提交参数缺少值: %s", args[0])
+				}
+				args = args[1:]
+			}
+		case "--amend", "--no-edit", "--allow-empty", "--allow-empty-message", "-s", "--signoff", "-S", "--gpg-sign", "--no-gpg-sign", "-v", "--verbose", "-q", "--quiet", "-n", "--no-verify":
+		default:
+			if strings.HasPrefix(args[0], "-m") || strings.HasPrefix(args[0], "-F") {
+				continue
+			}
+			return fmt.Errorf("提交前请先单独 git add；仅支持不改变暂存范围的 git commit 参数: %s", args[0])
+		}
+	}
+	if sessionDir := e.verifyGate.workDir; sessionDir != "" {
+		absolute, err := filepath.Abs(cwd)
+		if err != nil || filepath.Clean(absolute) != filepath.Clean(sessionDir) {
+			return fmt.Errorf("提交目录与验证目录不同，请先切换 cove 工作目录再提交")
+		}
+	}
+	git := func(args ...string) (string, error) {
+		cmd := exec.CommandContext(ctx, "git", args...)
+		cmd.Dir = cwd
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			return string(output), fmt.Errorf("git %s: %s: %w", args[0], strings.TrimSpace(string(output)), err)
+		}
+		return string(output), nil
+	}
+	files, err := git("diff", "--cached", "--name-only", "-z")
+	if err != nil {
+		return err
+	}
+	paths := strings.Split(strings.TrimSuffix(files, "\x00"), "\x00")
+	tree, err := git("write-tree")
+	if err != nil {
+		return err
+	}
+	check := func() error {
+		if _, err := git("diff", "--cached", "--check"); err != nil {
+			return err
+		}
+		if files != "" {
+			changed, err := git(append([]string{"--literal-pathspecs", "diff", "--name-only", "--"}, paths...)...)
+			if err != nil {
+				return err
+			}
+			if changed != "" {
+				return fmt.Errorf("暂存快照与工作区不同，请先重新暂存: %s", changed)
+			}
+		}
+		return nil
+	}
+	if err := check(); err != nil {
+		return err
+	}
+	if err := e.VerifyCommit(ctx, paths); err != nil {
+		return err
+	}
+	if err := check(); err != nil {
+		return err
+	}
+	current, err := git("write-tree")
+	if err != nil {
+		return err
+	}
+	if current != tree {
+		return fmt.Errorf("验证期间暂存区发生变化，未提交")
+	}
+	return ctx.Err()
 }
 
 func (g *VerifyGate) run(ctx context.Context, alreadyPassed func(string) bool, observe func([]string, []VerifyResult)) (results []VerifyResult, allPassed bool) {

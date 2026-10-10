@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,178 @@ import (
 	"github.com/liuzhixin405/cove-agent/internal/permission"
 	"github.com/liuzhixin405/cove-agent/internal/session"
 )
+
+type commitTestVerifier struct {
+	fakeEngine
+	verify func([]string) error
+}
+
+func (v *commitTestVerifier) VerifyCommit(_ context.Context, paths []string) error {
+	return v.verify(paths)
+}
+
+func commitTestWrite(t *testing.T, dir, name, text string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(text), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func commitTestRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.email", "commit@example.invalid")
+	runGit(t, dir, "config", "user.name", "Commit Test")
+	runGit(t, dir, "config", "commit.gpgsign", "false")
+	runGit(t, dir, "config", "core.hooksPath", filepath.Join(dir, ".git", "hooks"))
+	for _, name := range []string{"selected.txt", "other.txt"} {
+		commitTestWrite(t, dir, name, "initial\n")
+	}
+	runGit(t, dir, "add", "-A")
+	runGit(t, dir, "commit", "-m", "initial")
+	commitTestWrite(t, dir, "selected.txt", "selected\n")
+	runGit(t, dir, "add", "selected.txt")
+	commitTestWrite(t, dir, "other.txt", "other\n")
+	commitTestWrite(t, dir, "draft notes.txt", "draft\n")
+	return dir
+}
+
+func commitTestGit(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	output, err := gitOutput(context.Background(), dir, args...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return output
+}
+
+func TestCommitScopeAndPreview(t *testing.T) {
+	for _, mode := range []string{"staged", "all", "only", "preview"} {
+		t.Run(mode, func(t *testing.T) {
+			dir := commitTestRepo(t)
+			head := commitTestGit(t, dir, "rev-parse", "HEAD")
+			index := commitTestGit(t, dir, "write-tree")
+			var args []string
+			switch mode {
+			case "all":
+				args = []string{"--all", "all changes"}
+			case "only":
+				args = []string{"--only", "draft notes.txt", "--", "selected draft"}
+			case "preview":
+				args = []string{"--preview", "--all"}
+			default:
+				args = []string{"staged changes"}
+			}
+			out, err := NewCommitCmd().Execute(context.Background(), Input{Cwd: dir, Args: args})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "preview" {
+				if commitTestGit(t, dir, "rev-parse", "HEAD") != head || commitTestGit(t, dir, "write-tree") != index || !strings.Contains(out.Message, "draft notes.txt") {
+					t.Fatalf("preview mutated repository or hid draft: %s", out.Message)
+				}
+				return
+			}
+			files := commitTestGit(t, dir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD")
+			switch mode {
+			case "staged":
+				if files != "selected.txt\n" {
+					t.Fatalf("staged commit included %q", files)
+				}
+			case "only":
+				if files != "draft notes.txt\n" || commitTestGit(t, dir, "diff", "--cached", "--name-only") != "selected.txt\n" {
+					t.Fatalf("only commit scope/index wrong: %q", files)
+				}
+			case "all":
+				if !strings.Contains(files, "draft notes.txt") || !strings.Contains(files, "other.txt") || commitTestGit(t, dir, "status", "--porcelain") != "" {
+					t.Fatalf("all commit incomplete: %q", files)
+				}
+			}
+		})
+	}
+}
+
+func TestCommitFailurePreservesIndex(t *testing.T) {
+	for _, mode := range []string{"staged", "all", "only"} {
+		for _, failure := range []string{"verification", "hook", "whitespace", "partial", "index-change"} {
+			t.Run(mode+"/"+failure, func(t *testing.T) {
+				dir := commitTestRepo(t)
+				var args []string
+				if mode == "all" {
+					args = []string{"--all"}
+				} else if mode == "only" {
+					args = []string{"--only", "selected.txt", "--"}
+				}
+				verifier := &commitTestVerifier{verify: func([]string) error { return nil }}
+				switch failure {
+				case "verification":
+					verifier.verify = func([]string) error { return errors.New("LAB_TEST_FAILED") }
+				case "hook":
+					if err := os.WriteFile(filepath.Join(dir, ".git", "hooks", "pre-commit"), []byte("#!/bin/sh\necho LAB_HOOK_REJECT >&2\nexit 1\n"), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				case "whitespace":
+					commitTestWrite(t, dir, "selected.txt", "trailing space \n")
+					runGit(t, dir, "add", "selected.txt")
+				case "partial":
+					if mode != "staged" {
+						t.Skip("explicit scope selects worktree content")
+					}
+					commitTestWrite(t, dir, "selected.txt", "different worktree\n")
+				case "index-change":
+					if mode != "staged" {
+						t.Skip("temporary index is isolated from real index")
+					}
+					verifier.verify = func([]string) error { runGit(t, dir, "add", "other.txt"); return nil }
+				}
+				head, index := commitTestGit(t, dir, "rev-parse", "HEAD"), commitTestGit(t, dir, "write-tree")
+				_, err := NewCommitCmd().Execute(context.Background(), Input{Cwd: dir, Args: args, Engine: verifier})
+				if err == nil || commitTestGit(t, dir, "rev-parse", "HEAD") != head {
+					t.Fatalf("failure created commit or returned nil: %v", err)
+				}
+				if failure != "index-change" && commitTestGit(t, dir, "write-tree") != index {
+					t.Fatal("failed commit changed original index")
+				}
+			})
+		}
+	}
+}
+
+func TestReviewAllChangeKinds(t *testing.T) {
+	dir := commitTestRepo(t)
+	out, err := NewReviewCmd().Execute(context.Background(), Input{Cwd: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{"已暂存", "未暂存", "未跟踪", "selected.txt", "other.txt", "draft notes.txt"} {
+		if !strings.Contains(out.Message, expected) {
+			t.Fatalf("review missing %q: %s", expected, out.Message)
+		}
+	}
+}
+
+func TestCommitLiteralPathsAndInvalidScope(t *testing.T) {
+	dir := commitTestRepo(t)
+	commitTestWrite(t, dir, "file[1].txt", "literal name\n")
+	_, err := NewCommitCmd().Execute(context.Background(), Input{Cwd: dir, Args: []string{"--only", "file[1].txt", "--", "literal filename"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if files := commitTestGit(t, dir, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"); files != "file[1].txt\n" {
+		t.Fatalf("path interpreted as glob: %q", files)
+	}
+	for _, args := range [][]string{{"--only"}, {"--only", "--"}, {"--only", "../outside.txt", "--"}, {"--unknown"}} {
+		if _, err := NewCommitCmd().Execute(context.Background(), Input{Cwd: dir, Args: args}); err == nil {
+			t.Errorf("invalid scope accepted: %v", args)
+		}
+	}
+	runGit(t, dir, "reset", "-q", "HEAD", "--", "selected.txt")
+	head := commitTestGit(t, dir, "rev-parse", "HEAD")
+	if _, err := NewCommitCmd().Execute(context.Background(), Input{Cwd: dir}); err == nil || commitTestGit(t, dir, "rev-parse", "HEAD") != head {
+		t.Fatalf("unstaged-only changes silently committed: %v", err)
+	}
+}
 
 // liveEngine is a fakeEngine that also offers the optional live-update hooks
 // the real engine adapter exposes.
@@ -107,16 +280,16 @@ func nonRepoDir(t *testing.T) string {
 }
 
 func TestCommitCmdOutsideRepoSaysSo(t *testing.T) {
-	out, _ := NewCommitCmd().Execute(context.Background(), Input{Cwd: nonRepoDir(t)})
-	if strings.Contains(out.Message, "没有可提交的更改") || !strings.Contains(out.Message, "git") {
-		t.Fatalf("outside a repository /commit must report the git error, got %q", out.Message)
+	_, err := NewCommitCmd().Execute(context.Background(), Input{Cwd: nonRepoDir(t)})
+	if err == nil || !strings.Contains(err.Error(), "git") {
+		t.Fatalf("outside a repository /commit must return the git error, got %v", err)
 	}
 }
 
 func TestReviewCmdOutsideRepoSaysSo(t *testing.T) {
-	out, _ := NewReviewCmd().Execute(context.Background(), Input{Cwd: nonRepoDir(t)})
-	if strings.Contains(out.Message, "没有需要审查的更改") || !strings.Contains(out.Message, "git") {
-		t.Fatalf("outside a repository /review must report the git error, got %q", out.Message)
+	_, err := NewReviewCmd().Execute(context.Background(), Input{Cwd: nonRepoDir(t)})
+	if err == nil || !strings.Contains(err.Error(), "git") {
+		t.Fatalf("outside a repository /review must return the git error, got %v", err)
 	}
 }
 

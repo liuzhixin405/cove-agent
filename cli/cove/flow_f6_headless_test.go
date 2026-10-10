@@ -269,6 +269,15 @@ func TestFlowF6_Headless(t *testing.T) {
 		}
 	})
 
+	t.Run("headless提交命令失败停止后续输入", func(t *testing.T) {
+		f := reset(t, textReply("不应运行后续推送"))
+		r := runCove(t, strings.NewReader("/commit --unknown\n推送代码\n"), nil, "--no-tui")
+		if r.code != 1 || !strings.Contains(r.stderr, "不再执行后续输入") || strings.Contains(r.stdout, "不应运行后续推送") {
+			f.Fatalf("code %d stdout %q stderr %q", r.code, r.stdout, r.stderr)
+		}
+		f.Requests(0)
+	})
+
 	// ---------- --max-turns ----------
 
 	t.Run("--max-turns到达时已有答复则保留答复", func(t *testing.T) {

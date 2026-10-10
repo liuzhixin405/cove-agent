@@ -18,6 +18,10 @@ type CostTrackerView interface {
 	Summary() string
 }
 
+type CommitVerifier interface {
+	VerifyCommit(context.Context, []string) error
+}
+
 type EngineView interface {
 	Messages() []api.Message
 	MessageCount() int
@@ -93,6 +97,7 @@ type Input struct {
 	PermissionManager PermissionManager
 	MCPPool           MCPPool
 	ProjectContext    *ctxt.ProjectContext
+	CommitPreview     func(string)
 }
 
 type Output struct {

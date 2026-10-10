@@ -63,7 +63,8 @@ type frontend struct {
 	// terminated is set when a SIGTERM stopped a slash command. Headless
 	// ends the run on it, as it does for a SIGTERM during a turn; the REPL
 	// ignores it (there the signal only cancels the command, as before).
-	terminated bool
+	terminated    bool
+	commandFailed bool
 
 	// print shows a notice line; enqueue runs a message as a task (queued
 	// in the REPL, synchronously in headless).
@@ -557,6 +558,7 @@ func (fe *frontend) mutates(input string) bool {
 // one. A built-in command wins over a skill or plugin command of the same
 // name (and says so), so a plugin cannot replace /config or /permissions.
 func (fe *frontend) dispatch(input string) bool {
+	fe.commandFailed = false
 	if !strings.HasPrefix(input, "/") {
 		return false
 	}
