@@ -65,25 +65,37 @@ cove -d
 
 ### 预编译二进制
 
-前往 [Releases](https://github.com/liuzhixin405/cove-agent/releases) 下载对应平台的压缩包：
+前往 [Releases](https://github.com/liuzhixin405/cove-agent/releases) 下载对应平台的压缩包。**先确认自己机器的 CPU 架构**，再挑包：
+
+- Windows（PowerShell）：`$env:PROCESSOR_ARCHITECTURE` —— `AMD64` 选 amd64，`ARM64` 选 arm64
+- macOS / Linux：`uname -m` —— `x86_64` 选 amd64，`arm64` / `aarch64` 选 arm64
 
 | 平台 | 文件 |
 |------|------|
-| Windows (amd64) | `cove-v*-windows-amd64.zip` |
+| Windows (x64) | `cove-v*-windows-amd64.zip` |
+| Windows (ARM64) | `cove-v*-windows-arm64.zip` |
 | macOS (Intel) | `cove-v*-darwin-amd64.tar.gz` |
 | macOS (Apple Silicon) | `cove-v*-darwin-arm64.tar.gz` |
 | Linux (amd64) | `cove-v*-linux-amd64.tar.gz` |
+| Linux (arm64) | `cove-v*-linux-arm64.tar.gz` |
 
-解压运行：
+> 选错架构的现象：Windows 弹「此应用无法在你的电脑上运行」，macOS 报 `bad CPU type in executable`，Linux 报 `Exec format error`。这不是包坏了，换成与本机架构匹配的包即可。
+
+解压后直接运行包内的可执行文件——Windows 是 `cove.exe`，macOS / Linux 是 `cove`：
+
 ```bash
-# macOS / Linux
-tar -xzf cove-v*-linux-amd64.tar.gz
-./cove
-
-# Windows (PowerShell)
-Expand-Archive cove-v*-windows-amd64.zip -DestinationPath .
-.\cove.exe
+# macOS / Linux（示例为当前版本，按需替换版本号）
+tar -xzf cove-v12.3.2-linux-amd64.tar.gz
+./cove --version
 ```
+
+```powershell
+# Windows (PowerShell)
+Expand-Archive cove-v12.3.2-windows-amd64.zip -DestinationPath .
+.\cove.exe --version
+```
+
+> v12.3.2 及更早的发布包里，可执行文件名带版本和平台后缀（例如 `cove-v12.3.2-windows-amd64.exe`）；用全名运行或自行改名即可，二进制内容没有区别。
 
 ### 从源码构建
 

@@ -1,4 +1,12 @@
-﻿## [12.3.2] - 2026-10-11
+﻿## [Unreleased]
+
+### Changed
+- 发布包内可执行文件统一命名为 `cove`（macOS / Linux）和 `cove.exe`（Windows），不再带版本和平台后缀，解压即可运行；版本号仍由 ldflags 写入，`cove --version` 不变。
+
+### Docs
+- 安装章节补齐六个平台的资产名，新增 CPU 架构自查方法（`$env:PROCESSOR_ARCHITECTURE` / `uname -m`），并写明选错架构的三种报错特征（Windows 弹「此应用无法在你的电脑上运行」、macOS `bad CPU type`、Linux `Exec format error`），避免用户误以为发布包损坏。
+
+## [12.3.2] - 2026-10-11
 
 ### Fixed
 - POSIX `time` / `time -p` 复用内部命令已有的允许前缀和分组，避免计时推送重复询问；不扩大只读判定，保留 deny/ask、危险参数和文件输出限制。

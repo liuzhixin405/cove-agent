@@ -58,6 +58,8 @@ Cove-Agent 重新定义了 **AI 辅助编程**，将开发效率提升至自动�
 
 ```bash
 # 1. 下载对应平台的二进制（Windows / macOS / Linux）
+#    注意挑对架构：x64/Intel 机器选 amd64，Apple Silicon / Windows on ARM 选 arm64
+#    下错了会提示「此应用无法在你的电脑上运行」，换 amd64 包即可
 #    https://github.com/liuzhixin405/cove-agent/releases
 
 # 2. 或者从源码构建（需要 Go 1.25+）

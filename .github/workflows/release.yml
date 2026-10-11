@@ -52,12 +52,13 @@ jobs:
       - name: Build binary
         id: build
         run: |
-          NAME="cove-${{ steps.version.outputs.tag }}-${{ matrix.target.os }}-${{ matrix.target.arch }}${{ matrix.target.ext }}"
+          # 包内可执行文件统一命名为 cove / cove.exe，用户解压即可运行；版本号由 ldflags 写入
+          BIN="cove${{ matrix.target.ext }}"
           CGO_ENABLED=0 GOOS=${{ matrix.target.os }} GOARCH=${{ matrix.target.arch }} go build \
             -ldflags "-s -w -X main.Version=${{ steps.version.outputs.plain }} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.GitCommit=$(git rev-parse --short HEAD)" \
-            -o "${NAME}" \
+            -o "${BIN}" \
             ./cli/cove
-          echo "binary=${NAME}" >> $GITHUB_OUTPUT
+          echo "binary=${BIN}" >> $GITHUB_OUTPUT
 
       - name: Package and checksum
         id: package
