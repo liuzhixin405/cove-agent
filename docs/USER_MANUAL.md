@@ -118,7 +118,7 @@ go build -o cove ./cli/cove
 | `-v, --version` | 显示版本信息 |
 | `-d, --debug` | 调试模式 |
 | `--doctor` | 系统诊断（git、ripgrep、供应商与 API key 是否设置） |
-| `--config` | 查看配置（不显示 API key，只显示 `api_key_set`） |
+| `--config` | 查看配置（不显示 API key，只显示 `api_key_set`；bedrock 用 AWS 凭证时另有 `aws_credentials` 显示凭证来源） |
 | `-r, --resume <id>` | 按 ID 恢复会话后启动；可与 `-p` 连用继续该会话。会话属于其他项目目录时给出提示；ID 不存在时报错退出 |
 | `--list-sessions [all]` | 列出当前项目的会话；加 `all` 列出所有项目的会话 |
 | `--dump-system-prompt` | 打印系统提示词 |
@@ -154,8 +154,65 @@ go build -o cove ./cli/cove
 | 提供商 | 类型 | 环境变量 |
 |--------|------|---------|
 | **Anthropic** | 原生 | `ANTHROPIC_API_KEY` |
+| **Amazon Bedrock**（Claude） | 原生，见下文 | `AWS_BEARER_TOKEN_BEDROCK`，或 `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`（SigV4）；区域 `AWS_REGION` |
 | **OpenAI** | 原生 | `OPENAI_API_KEY` |
 | **DeepSeek** | 原生 | `DEEPSEEK_API_KEY` |
+
+### Amazon Bedrock 直连（不经 AI 网关）
+
+cove 直接调用 Bedrock 的原生 Messages API 端点 `https://bedrock-mantle.{region}.api.aws/anthropic/v1/messages`：请求体、流式 SSE 与 Anthropic 一方 API 相同，不需要中间网关。支持两种认证：有 `api_key`（或 `AWS_BEARER_TOKEN_BEDROCK`）时用 bearer token，否则用 AWS IAM 凭证做 SigV4 签名。
+
+**方式一：Bedrock API key（bearer token）**
+
+```bash
+# 环境变量（也可写进 config 的 provider.api_key / provider.base_url）
+export AWS_BEARER_TOKEN_BEDROCK=...   # 控制台创建的长期 key，或 aws-bedrock-token-generator 生成的 12 小时短期 key
+export AWS_REGION=us-east-1           # 也读 AWS_DEFAULT_REGION；都没有时默认 us-east-1
+cove
+/provider bedrock                     # 别名：aws、amazon-bedrock
+/model anthropic.claude-sonnet-5      # Bedrock 的模型 ID 带 anthropic. 前缀
+```
+
+```json
+{
+  "model": "anthropic.claude-sonnet-5",
+  "model_fast": "anthropic.claude-haiku-4-5",
+  "provider": { "name": "bedrock" }
+}
+```
+
+**方式二：AWS IAM 凭证（SigV4 签名）**
+
+不配置任何 API key 时，cove 按 AWS SDK 的顺序读取静态凭证并逐请求签名：
+
+1. 环境变量 `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`（临时凭证再加 `AWS_SESSION_TOKEN`）
+2. `~/.aws/credentials`（或 `AWS_SHARED_CREDENTIALS_FILE`）里 `AWS_PROFILE` 指定的 profile，默认 `default`
+3. `~/.aws/config`（或 `AWS_CONFIG_FILE`）里的 `[profile 名]`。该 profile 的 `region` 在 `AWS_REGION` 和 `AWS_DEFAULT_REGION` 都未设置时也会被采用
+
+```bash
+# 与 Claude Code 的 CLAUDE_CODE_USE_BEDROCK 用同一组变量
+export AWS_ACCESS_KEY_ID=...
+export AWS_SECRET_ACCESS_KEY=...
+export AWS_REGION=us-east-1
+cove
+/provider bedrock
+```
+
+只支持静态 key。profile 依赖 `credential_process`、SSO（`sso_session` / `sso_start_url`）、`role_arn` 或 web identity 时会报错，并提示先导出静态凭证：
+
+```bash
+aws configure export-credentials --profile <名> --format env
+```
+
+凭证每次请求重新读取，刷新 `~/.aws` 里的临时凭证不用重启。`/setup` 选 Amazon Bedrock 后直接回车即可使用检测到的 AWS 凭证。`/config` 的 `aws_credentials` 字段显示凭证来源（`env`、`credentials:default` 等），不显示任何密钥。403 时错误末尾附带排查提示：系统时钟、`AWS_REGION`、临时凭证是否过期、模型是否已开通访问。
+
+要点：
+
+- 模型 ID 用 `anthropic.claude-opus-5-5`、`anthropic.claude-sonnet-5` 这种形式。Claude Code 的 `ANTHROPIC_DEFAULT_*_MODEL` 里那种 `global.anthropic.claude-...-v1:0` 是旧版 InvokeModel 的 ID，这里不能用；Opus 4.6 / Sonnet 4.6 等不在新端点上的旧模型也不支持。
+- 默认模型 `anthropic.claude-sonnet-5` 对所有 Bedrock 账户开放；Opus 5.5、Sonnet 5.5、Haiku 5.5 需在 Bedrock 控制台的 Model access 里确认已开通。
+- `provider.base_url` 或 `LLM_BASE_URL` 非空时优先于按区域生成的地址。注意 SigV4 签名覆盖 Host，经过改写 Host 的反向代理会被 AWS 拒绝；`HTTPS_PROXY` 这类转发代理不受影响。
+- 通用的 `LLM_API_KEY` 不用于 bedrock，避免为其他供应商设置的 key 盖过 AWS 凭证。bedrock 的 key 只来自 `provider.api_key`、`AWS_BEARER_TOKEN_BEDROCK` 或 `BEDROCK_API_KEY`。
+- 不向 Bedrock 发送 `anthropic-beta` 头；提示缓存、thinking、工具调用在该端点均受支持。成本统计按去掉前缀后的模型名计价。
 
 ### 支持的兼容提供商 (OpenAI 兼容接口)
 
@@ -293,8 +350,8 @@ DeepSeek Flash 原生支持图片，`deepseek-v4-pro` 不支持。只要当前�
 | 命令 | 说明 |
 |------|------|
 | `/model <名称>` | 切换 AI 模型 |
-| `/provider <名称>` | 切换提供商（anthropic/deepseek/openai/openai-compatible/glm/kimi/qwen/doubao/openrouter/siliconflow/groq/together/fireworks/xai/mistral；也接受别名 claude、zhipu、bigmodel、moonshot、dashscope、tongyi、ark、grok、compatible） |
-| `/setup` | 配置向导：选供应商、掩码输入 API key、发一次测试请求验证后保存。启动时没有 key 自动进入，任意一步直接回车跳过；`COVE_NO_SETUP=1` 关闭自动进入 |
+| `/provider <名称>` | 切换提供商（anthropic/bedrock/deepseek/openai/openai-compatible/glm/kimi/qwen/doubao/openrouter/siliconflow/groq/together/fireworks/xai/mistral；也接受别名 claude、aws、amazon-bedrock、zhipu、bigmodel、moonshot、dashscope、tongyi、ark、grok、compatible） |
+| `/setup` | 配置向导：选供应商、掩码输入 API key、发一次测试请求验证后保存。启动时没有 key 自动进入，任意一步直接回车跳过；`COVE_NO_SETUP=1` 关闭自动进入。选 Amazon Bedrock 时若已检测到 AWS 凭证，key 处直接回车即用 SigV4；配好 AWS 凭证的 bedrock 不会触发自动进入 |
 | `/api-key [密钥]` | 保存 API 密钥；不带参数时掩码输入（显示 •，不进历史、不回显） |
 | `/base-url <地址>` | 设置自定义接口地址 |
 | `/mode <模式>` | 设置权限模式 |
@@ -393,7 +450,7 @@ DeepSeek Flash 原生支持图片，`deepseek-v4-pro` 不支持。只要当前�
 | `/plugin [list\|install\|search\|refresh\|update\|enable\|disable\|uninstall]` | 插件管理 |
 | `/skill [名称]` | 不带参数列出可用技能，带名称查看或调用一个技能（别名 `/skills`） |
 | `/tools` | 列出可用工具 |
-| `/doctor` | 快速检查：git、ripgrep、供应商与 API key，末尾附“后台学习”“权限规则文件”两项 |
+| `/doctor` | 快速检查：git、ripgrep、供应商与 API key（bedrock 用 AWS 凭证时显示“认证: AWS SigV4”及凭证来源），末尾附“后台学习”“权限规则文件”两项 |
 | `/diagnose [quick\|errors\|archive\|codes\|trace N]` | 别名 `/diag`。完整系统诊断与错误分析（含“后台学习”“权限规则文件”）；`trace` 查看最近 N 条交互轨迹 |
 | `/status` | 查看代理状态与会话信息 |
 | `/stats` | 查看消息数与费用统计 |
@@ -725,7 +782,11 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 | `COVE_REPLAY_EXPLAIN` | `0` | `/replay` 不调用模型生成说明 |
 | `COVE_NO_SETUP` | `1` | 缺 API key 启动时不自动进入 `/setup` 向导 |
 | `COVE_AUTOMATION_CHILD` | `1` | 维护任务 worker 的内部标记，禁止嵌套维护命令；不要手动设置 |
-| `LLM_API_KEY` / `<PROVIDER>_API_KEY` / `LLM_BASE_URL` | 字符串 | 各供应商的 API key 与自定义接口地址，见[提供商与模型配置](#提供商与模型配置) |
+| `LLM_API_KEY` / `<PROVIDER>_API_KEY` / `LLM_BASE_URL` | 字符串 | 各供应商的 API key 与自定义接口地址，见[提供商与模型配置](#提供商与模型配置)（bedrock 不读 `LLM_API_KEY`） |
+| `AWS_BEARER_TOKEN_BEDROCK` | 字符串 | bedrock 的 Bedrock API key（bearer token），优先于 IAM 凭证 |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` | 字符串 | bedrock 无 key 时用于 SigV4 签名的 IAM 凭证 |
+| `AWS_PROFILE` / `AWS_SHARED_CREDENTIALS_FILE` / `AWS_CONFIG_FILE` | 字符串 | 选择 `~/.aws` 中的静态 profile 及文件位置，默认 `default`、`~/.aws/credentials`、`~/.aws/config` |
+| `AWS_REGION` / `AWS_DEFAULT_REGION` | 字符串 | bedrock 区域；都未设置时取 profile 的 `region`，再退到 `us-east-1` |
 | `TAVILY_API_KEY` / `BRAVE_API_KEY` | 字符串 | `websearch` 工具的搜索后端；都没有时用 DuckDuckGo 兜底 |
 
 ## 配置系统
@@ -792,9 +853,9 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 |------|------|------|
 | `model` | string | **复杂任务模型**，如 `deepseek-v4-pro`（高级）、`claude-sonnet-4-20250514`、`gpt-4o` |
 | `model_fast` | string | **简单任务模型**（快速/便宜），如 `deepseek-flash`（旧名 `deepseek-v4-flash`）、`gpt-4o-mini`、`claude-haiku-4-5`。不配置则与 `model` 相同，即不做模型切换 |
-| `provider.name` | string | 提供商名称（anthropic/deepseek/openai/glm/kimi/qwen/doubao/...）|
-| `provider.api_key` | string | API 密钥。留空时读取提供商对应的环境变量（如 `DEEPSEEK_API_KEY`、`LLM_API_KEY`）；配置文件里有值时优先于环境变量 |
-| `provider.base_url` | string | 自定义 API 端点（留空则自动匹配提供商默认地址） |
+| `provider.name` | string | 提供商名称（anthropic/bedrock/deepseek/openai/glm/kimi/qwen/doubao/...）|
+| `provider.api_key` | string | API 密钥。留空时读取提供商对应的环境变量（如 `DEEPSEEK_API_KEY`、`AWS_BEARER_TOKEN_BEDROCK`、`LLM_API_KEY`）；配置文件里有值时优先于环境变量 |
+| `provider.base_url` | string | 自定义 API 端点（留空则自动匹配提供商默认地址；bedrock 按 `AWS_REGION` 生成） |
 | `permission_mode` | string | 默认权限模式（default/plan/auto/bypass）。拼错的值按 `default` 运行，`/diagnose` 会提示 |
 | `max_budget_usd` | number | 会话预算上限（美元）。每次模型调用前都会检查，超过时暂停；主循环、子智能体、记忆提取、上下文压缩等所有模型调用都计入。费用达到 80% 时提示一次（见[预算管理](#预算管理)） |
 | `max_iterations` | number | 单轮最多调用模型次数，默认 200（未设置或 ≤0 取默认）。交互模式到达时询问是否继续；`-p` 与 headless 为硬上限（`-p` 可用 `--max-turns` 覆盖）。见[单轮上限](#单轮上限与-continue)（`config.json`、项目 `.cove.json`、profile 三处均可设置，优先级 profile > `.cove.json` > `config.json`） |

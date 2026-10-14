@@ -42,6 +42,8 @@ func (c *DoctorCmd) Execute(ctx context.Context, in Input) (Output, error) {
 		}
 		if pc.APIKey != "" {
 			sb.WriteString("API key: 已设置\n")
+		} else if src := config.AWSCredentialsSource(pc); src != "" {
+			fmt.Fprintf(&sb, "认证: AWS SigV4（凭证来源 %s）\n", src)
 		} else {
 			sb.WriteString("API key: 未设置（用 /api-key 或环境变量设置）\n")
 		}

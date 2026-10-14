@@ -351,6 +351,10 @@ func preferredVisionModelForProvider(providerName, currentModel string) string {
 
 		return "claude-sonnet-4-20250514"
 
+	case "bedrock":
+
+		return "anthropic.claude-sonnet-5"
+
 	default:
 
 		return ""
@@ -407,9 +411,11 @@ func isPositiveNumber(input string) bool {
 
 // runNeedsAPIKey reports whether a run must stop for a missing API key. -p
 // used to send the request anyway, so the user got a 401 or a connection
-// error instead of the setup guidance.
-func runNeedsAPIKey(apiKey string) bool {
-	return strings.TrimSpace(apiKey) == ""
+// error instead of the setup guidance. A bedrock run without a key is
+// configured when AWS credentials resolve (api.HasCredentials): it signs
+// with SigV4.
+func runNeedsAPIKey(pc config.ProviderConfig) bool {
+	return !api.HasCredentials(providerAPIConfig(pc))
 }
 
 // printPromptIsSlashCommand reports whether the prompt typed after -p is a
@@ -433,7 +439,7 @@ func runPrintMode(eng *engine.Engine, argPrompt, prompt string, debug bool, atta
 		return 1
 	}
 
-	if runNeedsAPIKey(cfg.EffectiveProvider().APIKey) {
+	if runNeedsAPIKey(cfg.EffectiveProvider()) {
 		fmt.Fprintln(os.Stderr, missingAPIKeyMessage(cfg.EffectiveProvider().Name))
 		return 1
 	}

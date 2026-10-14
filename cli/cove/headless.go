@@ -125,7 +125,7 @@ func runHeadlessFrom(in io.Reader, app *appBootstrap, cmdReg *command.Registry, 
 			failed = true
 			continue
 		}
-		if runNeedsAPIKey(pc.APIKey) {
+		if runNeedsAPIKey(pc) {
 			fmt.Fprintln(os.Stderr, missingAPIKeyMessage(pc.Name))
 			failed = true
 			continue

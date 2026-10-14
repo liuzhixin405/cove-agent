@@ -108,6 +108,11 @@ func retryConnectHTTP(
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
 		resp, err := connect(ctx)
 		if err != nil {
+			// A request that could not be built (auth/signing) will not
+			// build on the next attempt either.
+			if errors.Is(err, errCreateRequest) {
+				return nil, err
+			}
 			// A server that accepted the request and never answered costs a
 			// whole ResponseHeaderTimeout (180s cloud, 15 min local) per
 			// attempt. It used to be retried like a refused connection, so

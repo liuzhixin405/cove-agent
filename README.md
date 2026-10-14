@@ -80,7 +80,7 @@ cove -p "添加一个新的 API 接口并更新 README"   # 或直接运行 cove
 | `/help [命令]`      | 显示帮助；带命令名查看单个命令的用法、别名与子命令              |
 | `/keys`             | 查看输入快捷键（别名 `/shortcuts`）                           |
 | `/model <名称>`     | 切换 AI 模型                                                    |
-| `/provider <名称>`  | 切换提供商（anthropic/deepseek/openai/glm/kimi/qwen/doubao 等） |
+| `/provider <名称>`  | 切换提供商（anthropic/bedrock/deepseek/openai/glm/kimi/qwen/doubao 等；bedrock 直连 Amazon Bedrock，不需要网关，见[用户手册](docs/USER_MANUAL.md#amazon-bedrock-直连不经-ai-网关)） |
 | `/setup`            | 配置向导：选供应商、掩码输入 API key、自动验证后保存；缺 key 启动时自动进入（`COVE_NO_SETUP=1` 关闭） |
 | `/api-key [密钥]`   | 保存 API 密钥；不带参数时掩码输入，不回显到屏幕                 |
 | `/base-url <地址>`  | 设置自定义接口地址                                              |
@@ -133,7 +133,7 @@ cove -p "添加一个新的 API 接口并更新 README"   # 或直接运行 cove
 | `/stop`             | 取消当前任务（别名 `/cancel`）                                |
 | `/x [编号] [all]`   | 展开工具块折叠的输出（别名 `/expand`）                        |
 | `/replay [任务序号或任务.改动]` | 按任务标题分组回放，次数不限；交互回放首次生成并缓存 AI 解读（独立计费，`COVE_REPLAY_EXPLAIN=0` 关闭）；`/replay 1` 播放整个任务，`/replay 1.2` 播放第二次改动；`/replay list [关键词]` 筛选后上下键选择、Enter 回放；`/replay search file:main.go` 回放该文件跨任务的已记录改动；`/replay overview 1` 只看该任务的方案、文件摘要和历史验收证据，不调用模型；兼容完整编号 |
-| `/doctor`           | 快速检查 git、ripgrep、供应商与 API key                         |
+| `/doctor`           | 快速检查 git、ripgrep、供应商与 API key（bedrock 显示 SigV4 凭证来源） |
 | `/diagnose [quick\|errors\|archive\|codes\|trace N]` | 完整系统诊断与错误分析（别名 `/diag`） |
 | `/trust`            | 信任当前项目目录（回合结束自动运行构建/测试校验）及其 `.cove.json`（MCP、provider、校验命令，`/restart` 后生效） |
 | `/restart`          | 保存会话并重启 cove，重启后接着当前会话                         |

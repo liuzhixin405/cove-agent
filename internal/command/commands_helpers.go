@@ -87,6 +87,7 @@ func renderConfig(cfg *config.Config) string {
 		"max_budget_usd":  cfg.MaxBudgetUsd,
 		"debug":           cfg.Debug,
 		"api_key_set":     pc.APIKey != "",
+		"aws_credentials": config.AWSCredentialsSource(pc),
 		"system_prompt":   cfg.SystemPrompt,
 		"mcp_servers":     len(cfg.MCPServers),
 	}, "", "  ")

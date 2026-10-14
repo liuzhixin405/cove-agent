@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
+	"github.com/liuzhixin405/cove-agent/internal/api/awscreds"
 	"github.com/liuzhixin405/cove-agent/internal/command"
 	"github.com/liuzhixin405/cove-agent/internal/config"
 	"github.com/liuzhixin405/cove-agent/internal/plugin"
@@ -31,17 +32,25 @@ func showConfig() {
 		"max_budget_usd":  cfg.MaxBudgetUsd,
 		"debug":           cfg.Debug,
 		"api_key_set":     pc.APIKey != "",
+		"aws_credentials": awsCredentialsSource(pc),
 		"mcp_servers":     len(cfg.MCPServers),
 	}, "", "  ")
 	outln(string(data))
 }
 
+// awsCredentialsSource is where a bedrock run without a bearer token gets
+// its AWS credentials ("env", "credentials:default", ...), "" otherwise.
+// The source only, never a value.
+func awsCredentialsSource(pc config.ProviderConfig) string {
+	return config.AWSCredentialsSource(pc)
+}
+
 func providerHelpLine() string {
-	return "  /provider <名称>    设置供应商 (anthropic, deepseek, openai, openai-compatible, glm, kimi, qwen, doubao, openrouter, siliconflow, groq, together, fireworks, xai, mistral)"
+	return "  /provider <名称>    设置供应商 (anthropic, bedrock, deepseek, openai, openai-compatible, glm, kimi, qwen, doubao, openrouter, siliconflow, groq, together, fireworks, xai, mistral)"
 }
 
 func providerEnvHelpLine() string {
-	return "环境变量: LLM_API_KEY | ANTHROPIC_API_KEY | DEEPSEEK_API_KEY | OPENAI_API_KEY | GLM_API_KEY | KIMI_API_KEY | QWEN_API_KEY | OPENROUTER_API_KEY | SILICONFLOW_API_KEY | LLM_BASE_URL"
+	return "环境变量: LLM_API_KEY | ANTHROPIC_API_KEY | AWS_BEARER_TOKEN_BEDROCK 或 AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (+AWS_REGION) | DEEPSEEK_API_KEY | OPENAI_API_KEY | GLM_API_KEY | KIMI_API_KEY | QWEN_API_KEY | OPENROUTER_API_KEY | SILICONFLOW_API_KEY | LLM_BASE_URL"
 }
 
 // genericCategories places the generic commands of internal/command in the
@@ -185,9 +194,20 @@ func missingAPIKeyMessage(provider string) string {
 	if envs := api.ProviderEnvCandidates(provider); len(envs) > 0 {
 		primaryEnv = envs[0]
 	}
+	if provider == "bedrock" {
+		primaryEnv += " 或 AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY（也可用 ~/.aws/credentials 的静态 profile）"
+	}
 	path := "~/.cove/config.json"
 	if dir, err := config.ConfigDir(); err == nil {
 		path = filepath.Join(dir, "config.json")
 	}
-	return fmt.Sprintf("未配置 API key（当前供应商：%s）。\n输入 /setup 进入配置向导（选供应商、输入 key、自动验证）。\n也可以设置环境变量 %s，或编辑 %s 后 /restart。", provider, primaryEnv, path)
+	msg := fmt.Sprintf("未配置 API key（当前供应商：%s）。\n输入 /setup 进入配置向导（选供应商、输入 key、自动验证）。\n也可以设置环境变量 %s，或编辑 %s 后 /restart。", provider, primaryEnv, path)
+	if provider == "bedrock" {
+		// Say why the AWS credentials did not resolve: half of the
+		// environment pair, or a profile that needs SSO / assume role.
+		if _, err := awscreds.Resolve(); err != nil {
+			msg += "\nAWS 凭证: " + err.Error()
+		}
+	}
+	return msg
 }

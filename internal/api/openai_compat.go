@@ -77,7 +77,10 @@ func (p *openAICompatProvider) Name() string { return "openai-compatible" }
 // p.streamClient for a stream).
 func (p *openAICompatProvider) endpoint(client *http.Client) endpoint {
 	return endpoint{url: p.baseURL + "/chat/completions", client: client, key: p.activeKey, pool: p.keyPool,
-		auth: func(h http.Header, key string) { h.Set("Authorization", "Bearer "+key) }}
+		auth: func(req *http.Request, _ []byte, key string) error {
+			req.Header.Set("Authorization", "Bearer "+key)
+			return nil
+		}}
 }
 func (p *openAICompatProvider) DisplayName() string {
 	if p.name == "" {

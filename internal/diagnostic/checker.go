@@ -245,7 +245,7 @@ func (c *Checker) checkConfigExists(_ context.Context) CheckResult {
 	// cove runs fine without the file; it is only worth a warning when no key
 	// is available either, and nothing is written.
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		if c.cfg != nil && c.cfg.EffectiveProvider().APIKey != "" {
+		if c.cfg != nil && config.HasProviderCredentials(c.cfg.EffectiveProvider()) {
 			res.Status = SevInfo
 			return res
 		}
@@ -300,7 +300,7 @@ func (c *Checker) checkAPIKey(_ context.Context) CheckResult {
 	case placeholderKey(pc.APIKey):
 		res.Status = SevFatal
 		res.Error = New(ErrConfigAPIKeyPlaceholder, pc.APIKey)
-	case pc.APIKey == "":
+	case !config.HasProviderCredentials(pc): // bedrock may sign with AWS credentials instead
 		res.Status = SevFatal
 		res.Error = New(ErrConfigAPIKeyMissing, pc.Name)
 	default:

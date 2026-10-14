@@ -311,3 +311,27 @@ func TestCheckPermissionModeReportsAnInvalidMode(t *testing.T) {
 		t.Errorf("recovery %q lists the non-existent mode ask", rec)
 	}
 }
+
+// A bedrock user with IAM credentials only (SigV4) has a working setup;
+// startup and /diagnose reported it as a fatal missing key.
+func TestCheckAPIKeyAcceptsBedrockIAMCredentials(t *testing.T) {
+	c, _ := newTestChecker(t, &config.Config{Provider: config.ProviderConfig{Name: "bedrock"}})
+	dir := t.TempDir()
+	for k, v := range map[string]string{
+		"AWS_BEARER_TOKEN_BEDROCK": "", "BEDROCK_API_KEY": "", "LLM_API_KEY": "", "AWS_SESSION_TOKEN": "", "AWS_PROFILE": "",
+		"AWS_SHARED_CREDENTIALS_FILE": filepath.Join(dir, "credentials"), "AWS_CONFIG_FILE": filepath.Join(dir, "config"),
+		"AWS_ACCESS_KEY_ID": "AKIDEXAMPLE", "AWS_SECRET_ACCESS_KEY": "secret",
+	} {
+		t.Setenv(k, v)
+	}
+	if res := c.checkAPIKey(t.Context()); problem(res) {
+		t.Fatalf("bedrock with IAM credentials reported: %+v", res.Error)
+	}
+	if res := c.checkConfigExists(t.Context()); problem(res) {
+		t.Fatalf("missing config.json with IAM credentials reported: %+v", res.Error)
+	}
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	if res := c.checkAPIKey(t.Context()); !problem(res) {
+		t.Fatal("bedrock without any credentials must still be reported")
+	}
+}

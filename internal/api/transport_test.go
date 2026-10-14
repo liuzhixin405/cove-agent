@@ -87,7 +87,7 @@ func (body *trackedResponseBody) Close() error {
 func bodyReadEndpoint(body io.ReadCloser) endpoint {
 	return endpoint{
 		url: "https://response.test", client: &http.Client{Transport: bodyReadTransport{body: body}},
-		key: func() string { return "test" }, auth: func(http.Header, string) {},
+		key: func() string { return "test" }, auth: func(*http.Request, []byte, string) error { return nil },
 	}
 }
 

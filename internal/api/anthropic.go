@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/api/adapter"
+	"github.com/liuzhixin405/cove-agent/internal/api/awscreds"
+	"github.com/liuzhixin405/cove-agent/internal/api/sigv4"
 	"github.com/liuzhixin405/cove-agent/internal/log"
 	"github.com/liuzhixin405/cove-agent/internal/textutil"
 )
@@ -24,11 +26,33 @@ type anthropicProvider struct {
 	baseURL      string
 	client       *http.Client
 	streamClient *http.Client
+	// name is the configured provider name ("anthropic" when empty).
+	name string
+	// bedrock marks Claude in Amazon Bedrock: same Messages API and SSE,
+	// reached at bedrock-mantle.{region}.api.aws/anthropic with a Bedrock
+	// bearer token in x-api-key. The first-party anthropic-beta list is not
+	// sent there: the endpoint's acceptance of those betas is undocumented,
+	// and the only one still doing anything (token-efficient-tools) is an
+	// optimization.
+	bedrock bool
+	// sigv4 is decided once, when the provider is built: bedrock with no
+	// key and no key pool. An exhausted pool hands out "" per request; that
+	// must not switch the provider to a different AWS identity.
+	sigv4 bool
 }
 
 func newAnthropicProvider(cfg ProviderConfig) *anthropicProvider {
+	name := NormalizeProviderName(cfg.Name)
+	if name == "" {
+		name = "anthropic"
+	}
+	bedrock := name == "bedrock"
 	if cfg.BaseURL == "" {
-		cfg.BaseURL = "https://api.anthropic.com/v1"
+		if bedrock {
+			cfg.BaseURL = BedrockBaseURL(BedrockRegion())
+		} else {
+			cfg.BaseURL = "https://api.anthropic.com/v1"
+		}
 	}
 	transport := defaultHTTPTransport()
 	var pool *KeyPool
@@ -41,6 +65,9 @@ func newAnthropicProvider(cfg ProviderConfig) *anthropicProvider {
 		apiKey:  cfg.APIKey,
 		keyPool: pool,
 		baseURL: normalizeAnthropicBaseURL(cfg.BaseURL),
+		name:    name,
+		bedrock: bedrock,
+		sigv4:   bedrock && cfg.APIKey == "" && pool == nil,
 		// A request that times out is not retried (see doChat): the model
 		// may have generated for the whole timeout.
 		client: &http.Client{
@@ -73,27 +100,78 @@ func (p *anthropicProvider) activeKey() string {
 	return p.apiKey
 }
 
-func (p *anthropicProvider) Name() string { return "anthropic" }
+// Name is the configured provider name: "anthropic", or "bedrock" for
+// Claude in Amazon Bedrock. Both share the Capabilities below; code that
+// needs the API family reads CapabilitiesOf(p).Family, not Name.
+func (p *anthropicProvider) Name() string {
+	if p.name == "" {
+		return "anthropic"
+	}
+	return p.name
+}
 func (p *anthropicProvider) Capabilities() Capabilities {
 	return Capabilities{CacheBreakpoints: true, ToolsWithToolHistory: true, Family: "anthropic"}
 }
-func (p *anthropicProvider) DisplayName() string { return "anthropic" }
+func (p *anthropicProvider) DisplayName() string { return p.Name() }
 
 // endpoint is the messages endpoint through client (p.client, or
 // p.streamClient for a stream).
 func (p *anthropicProvider) endpoint(client *http.Client) endpoint {
 	return endpoint{url: p.baseURL + "/messages", client: client, key: p.activeKey, pool: p.keyPool,
-		auth: func(h http.Header, key string) {
-			h.Set("x-api-key", key)
+		auth: func(req *http.Request, data []byte, key string) error {
+			h := req.Header
 			h.Set("anthropic-version", "2023-06-01")
-			h.Set("anthropic-beta", "token-efficient-tools-2025-11-18,prompt-caching-2024-07-31")
+			if !p.bedrock {
+				h.Set("anthropic-beta", "token-efficient-tools-2025-11-18,prompt-caching-2024-07-31")
+			}
+			if !p.sigv4 {
+				h.Set("x-api-key", key)
+				return nil
+			}
+			return p.signBedrock(req, data)
 		}}
 }
-func (p *anthropicProvider) Validate() error {
-	if p.apiKey == "" && p.keyPool.size() == 0 {
-		return fmt.Errorf("API key required (set ANTHROPIC_API_KEY)")
+
+// signBedrock authenticates a Bedrock request with SigV4 when no bearer
+// token is configured. Credentials are resolved per request so refreshed
+// temporary credentials in ~/.aws take effect without a restart. The
+// signing region is the endpoint's own when the host is a Bedrock host,
+// else the configured region (a proxy in front of Bedrock).
+func (p *anthropicProvider) signBedrock(req *http.Request, payload []byte) error {
+	creds, err := awscreds.Resolve()
+	if err != nil {
+		return err
 	}
+	region := BedrockRegion()
+	if r, ok := bedrockRegionFromHost(req.URL.Host); ok {
+		region = r
+	}
+	sigv4.SignRequest(req, payload, creds, region, "bedrock-mantle", time.Now())
 	return nil
+}
+
+func (p *anthropicProvider) Validate() error {
+	if p.apiKey != "" || p.keyPool.size() > 0 {
+		return nil
+	}
+	if p.bedrock {
+		// awscreds' error already lists the bearer and IAM alternatives.
+		_, err := awscreds.Resolve()
+		return err
+	}
+	return fmt.Errorf("API key required (set %s)", ProviderEnvCandidates(p.Name())[0])
+}
+
+// bedrockForbiddenHint is appended to a Bedrock 403: the server's message
+// rarely says which of these it was.
+const bedrockForbiddenHint = "（Bedrock 403 排查：检查系统时钟、AWS_REGION、临时凭证是否过期，以及该模型是否已在 Bedrock 控制台开通访问）"
+
+func (p *anthropicProvider) statusError(status int, body string) *StatusError {
+	msg := truncate(body, 500)
+	if p.bedrock && status == http.StatusForbidden {
+		msg += " " + bedrockForbiddenHint
+	}
+	return &StatusError{Status: status, Msg: msg}
 }
 
 type anthropicContentBlock struct {
@@ -279,7 +357,7 @@ func (p *anthropicProvider) doChat(ctx context.Context, body anthropicReq) (*Cha
 	}
 	raw, status := httpResp.Body, httpResp.Status
 	if status != http.StatusOK {
-		return nil, &StatusError{Status: status, Msg: truncate(string(raw), 500)}
+		return nil, p.statusError(status, string(raw))
 	}
 
 	var ar anthropicResp
@@ -502,7 +580,7 @@ func (p *anthropicProvider) ChatStream(ctx context.Context, req ChatRequest, han
 	markProgress() // headers arrived: the idle clock starts now
 	if httpResp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(httpResp.Body, 4096))
-		return nil, &StatusError{Status: httpResp.StatusCode, Msg: truncate(string(body), 500)}
+		return nil, p.statusError(httpResp.StatusCode, string(body))
 	}
 
 	reader := bufio.NewReader(httpResp.Body)

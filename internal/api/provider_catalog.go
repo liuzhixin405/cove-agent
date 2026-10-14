@@ -1,6 +1,11 @@
 package api
 
-import "strings"
+import (
+	"os"
+	"strings"
+
+	"github.com/liuzhixin405/cove-agent/internal/api/awscreds"
+)
 
 var providerAliases = map[string]string{
 	"claude":            "anthropic",
@@ -28,6 +33,18 @@ var providerAliases = map[string]string{
 	"grok":              "xai",
 	"xai":               "xai",
 	"mistral":           "mistral",
+	"bedrock":           "bedrock",
+	"aws":               "bedrock",
+	"aws-bedrock":       "bedrock",
+	"amazon-bedrock":    "bedrock",
+}
+
+// anthropicFamily lists the providers that speak the Anthropic Messages API
+// and are served by anthropicProvider; every other known provider is
+// OpenAI-compatible.
+var anthropicFamily = map[string]bool{
+	"anthropic": true,
+	"bedrock":   true,
 }
 
 var providerBaseURLs = map[string]string{
@@ -64,6 +81,51 @@ var providerEnvVars = map[string][]string{
 	"fireworks":         {"FIREWORKS_API_KEY"},
 	"xai":               {"XAI_API_KEY", "GROK_API_KEY"},
 	"mistral":           {"MISTRAL_API_KEY"},
+	"bedrock":           {"AWS_BEARER_TOKEN_BEDROCK"},
+}
+
+// bedrockDefaultRegion is used when neither AWS_REGION nor
+// AWS_DEFAULT_REGION is set; it is the region the Bedrock docs use in
+// every example and the one with the widest model availability.
+const bedrockDefaultRegion = "us-east-1"
+
+// BedrockRegion is the AWS region for Claude in Amazon Bedrock, resolved
+// like the AWS SDKs do: AWS_REGION, AWS_DEFAULT_REGION, the current
+// profile's region in ~/.aws/config, else us-east-1.
+func BedrockRegion() string {
+	for _, key := range []string{"AWS_REGION", "AWS_DEFAULT_REGION"} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	if v := strings.TrimSpace(awscreds.ProfileRegion()); v != "" {
+		return v
+	}
+	return bedrockDefaultRegion
+}
+
+// bedrockRegionFromHost reads the region out of a Bedrock Messages API
+// host (bedrock-mantle.<region>.api.aws). A host with a port, a proxy or
+// anything else does not match; the caller then signs for BedrockRegion().
+func bedrockRegionFromHost(host string) (string, bool) {
+	h := strings.ToLower(strings.TrimSpace(host))
+	const prefix, suffix = "bedrock-mantle.", ".api.aws"
+	if !strings.HasPrefix(h, prefix) || !strings.HasSuffix(h, suffix) {
+		return "", false
+	}
+	region := strings.TrimSuffix(strings.TrimPrefix(h, prefix), suffix)
+	if region == "" || strings.ContainsAny(region, ".:/") {
+		return "", false
+	}
+	return region, true
+}
+
+// BedrockBaseURL is the Messages API base URL of Claude in Amazon Bedrock
+// for region. The endpoint serves the first-party request shape and SSE at
+// {base}/v1/messages, with the bearer token in x-api-key, so it is reached
+// through anthropicProvider (which appends /v1).
+func BedrockBaseURL(region string) string {
+	return "https://bedrock-mantle." + strings.TrimSpace(region) + ".api.aws/anthropic"
 }
 
 func NormalizeProviderName(name string) string {
@@ -79,13 +141,16 @@ func NormalizeProviderName(name string) string {
 
 func IsOpenAICompatibleProvider(name string) bool {
 	normalized := NormalizeProviderName(name)
-	return normalized != "" && normalized != "anthropic"
+	return normalized != "" && !anthropicFamily[normalized]
 }
 
 func DefaultBaseURL(name string) string {
 	normalized := NormalizeProviderName(name)
 	if normalized == "" {
 		normalized = "openai-compatible"
+	}
+	if normalized == "bedrock" {
+		return BedrockBaseURL(BedrockRegion())
 	}
 	if baseURL, ok := providerBaseURLs[normalized]; ok {
 		return baseURL
@@ -140,7 +205,11 @@ func ProviderEnvCandidates(name string) []string {
 		guessed := strings.ToUpper(strings.NewReplacer("-", "_", " ", "_", "/", "_").Replace(normalized)) + "_API_KEY"
 		appendEnv(guessed)
 	}
-	appendEnv("LLM_API_KEY")
+	// bedrock without a key signs with the AWS credentials; a generic key
+	// kept for another provider would silently take their place.
+	if normalized != "bedrock" {
+		appendEnv("LLM_API_KEY")
+	}
 	return envs
 }
 

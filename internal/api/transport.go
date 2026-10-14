@@ -22,8 +22,11 @@ type endpoint struct {
 	key     func() string
 	pool    *KeyPool
 	prepare func(context.Context, []byte, string) ([]byte, error)
-	// auth sets the provider's authentication and version headers.
-	auth func(h http.Header, key string)
+	// auth sets the provider's authentication and version headers on req,
+	// whose body is data. It may fail (a SigV4 signer without credentials):
+	// newRequest then reports a request that could not be built, which
+	// neither post nor openStream retries.
+	auth func(req *http.Request, data []byte, key string) error
 }
 
 // maxResponseBytes bounds a non-streamed response body.
@@ -40,7 +43,9 @@ func (ep endpoint) newRequest(ctx context.Context, data []byte, key string) (*ht
 		return nil, fmt.Errorf("%w: %w", errCreateRequest, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
-	ep.auth(req.Header, key)
+	if err := ep.auth(req, data, key); err != nil {
+		return nil, fmt.Errorf("%w: %w", errCreateRequest, err)
+	}
 	return req, nil
 }
 

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
+	"github.com/liuzhixin405/cove-agent/internal/api/awscreds"
 	"github.com/liuzhixin405/cove-agent/internal/fsatomic"
 	"github.com/liuzhixin405/cove-agent/internal/log"
 )
@@ -788,6 +789,10 @@ func DefaultModelForProvider(providerName string) string {
 		return "deepseek-v4-pro"
 	case "openai", "openai-compatible":
 		return "gpt-4o"
+	case "bedrock":
+		// Bedrock IDs carry the anthropic. prefix. Sonnet 5 is open to every
+		// Bedrock customer; the newer tiers need per-account access.
+		return "anthropic.claude-sonnet-5"
 	default:
 		return "claude-sonnet-4-20250514"
 	}
@@ -1077,10 +1082,35 @@ func (c *Config) EffectiveProvider() ProviderConfig {
 	if pc.BaseURL == "" {
 		pc.BaseURL = os.Getenv("LLM_BASE_URL")
 	}
-	if pc.BaseURL == "" && api.IsOpenAICompatibleProvider(pc.Name) {
+	// anthropic keeps an empty BaseURL (the provider applies its default);
+	// bedrock's default depends on AWS_REGION, so it is resolved here like
+	// the OpenAI-compatible ones and shows up in /config and diagnostics.
+	if pc.BaseURL == "" && (api.IsOpenAICompatibleProvider(pc.Name) || pc.Name == "bedrock") {
 		pc.BaseURL = api.DefaultBaseURL(pc.Name)
 	}
 	return pc
+}
+
+// HasProviderCredentials reports whether pc (as EffectiveProvider resolved
+// it) can authenticate: an API key, or for bedrock AWS credentials that
+// sign with SigV4. Every "is a key configured" check uses this, so a
+// SigV4-only bedrock setup is not reported as missing its key.
+func HasProviderCredentials(pc ProviderConfig) bool {
+	return api.HasCredentials(api.ProviderConfig{Name: pc.Name, APIKey: pc.APIKey, APIKeys: pc.APIKeys})
+}
+
+// AWSCredentialsSource is where a bedrock run without a key gets its AWS
+// credentials ("env", "credentials:default", ...), "" otherwise. The
+// source only, never a value.
+func AWSCredentialsSource(pc ProviderConfig) string {
+	if api.NormalizeProviderName(pc.Name) != "bedrock" || pc.APIKey != "" || len(pc.APIKeys) > 0 {
+		return ""
+	}
+	c, err := awscreds.Resolve()
+	if err != nil {
+		return ""
+	}
+	return c.Source
 }
 
 func firstEnv(keys ...string) string {

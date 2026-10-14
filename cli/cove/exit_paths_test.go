@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
+	"github.com/liuzhixin405/cove-agent/internal/config"
 	"github.com/liuzhixin405/cove-agent/internal/cost"
 	"github.com/liuzhixin405/cove-agent/internal/session"
 )
@@ -67,10 +68,10 @@ func TestRunPrintModeSlashCheckIgnoresPipedContent(t *testing.T) {
 // provider or network said (401, connection refused) instead of the setup
 // guidance headless and the TUI print.
 func TestPrintModeKeyCheck(t *testing.T) {
-	if !runNeedsAPIKey("") {
+	if !runNeedsAPIKey(config.ProviderConfig{Name: "deepseek"}) {
 		t.Fatal("no key, live run: must be refused")
 	}
-	if runNeedsAPIKey("placeholder") {
+	if runNeedsAPIKey(config.ProviderConfig{Name: "deepseek", APIKey: "placeholder"}) {
 		t.Fatal("a key is set: must run")
 	}
 }

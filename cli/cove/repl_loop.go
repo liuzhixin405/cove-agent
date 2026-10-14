@@ -223,7 +223,7 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 	// No key yet: offer the three-step setup before the first line, instead
 	// of reporting the missing key when the first message is sent (and
 	// dropping that message). COVE_NO_SETUP=1 keeps the old behaviour.
-	if os.Getenv("COVE_NO_SETUP") != "1" && runNeedsAPIKey(cfg.EffectiveProvider().APIKey) {
+	if os.Getenv("COVE_NO_SETUP") != "1" && runNeedsAPIKey(cfg.EffectiveProvider()) {
 		runSetupWizard(fe, reader, cfg, eng)
 	}
 
@@ -406,7 +406,7 @@ func runREPL(app *appBootstrap, cmdReg *command.Registry, bannerText string) (re
 
 			}
 
-			if runNeedsAPIKey(pc.APIKey) {
+			if runNeedsAPIKey(pc) {
 
 				repl.PrintAbove(missingAPIKeyMessage(pc.Name) + "\r\n")
 

@@ -18,7 +18,7 @@
 
 | 维度 | cove | Claude Code | 说明 |
 |------|------|-------------|------|
-| **模型绑定** | 多提供商：Anthropic/OpenAI/DeepSeek 原生，GLM/Kimi/Qwen/Doubao/OpenRouter/SiliconFlow/Groq/Together/Fireworks/xAI/Mistral 等 12 个兼容 | 绑定 Claude（Anthropic），可用代理接第三方但非一等公民 | cove 的核心差异：国内模型是一等公民，不是「兼容接口凑合」 |
+| **模型绑定** | 多提供商：Anthropic/Amazon Bedrock/OpenAI/DeepSeek 原生（Bedrock 直连，支持 API key 与 IAM SigV4，无需网关），GLM/Kimi/Qwen/Doubao/OpenRouter/SiliconFlow/Groq/Together/Fireworks/xAI/Mistral 等 12 个兼容 | 绑定 Claude（Anthropic），可用代理接第三方但非一等公民 | cove 的核心差异：国内模型是一等公民，不是「兼容接口凑合」 |
 | **成本** | 用你自己的 key；可走 DeepSeek 等低价模型 | 用你自己的 key 或 Anthropic 订阅 | 用国内模型跑 agent 的单轮成本通常低一个数量级 |
 | **分发** | 单文件静态二进制，零依赖，下载即用 | npm 安装，需要 Node 运行时 | cove 在「裸机/受限环境/容器」里更省心 |
 | **权限模型** | 4 档（default/auto/bypass/plan）+ 项目级永久规则 | 细粒度权限 + 设置 | 两者都成熟，cove 对「只读默认放行」做得更开箱即用 |

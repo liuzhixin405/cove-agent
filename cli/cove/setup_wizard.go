@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
+	"github.com/liuzhixin405/cove-agent/internal/api/awscreds"
 	"github.com/liuzhixin405/cove-agent/internal/config"
 	"github.com/liuzhixin405/cove-agent/internal/engine"
 	"github.com/liuzhixin405/cove-agent/internal/render"
@@ -35,6 +36,22 @@ var setupProviders = []setupProvider{
 	{"openrouter", "OpenRouter", "多模型网关"},
 	{"siliconflow", "硅基流动", "api.siliconflow.cn"},
 	{"openai-compatible", "其他 OpenAI 兼容接口", "保留当前 base_url，之后可用 /base-url 调整"},
+	// Last, so the numbers typed for the entries above stay the same.
+	{"bedrock", "Amazon Bedrock (Claude)", "Bedrock API key 或 AWS IAM 凭证；默认模型 anthropic.claude-sonnet-5"},
+}
+
+// setupCredentialsWithoutKey reports whether provider can run with no API
+// key typed: bedrock with AWS credentials in the environment or ~/.aws.
+// note names the source for the wizard's message.
+func setupCredentialsWithoutKey(provider string) (note string, ok bool) {
+	if api.NormalizeProviderName(provider) != "bedrock" {
+		return "", false
+	}
+	c, err := awscreds.Resolve()
+	if err != nil {
+		return "", false
+	}
+	return c.Source, true
 }
 
 const setupSkipped = "已跳过配置，之后可输入 /setup 再来。"
@@ -129,6 +146,12 @@ func setupReadKey(reader *repl.LineReader, provider string) (string, bool) {
 		return "", false
 	}
 	key = strings.TrimSpace(key)
+	if key == "" && fromEnv == "" {
+		if source, ok := setupCredentialsWithoutKey(provider); ok {
+			termui.PrintAbove("检测到 AWS 凭证（来源 " + source + "），将使用 SigV4 签名，不需要 API key。\n")
+			return "", true
+		}
+	}
 	if key == "" {
 		key = fromEnv
 	}

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/liuzhixin405/cove-agent/internal/api/awscreds"
 )
 
 type ToolCall struct {
@@ -153,6 +155,21 @@ func NewProvider(cfg ProviderConfig) Provider {
 		return newOpenAICompatProvider(cfg)
 	}
 	return newAnthropicProvider(cfg)
+}
+
+// HasCredentials reports whether cfg can authenticate a request: an API
+// key (or key pool) for any provider, or, for bedrock, resolvable AWS
+// credentials (awscreds.Resolve). The CLI's "not configured" checks use
+// this instead of looking at the key alone.
+func HasCredentials(cfg ProviderConfig) bool {
+	if strings.TrimSpace(cfg.APIKey) != "" || len(cfg.APIKeys) > 0 {
+		return true
+	}
+	if NormalizeProviderName(cfg.Name) == "bedrock" {
+		_, err := awscreds.Resolve()
+		return err == nil
+	}
+	return false
 }
 
 func DetectProvider(model string, cfg ProviderConfig) Provider {

@@ -1,5 +1,9 @@
 ﻿## [Unreleased]
 
+### Added
+- 新增 `bedrock` provider（别名 `aws`、`amazon-bedrock`）：直连 Claude in Amazon Bedrock 的原生 Messages API 端点 `https://bedrock-mantle.{region}.api.aws/anthropic/v1/messages`，不再需要 AI 网关中转。认证用 Bedrock API key（`AWS_BEARER_TOKEN_BEDROCK`，放 `x-api-key` 头），区域读 `AWS_REGION` / `AWS_DEFAULT_REGION`，默认 `us-east-1`；`base_url` / `LLM_BASE_URL` 仍可覆盖。模型 ID 带 `anthropic.` 前缀，默认 `anthropic.claude-sonnet-5`。复用 anthropic provider 的请求体、SSE、提示缓存与 thinking；不向 Bedrock 发送 `anthropic-beta` 头。
+- `bedrock` provider 支持 AWS IAM 凭证：没有 `api_key` / `AWS_BEARER_TOKEN_BEDROCK` 时，按 AWS SDK 顺序读取 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`、`~/.aws/credentials` 与 `~/.aws/config` 的静态 profile（`AWS_PROFILE`），用标准库实现的 SigV4（服务名 `bedrock-mantle`）逐请求签名；profile 的 `region` 作为区域回退。不支持 `credential_process`、SSO、assume role、IMDS，遇到时提示 `aws configure export-credentials`。`/setup` 选 Bedrock 后直接回车可用检测到的 AWS 凭证；`/config` 新增 `aws_credentials` 来源字段；启动、REPL、headless 与 `-p` 的"未配置 API key"判断改为同时认 AWS 凭证，启动诊断与 `/diagnose` 不再把这种配置报为"API Key 未设置"，`/doctor` 显示"认证: AWS SigV4"及凭证来源；凭证读不到时提示附带具体原因（如只设了一半环境变量、profile 使用 SSO）。签名方式在 provider 构建时决定：配置了 key 池的 bedrock 在所有 key 冷却时不会改用 IAM 凭证。bedrock 不读通用的 `LLM_API_KEY`，以免盖过 IAM 凭证。凭证文件兼容 CRLF 与 UTF-8 BOM（PowerShell 5.1 写出的文件）。Bedrock 403 附带排查提示。
+
 ### Changed
 - 发布包内可执行文件统一命名为 `cove`（macOS / Linux）和 `cove.exe`（Windows），不再带版本和平台后缀，解压即可运行；版本号仍由 ldflags 写入，`cove --version` 不变。
 
