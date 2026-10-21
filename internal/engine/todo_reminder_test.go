@@ -169,3 +169,48 @@ func TestSubAgentContextCarriesProjectInstructions(t *testing.T) {
 		}
 	}
 }
+
+// A fast model that does not exist (404: a mistyped model_fast, or a model
+// the provider's region does not serve) hands the turn to the main model
+// instead of failing it. The user never chose that model: the router did.
+func TestMissingFastModelFallsBackToTheMainModel(t *testing.T) {
+	prov := &seqProvider{reply: func(_ context.Context, n int, req api.ChatRequest) (*api.ChatResponse, error) {
+		if req.Model == "test-fast" {
+			return nil, &api.StatusError{Status: 404, Msg: `{"type":"error","error":{"type":"not_found_error","message":"The model 'test-fast' does not exist"}}`}
+		}
+		return &api.ChatResponse{Content: "done on the main model"}, nil
+	}}
+	eng := newPatternEngine(t, prov, func(c *Config) { c.ModelFast = "test-fast" })
+	var lines []string
+	eng.SetOutput(LineSink(func(s string) { lines = append(lines, s) }))
+	reply, err := eng.RunMessageWithStream(context.Background(), api.Message{Role: "user", Content: "hi"}, nil, nil)
+	if err != nil || reply != "done on the main model" {
+		t.Fatalf("reply %q, err %v", reply, err)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 2 || reqs[0].Model != "test-fast" || reqs[1].Model != "test-model" {
+		t.Fatalf("requests %+v, want the fast model first, then the main model", reqs)
+	}
+	if !strings.Contains(strings.Join(lines, ""), "改用 test-model") {
+		t.Fatalf("lines %q, want the fallback notice", lines)
+	}
+}
+
+// A 404 on the main model is not papered over with the fast model: the
+// base_url or the configured model is wrong and the user has to fix it.
+func TestMissingMainModelDoesNotFallBackToTheFastModel(t *testing.T) {
+	prov := &seqProvider{reply: func(_ context.Context, n int, req api.ChatRequest) (*api.ChatResponse, error) {
+		return nil, &api.StatusError{Status: 404, Msg: "The model 'test-model' does not exist"}
+	}}
+	// The fast model is set after construction, as the overload tests do,
+	// so the router sends the message to the main model.
+	eng := newPatternEngine(t, prov, nil)
+	eng.config.ModelFast = "test-fast"
+	if _, err := eng.RunMessageWithStream(context.Background(), api.Message{Role: "user", Content: "do it"}, nil, nil); err == nil {
+		t.Fatal("a missing main model must fail the turn")
+	}
+	reqs := prov.requests()
+	if len(reqs) != 1 || reqs[0].Model != "test-model" {
+		t.Fatalf("requests %+v, want exactly one, to the main model", reqs)
+	}
+}

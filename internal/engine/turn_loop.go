@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
@@ -533,24 +534,33 @@ func (e *Engine) callModel(t *turn, iter int) (*api.ChatResponse, flow) {
 	// provider's retries: the other configured model usually is not (a
 	// separate capacity pool and quota), so the turn goes on there, once,
 	// instead of failing with its work half done.
+	// A fast model the provider does not serve (404: a mistyped model_fast,
+	// or a model missing from the region) also moves the turn, to the main
+	// model only: the router chose that model, not the user, and the main
+	// model is the one they configured. A 404 on the main model itself is
+	// a configuration error and is reported as such.
 	if err != nil && t.ctx.Err() == nil && !t.fellBack {
+		var alt, why string
 		if kind := api.Classify(err); kind == api.KindServerError || kind == api.KindRateLimit {
-			if alt := e.fallbackModel(modelName); alt != "" {
-				t.fellBack = true
-				why := "暂时不可用"
-				if kind == api.KindRateLimit {
-					why = "被限流或额度用尽"
-				}
-				e.engineOutput(fmt.Sprintf("  \x1b[33m模型 %s %s，本轮改用 %s 继续\x1b[0m", modelName, why, alt))
-				trace.Write("fallback", map[string]any{"from": modelName, "to": alt, "error": textutil.ClipRunes(err.Error(), 160)})
-				// The whole turn moves, as escalate moves it: setting t.model
-				// alone left currentModel() (tool output limits, the window
-				// the context is shrunk for, ContextUsage) on the failed
-				// model for the rest of the turn.
-				t.model = alt
-				e.setTurnModel(alt)
-				return nil, flowNext
+			alt, why = e.fallbackModel(modelName), "暂时不可用"
+			if kind == api.KindRateLimit {
+				why = "被限流或额度用尽"
 			}
+		} else if isModelNotFound(err) && modelName != e.config.Model && e.config.Model != "" &&
+			(!e.hasImageMessages() || api.IsVisionCapableModel(e.config.Model)) {
+			alt, why = e.config.Model, "不存在（请检查 model_fast 配置）"
+		}
+		if alt != "" {
+			t.fellBack = true
+			e.engineOutput(fmt.Sprintf("  \x1b[33m模型 %s %s，本轮改用 %s 继续\x1b[0m", modelName, why, alt))
+			trace.Write("fallback", map[string]any{"from": modelName, "to": alt, "error": textutil.ClipRunes(err.Error(), 160)})
+			// The whole turn moves, as escalate moves it: setting t.model
+			// alone left currentModel() (tool output limits, the window
+			// the context is shrunk for, ContextUsage) on the failed
+			// model for the rest of the turn.
+			t.model = alt
+			e.setTurnModel(alt)
+			return nil, flowNext
 		}
 	}
 	if err != nil {
@@ -1175,4 +1185,11 @@ func (e *Engine) afterIteration(t *turn, iter int, results []toolResult) flow {
 		}
 	}
 	return flowOn
+}
+
+// isModelNotFound reports a 404 from the provider: the model (or the
+// endpoint) it was asked for does not exist.
+func isModelNotFound(err error) bool {
+	var se *api.StatusError
+	return errors.As(err, &se) && se.Status == http.StatusNotFound
 }

@@ -23,7 +23,7 @@ var (
 	conversationManaged = []string{
 		"agentActivity",
 		"messages", "sessionView", "systemPrompt", "totalTokens", "lastInputTokens", "usageMsgCount",
-		"session", "costBase", "fileHistory", "turnFilesChanged", "turnRanGit", "turnChangedFiles", "turnCheckpointed",
+		"session", "usageSession", "costBase", "fileHistory", "turnFilesChanged", "turnRanGit", "turnChangedFiles", "turnCheckpointed",
 		"pendingSteer", "pendingSteerN", "loopDetector", "guardrails", "acceptance",
 		"lastReviewMsgCount", "turnsSinceReview", "turnUsedWork", "conversationGen",
 		"newMemories", "shownMemories", "repoMapExcerpts", "injectedSkills",

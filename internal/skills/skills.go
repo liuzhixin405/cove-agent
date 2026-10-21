@@ -120,7 +120,9 @@ func (m *Manager) loadSkillFile(path, source, skillsDir string) {
 	// repository's .cove/skills/commit silently took over the user's own
 	// commit skill; now the replacement is said once, at load.
 	if old, ok := m.skills[sk.Name]; ok && source == SourceProject && old.Source != SourceProject {
-		log.Warnf("skills: 项目技能 %s（%s）替换了同名的%s技能", sk.Name, path, sourceLabel(old.Source))
+		// Info, not Warn: a replacement is by design, and Warn lands in
+		// errors.log, where four lines per start buried the real problems.
+		log.Infof("skills: 项目技能 %s（%s）替换了同名的%s技能", sk.Name, path, sourceLabel(old.Source))
 	}
 	m.skills[sk.Name] = sk
 }

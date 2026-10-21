@@ -165,23 +165,75 @@ func TestCatalogueHasNoAutoFixFlags(t *testing.T) {
 	}
 }
 
-// The start-up hint counts coded ERROR+ problems with a hint that no remedy
-// resolved afterwards; a resolved code, an uncoded line and a warning do
-// not count.
-func TestUnresolvedCountsCodedProblemsWithoutARemedy(t *testing.T) {
+// The start-up hint lists coded ERROR+ problems with a hint; a remedied
+// code stays (remedies hold for one session only), while an uncoded line
+// and a warning do not count. Most recent first, with count and last time.
+func TestUnresolvedListsCodedProblemsMostRecentFirst(t *testing.T) {
+	now := time.Date(2026, 10, 21, 18, 0, 0, 0, time.Local)
+	at := func(h int) time.Time { return now.Add(-time.Duration(h) * time.Hour) }
 	events := []RuntimeEvent{
-		{Severity: SevError, Code: ErrAPIContextLength, Model: "a", Source: "report"},
-		{Severity: SevRecovered, Code: ErrAPIContextLength, Model: "a", Source: "remedy"},
-		{Severity: SevError, Code: ErrAPIProviderUnavailable, Model: "a", Source: "report"},
-		{Severity: SevError, Code: ErrAPIProviderUnavailable, Model: "a", Source: "report"},
-		{Severity: SevWarning, Code: ErrToolArgsInvalid, Model: "a", Source: "report"},
-		{Severity: SevError, Message: "loop detected", Source: "log"},
+		{Time: at(5), Severity: SevError, Code: ErrAPIContextLength, Model: "a", Source: "report"},
+		{Time: at(5), Severity: SevRecovered, Code: ErrAPIContextLength, Model: "a", Source: "remedy"},
+		{Time: at(3), Severity: SevError, Code: ErrAPIProviderUnavailable, Model: "a", Source: "report"},
+		{Time: at(2), Severity: SevError, Code: ErrAPIProviderUnavailable, Model: "a", Source: "report"},
+		{Time: at(1), Severity: SevWarning, Code: ErrToolArgsInvalid, Model: "a", Source: "report"},
+		{Time: at(1), Severity: SevError, Message: "loop detected", Source: "log"},
 	}
-	// The remedy for E2008 only holds for this session (the window is
-	// learned, not configured), so it does not settle the problem for the
-	// start-up hint: E2008 and E2009 both stay open.
-	if got := unresolvedIn(events); got != 2 {
-		t.Errorf("unresolved = %d, want 2 (E2008 and E2009)", got)
+	got := unresolvedIn(events, now, nil)
+	if len(got) != 2 {
+		t.Fatalf("unresolved = %+v, want E2009 then E2008", got)
+	}
+	if got[0].Code != ErrAPIProviderUnavailable || got[0].Count != 2 || !got[0].Last.Equal(at(2)) || got[0].Recovery == "" {
+		t.Errorf("first = %+v", got[0])
+	}
+	if got[1].Code != ErrAPIContextLength || got[1].Count != 1 {
+		t.Errorf("second = %+v", got[1])
+	}
+}
+
+// Three sources of stale hints: a problem older than a week, one recorded
+// before the person last viewed /diagnose errors, and one on a model that
+// has completed a call since. Each used to be announced at every start.
+func TestUnresolvedSkipsOldViewedAndSupersededProblems(t *testing.T) {
+	now := time.Date(2026, 10, 21, 18, 0, 0, 0, time.Local)
+	at := func(h int) time.Time { return now.Add(-time.Duration(h) * time.Hour) }
+	events := []RuntimeEvent{
+		// Eight days old: outside the window.
+		{Time: at(8 * 24), Severity: SevError, Code: ErrAPIProviderUnavailable, Model: "qwen-test", Source: "report"},
+		// Viewed at -4h: only what comes after counts.
+		{Time: at(6), Severity: SevError, Code: ErrAPIContextLength, Model: "a", Source: "report"},
+		{Time: at(4), Severity: SevInfo, Message: "viewed /diagnose errors", Source: sourceAck},
+		{Time: at(3), Severity: SevError, Code: ErrAPIContextLength, Model: "a", Source: "report"},
+		// Model b succeeded at -1h, after its failure at -2h.
+		{Time: at(2), Severity: SevError, Code: ErrAPIProviderUnavailable, Model: "b", Source: "report"},
+		// Model c succeeded at -3h, before its failure at -1h: still open.
+		{Time: at(1), Severity: SevError, Code: ErrAPIProviderUnavailable, Model: "c", Source: "report"},
+	}
+	lastOK := map[string]time.Time{"b": at(1), "c": at(3)}
+	got := unresolvedIn(events, now, lastOK)
+	if len(got) != 2 {
+		t.Fatalf("unresolved = %+v, want c's E2009 and a's E2008", got)
+	}
+	if got[0].Model != "c" || got[1].Model != "a" || got[1].Count != 1 {
+		t.Errorf("got %+v", got)
+	}
+	if n := len(unresolvedIn(events[:2], now, nil)); n != 1 {
+		t.Errorf("without the ack, the -6h problem must count: %d", n)
+	}
+}
+
+// The ack marker is bookkeeping, not a problem: it neither shows as a
+// summary line nor counts toward the event total.
+func TestAckMarkerIsNeitherSummarisedNorCounted(t *testing.T) {
+	events := []RuntimeEvent{
+		{Time: time.Now(), Severity: SevError, Message: "loop detected", Source: "log"},
+		{Time: time.Now(), Severity: SevInfo, Message: "viewed /diagnose errors", Source: sourceAck},
+	}
+	if s := SummarizeRuntime(events); len(s) != 1 || s[0].Message != "loop detected" {
+		t.Errorf("summaries = %+v", s)
+	}
+	if v := WithoutAcks(events); len(v) != 1 || v[0].Source != "log" {
+		t.Errorf("WithoutAcks = %+v", v)
 	}
 }
 

@@ -1,25 +1,34 @@
 ﻿{
-    "active_profile": "deepseek",
-    "model": "deepseek-v4-pro",
-    "model_fast": "deepseek-flash",
-    "provider": {
-        "name": "deepseek",
-        "api_key": "sk-your-deepseek-api-key-here",
-        "base_url": "https://api.deepseek.com/v1",
-        "image_files_api": false
-    },
+    "active_profile": "bedrock",
     "permission_mode": "default",
-    "max_budget_usd": 10,
-    "system_prompt": "你是 Cove，一个 AI 编程助手。核心职责：使用工具完成任务，而非描述任务。",
+    "system_prompt": "你是 Cove，一个高效的 AI 编程助手。先理解任务，再用工具完成它；需要时读取、搜索、修改、执行、验证并给出真实结果，遇到问题要诚实说明。",
     "profiles": {
+        "bedrock": {
+            "model": "anthropic.claude-opus-5-5",
+            "model_fast": "anthropic.claude-haiku-4-5",
+            "provider": {
+                "name": "bedrock",
+                "api_key": ""
+            },
+            "max_budget_usd": 20
+        },
         "deepseek": {
             "model": "deepseek-v4-pro",
-            "model_fast": "deepseek-flash",
+            "model_fast": "deepseek-v4-flash",
             "provider": {
                 "name": "deepseek",
                 "api_key": "sk-your-deepseek-api-key-here",
-                "base_url": "https://api.deepseek.com/v1",
-                "image_files_api": false
+                "base_url": "https://api.deepseek.com/v1"
+            },
+            "max_budget_usd": 10
+        },
+        "gemini": {
+            "model": "gemini-3.6-flash",
+            "model_fast": "gemini-3.1-flash-lite",
+            "provider": {
+                "name": "gemini",
+                "api_key": "AIzaSy-your-gemini-api-key-here",
+                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"
             },
             "max_budget_usd": 10
         },
@@ -32,16 +41,6 @@
                 "base_url": "http://127.0.0.1:8080/v1"
             },
             "max_budget_usd": 999999
-        },
-        "gemini": {
-            "model": "gemini-3.6-flash",
-            "model_fast": "gemini-3.1-flash-lite",
-            "provider": {
-                "name": "gemini",
-                "api_key": "AIzaSy-your-gemini-api-key-here",
-                "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"
-            },
-            "max_budget_usd": 10
         }
     },
     "mcp_servers": {}

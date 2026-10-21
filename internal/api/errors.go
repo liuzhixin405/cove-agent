@@ -55,6 +55,11 @@ func statusHint(status int, msg string) string {
 	if status != http.StatusRequestEntityTooLarge && isContextLengthText(status, msg) {
 		return "上下文超出模型上限，请用 /compact 压缩对话或新开会话"
 	}
+	if status == http.StatusBadRequest && strings.Contains(msg, "unsupported countries") {
+		// Anthropic (first-party and via Bedrock) checks the egress IP after
+		// authentication; the body reads like a request error.
+		return "出口 IP 所在地区不受 Anthropic 支持，请确认代理/VPN 已生效（鉴权已通过，与密钥和模型配置无关）"
+	}
 	switch {
 	case status == http.StatusUnauthorized:
 		return "API Key 无效或已过期，请检查 api_key 配置"

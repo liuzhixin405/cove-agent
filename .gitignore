@@ -56,3 +56,6 @@ coverage.txt
 
 # Claude Code local settings (per-user, not shared)
 /.claude/settings.local.json
+
+# CodeAtlas local index
+/.codeatlas/

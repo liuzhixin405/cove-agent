@@ -186,42 +186,14 @@ func (t *Tracker) AddDetailed(model string, input, output, cacheHit, cacheMiss i
 // cache and are billed at InputCacheWrite (1.25× input by default) instead of
 // the input rate. They used to be billed as plain input.
 func (t *Tracker) AddWithCacheWrite(model string, input, output, cacheHit, cacheMiss, cacheWrite int) {
+	u := Bill(model, input, output, cacheHit, cacheMiss, cacheWrite)
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.totalInput += input
-	t.totalOutput += output
-	if cacheHit < 0 {
-		cacheHit = 0
-	}
-	if cacheMiss < 0 {
-		cacheMiss = 0
-	}
-	if cacheHit > input {
-		cacheHit = input
-	}
-	if cacheHit+cacheMiss > input {
-		cacheMiss = input - cacheHit
-	}
-	if cacheHit+cacheMiss < input {
-		cacheMiss += input - (cacheHit + cacheMiss)
-	}
-	t.totalPromptCacheHit += cacheHit
-	t.totalPromptCacheMiss += cacheMiss
-	p := priceFor(model)
-	if p.InputCacheHit == 0 {
-		p.InputCacheHit = p.Input
-	}
-	if p.InputCacheWrite == 0 {
-		p.InputCacheWrite = p.Input * cacheWriteMultiplier
-	}
-	if cacheWrite < 0 {
-		cacheWrite = 0
-	}
-	if cacheWrite > cacheMiss {
-		cacheWrite = cacheMiss
-	}
-	t.totalCost += (float64(cacheMiss-cacheWrite)/1e6)*p.Input + (float64(cacheWrite)/1e6)*p.InputCacheWrite +
-		(float64(cacheHit)/1e6)*p.InputCacheHit + (float64(output)/1e6)*p.Output
+	t.totalInput += u.Input
+	t.totalOutput += u.Output
+	t.totalPromptCacheHit += u.CacheHit
+	t.totalPromptCacheMiss += u.CacheMiss
+	t.totalCost += u.Cost
 }
 
 func (t *Tracker) OverBudget() bool {

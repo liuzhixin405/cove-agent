@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/api"
 	"github.com/liuzhixin405/cove-agent/internal/config"
@@ -84,12 +85,16 @@ func handleBuiltinConfigCommand(input string, cfg *config.Config, eng *engine.En
 	case input == "/budget" || strings.HasPrefix(input, "/budget "):
 		handleBudgetCommand(input, cfg, eng)
 		return true
-	case input == "/cost":
+	case input == "/cost" || strings.HasPrefix(input, "/cost "):
 		outln("本次会话:", eng.CostTracker().Summary())
-		ch := cost.NewCostHistory()
-		if len(ch.Records) > 0 {
-			outf("近 24小时: $%.4f | 近 7天: $%.4f | 总计: $%.4f (%d 个会话)\n",
-				ch.Last24Hours(), ch.Last7Days(), ch.TotalAllTime(), len(ch.Records))
+		// Then the period's usage by provider and model from the per-call
+		// ledger; the old 24h/7d/total line only had dollar sums.
+		report, err := cost.RenderUsage(strings.Fields(input)[1:], time.Now())
+		if report != "" {
+			outln(report)
+		}
+		if err != nil {
+			outf("\x1b[33m%v\x1b[0m\n", err)
 		}
 		return true
 	default:

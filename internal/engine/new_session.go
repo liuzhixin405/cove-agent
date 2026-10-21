@@ -96,6 +96,8 @@ func (e *Engine) leaveSession(ctx context.Context) string {
 
 func (e *Engine) enterSession(r *session.Record) {
 	e.session = r
+	id := r.ID
+	e.usageSession.Store(&id)
 	// The dream gate must not count the session in use as one to
 	// consolidate.
 	if e.dreamRunner != nil {

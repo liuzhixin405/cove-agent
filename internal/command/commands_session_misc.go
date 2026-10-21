@@ -3,7 +3,9 @@ package command
 import (
 	"context"
 	"fmt"
+	"github.com/liuzhixin405/cove-agent/internal/cost"
 	"strings"
+	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/session"
 	"github.com/liuzhixin405/cove-agent/internal/textutil"
@@ -23,12 +25,22 @@ func (c *CompactCmd) Execute(ctx context.Context, in Input) (Output, error) {
 func (c *CostCmd) Name() string        { return "cost" }
 func (c *CostCmd) Aliases() []string   { return nil }
 func (c *CostCmd) Description() string { return "查看用量和费用" }
-func (c *CostCmd) Help() string        { return "/cost - 显示会话 token 用量和预估费用" }
+func (c *CostCmd) Help() string {
+	return `/cost                 本次会话用量，以及本月按供应商/模型汇总的调用数、token 和费用
+/cost 2026-09         指定月份；/cost 30d、/cost 24h、/cost today 近一段时间；/cost all 全部
+/cost [范围] export   把该范围的逐次调用导出为 CSV（~/.cove/usage/）`
+}
 func (c *CostCmd) Execute(ctx context.Context, in Input) (Output, error) {
-	if in.Engine == nil {
-		return Output{Message: "费用跟踪器不可用"}, nil
+	var sb strings.Builder
+	if in.Engine != nil {
+		sb.WriteString("本次会话: " + in.Engine.CostTracker().Summary() + "\n")
 	}
-	return Output{Message: in.Engine.CostTracker().Summary()}, nil
+	report, err := cost.RenderUsage(in.Args, time.Now())
+	sb.WriteString(report)
+	if err != nil {
+		sb.WriteString("\x1b[33m" + err.Error() + "\x1b[0m\n")
+	}
+	return Output{Message: sb.String()}, nil
 }
 
 func (c *ResumeCmd) Name() string                     { return "resume" }

@@ -131,3 +131,37 @@ func TestWrapUpUsesRoutedModelWithoutThinking(t *testing.T) {
 		t.Fatalf("wrap-up request model=%q thinking=%q effort=%q, want the routed model with thinking off", r.Model, r.Thinking, r.Effort)
 	}
 }
+
+// Claude Opus 5.5 (and Haiku 5.5 above effort "high") answer
+// thinking:{type:"disabled"} with a 400: thinking is always on there. The
+// wrap-up must then ask again with the model's default instead of losing
+// the summary, which it used to do silently.
+func TestWrapUpRetriesWithoutThinkingWhenModelRejectsDisabled(t *testing.T) {
+	prov := &seqProvider{reply: func(_ context.Context, n int, req api.ChatRequest) (*api.ChatResponse, error) {
+		if req.Thinking == "disabled" {
+			return nil, &api.StatusError{Status: 400, Msg: `{"type":"error","error":{"type":"invalid_request_error","message":"\"thinking.type.disabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."}}`}
+		}
+		return &api.ChatResponse{Content: testWrapUp}, nil
+	}}
+	eng := limitEngine(t, prov, 3)
+	s, err := eng.wrapUpSummary(context.Background(), "anthropic.claude-opus-5-5", "测试")
+	if err != nil || s != testWrapUp {
+		t.Fatalf("wrapUpSummary = %q, %v; want the summary from the retry", s, err)
+	}
+	reqs := prov.requests()
+	if len(reqs) != 2 || reqs[0].Thinking != "disabled" || reqs[1].Thinking != "" {
+		t.Fatalf("requests = %d (thinking %q then %q), want disabled first, then the model default", len(reqs), reqs[0].Thinking, reqs[len(reqs)-1].Thinking)
+	}
+}
+
+// Any other 400 is not about thinking and is not retried.
+func TestWrapUpDoesNotRetryUnrelatedBadRequest(t *testing.T) {
+	prov := wrapUpProvider(&api.StatusError{Status: 400, Msg: "max_tokens: must be positive"})
+	eng := limitEngine(t, prov, 3)
+	if s, err := eng.wrapUpSummary(context.Background(), "test-model", "测试"); err == nil || s != "" {
+		t.Fatalf("wrapUpSummary = %q, %v; want the error", s, err)
+	}
+	if n := len(prov.requests()); n != 1 {
+		t.Fatalf("model called %d times, want once", n)
+	}
+}

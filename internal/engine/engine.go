@@ -194,6 +194,10 @@ type Engine struct {
 	reviewBg sync.WaitGroup
 	// extractSaved counts memories saved by extractions (extract OnSave).
 	extractSaved atomic.Int64
+	// usageSession is the current session's ID for the usage ledger. The
+	// billing callback runs on background goroutines (review, extraction)
+	// while /new replaces e.session, so it reads this instead of e.session.
+	usageSession atomic.Pointer[string]
 	// lastSaveErr is the error of the last session save, nil when it
 	// succeeded.
 	lastSaveErr error
@@ -364,8 +368,21 @@ func New(config Config) (*Engine, error) {
 	// Every model call is billed at the provider, whoever makes it: the main
 	// loop, sub-agents, memory extraction, background review, consolidation
 	// and compaction summaries alike.
+	var eng *Engine // set once e exists; the provider is not called before New returns
 	metered := api.NewMeteredProvider(provRef, func(model string, resp *api.ChatResponse) {
 		tracker.AddWithCacheWrite(model, resp.InputTokens, resp.OutputTokens, resp.PromptCacheHitTokens, resp.PromptCacheMissTokens, resp.PromptCacheWriteTokens)
+		// The per-call ledger behind /cost month: with the provider that
+		// served the call, so a month's spend reads by provider and
+		// model. cost_history.json holds one per-session total under the
+		// main model's name, written at exit, which could not say that.
+		u := cost.Bill(model, resp.InputTokens, resp.OutputTokens, resp.PromptCacheHitTokens, resp.PromptCacheMissTokens, resp.PromptCacheWriteTokens)
+		u.Provider, u.Source = provRef.DisplayName(), "session"
+		if eng != nil {
+			if id := eng.usageSession.Load(); id != nil {
+				u.Session = *id
+			}
+		}
+		cost.RecordUsage(u)
 	})
 
 	e := &Engine{
@@ -395,6 +412,7 @@ func New(config Config) (*Engine, error) {
 		fileHistory:  make(map[string]bool),
 		turnTimeUnit: time.Minute,
 	}
+	eng = e
 
 	if !config.LoopDetectionDisabled {
 		// Same thresholds for every model tier: flash-class models are not
@@ -433,6 +451,7 @@ func New(config Config) (*Engine, error) {
 			Model:     config.Model,
 			Cwd:       session.NormalizeProjectDir(projectDir),
 		}
+		e.usageSession.Store(&e.session.ID)
 	}
 
 	// Initialize session notes

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/liuzhixin405/cove-agent/internal/log"
+	"github.com/liuzhixin405/cove-agent/internal/trace"
 )
 
 // RuntimeEvent is one recorded runtime problem (error, warning, stall, etc.).
@@ -223,6 +224,9 @@ func SummarizeRuntime(events []RuntimeEvent) []RuntimeSummary {
 		return s
 	}
 	for _, ev := range events {
+		if ev.Source == sourceAck {
+			continue
+		}
 		key := string(ev.Code) + "|" + ev.Model
 		if ev.Code == "" {
 			key = "|" + normaliseMessage(ev.Message)
@@ -341,31 +345,101 @@ func ArchiveRuntimeLog() (string, error) {
 	return dest, nil
 }
 
-// UnresolvedFromLog counts, in the persisted log, the coded problems of
-// severity ERROR or worse that have a hint; the start-up hint points at
-// /diagnose errors when it is not 0. A remedy's result does not settle a
-// problem here: remedies act for one session (a learned window is gone at
-// the next start), so what they fixed is exactly what the person still has
-// to make permanent.
-func UnresolvedFromLog() int { return unresolvedIn(LoadRuntimeLog()) }
+// OpenProblem is one coded problem from earlier runs that the start-up
+// hint reports: what it was, on which model, how often and when last.
+type OpenProblem struct {
+	Code     ErrorCode
+	Model    string
+	Count    int
+	Last     time.Time
+	Message  string // the catalogue's summary
+	Recovery string // the catalogue's hint
+}
 
-func unresolvedIn(events []RuntimeEvent) int {
+// unresolvedWindow is how far back the start-up hint looks: a problem older
+// than this was either fixed or never mattered.
+const unresolvedWindow = 7 * 24 * time.Hour
+
+// sourceAck marks the event AckRuntimeLog writes when the person has seen
+// /diagnose errors; it is not a problem and never shows.
+const sourceAck = "ack"
+
+// AckRuntimeLog records that the log's problems were shown to the person,
+// so the start-up hint only reports problems recorded after that.
+func AckRuntimeLog() {
+	record(RuntimeEvent{Time: time.Now(), Severity: SevInfo, Category: CatEngine, Message: "viewed /diagnose errors", Source: sourceAck})
+}
+
+// WithoutAcks drops the markers AckRuntimeLog writes, for display.
+func WithoutAcks(events []RuntimeEvent) []RuntimeEvent {
+	out := make([]RuntimeEvent, 0, len(events))
+	for _, ev := range events {
+		if ev.Source != sourceAck {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// UnresolvedFromLog lists, from the persisted log, the coded problems of
+// severity ERROR or worse with a hint that still look open: recorded in
+// the last week, after the person last viewed /diagnose errors, and on a
+// model that has not completed a call since (per the trace). Most recent
+// first. The hint used to count every such problem ever logged, so a
+// week-old failure against a test address was announced at every start
+// until archived. A remedy's result does not settle a problem here:
+// remedies act for one session (a learned window is gone at the next
+// start), so what they fixed is exactly what the person still has to make
+// permanent.
+func UnresolvedFromLog() []OpenProblem {
+	return unresolvedIn(LoadRuntimeLog(), time.Now(), trace.LastModelSuccess())
+}
+
+func unresolvedIn(events []RuntimeEvent, now time.Time, lastSuccess map[string]time.Time) []OpenProblem {
+	since := now.Add(-unresolvedWindow)
+	for _, ev := range events {
+		if ev.Source == sourceAck && ev.Time.After(since) {
+			since = ev.Time
+		}
+	}
 	type key struct {
 		code  ErrorCode
 		model string
 	}
-	open := map[key]bool{}
+	open := map[key]*OpenProblem{}
+	var order []key
 	for _, ev := range events {
-		if ev.Code == "" {
+		if ev.Code == "" || !ev.Time.After(since) {
+			continue
+		}
+		// SevRecovered sorts above SevFatal, so it is excluded explicitly.
+		if ev.Severity < SevError || ev.Severity == SevRecovered {
+			continue
+		}
+		def := registry[ev.Code]
+		if def == nil || def.Recovery == "" {
 			continue
 		}
 		k := key{ev.Code, ev.Model}
-		// SevRecovered sorts above SevFatal, so it is excluded explicitly.
-		if ev.Severity >= SevError && ev.Severity != SevRecovered {
-			if def := registry[ev.Code]; def != nil && def.Recovery != "" {
-				open[k] = true
-			}
+		p, ok := open[k]
+		if !ok {
+			p = &OpenProblem{Code: ev.Code, Model: ev.Model, Message: def.Message, Recovery: def.Recovery}
+			open[k] = p
+			order = append(order, k)
+		}
+		p.Count++
+		if ev.Time.After(p.Last) {
+			p.Last = ev.Time
 		}
 	}
-	return len(open)
+	out := make([]OpenProblem, 0, len(order))
+	for _, k := range order {
+		p := open[k]
+		if okAt, has := lastSuccess[p.Model]; has && p.Model != "" && okAt.After(p.Last) {
+			continue
+		}
+		out = append(out, *p)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Last.After(out[j].Last) })
+	return out
 }

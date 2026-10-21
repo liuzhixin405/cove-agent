@@ -80,3 +80,29 @@ func TestDisabledUnderGoTestUnlessAPathIsSet(t *testing.T) {
 	}
 	Write("model", map[string]any{"x": 1}) // must not panic or write anywhere
 }
+
+// The start-up hint drops a problem once the same model has completed a
+// call since, so a failed call (an "error" field) must not count as one,
+// and the rotated file counts too.
+func TestLastModelSuccessIgnoresFailedCallsAndReadsTheRotatedFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "trace.jsonl")
+	SetPath(p)
+	t.Cleanup(func() { SetPath("") })
+	if err := os.WriteFile(p+".1", []byte(`{"t":"2026-10-01T10:00:00.000+08:00","kind":"model","model":"old","in":1,"out":1}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	Write("model", map[string]any{"model": "a", "in": 10, "out": 2, "stop": "end_turn"})
+	Write("model", map[string]any{"model": "b", "error": "400 bad request"})
+	Write("tool", map[string]any{"name": "bash"})
+
+	got := LastModelSuccess()
+	if _, ok := got["b"]; ok {
+		t.Fatalf("failed call counted as a success: %v", got)
+	}
+	if got["a"].IsZero() {
+		t.Fatalf("successful call missing: %v", got)
+	}
+	if got["old"].Year() != 2026 || got["old"].Month() != 10 {
+		t.Fatalf("rotated file not read: %v", got)
+	}
+}

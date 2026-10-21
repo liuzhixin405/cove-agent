@@ -56,6 +56,9 @@ func runDreamWorker(sessionsDir, projectRoot, profile string) int {
 	tracker := cost.NewTracker(0)
 	metered := api.NewMeteredProvider(prov, func(model string, resp *api.ChatResponse) {
 		tracker.AddWithCacheWrite(model, resp.InputTokens, resp.OutputTokens, resp.PromptCacheHitTokens, resp.PromptCacheMissTokens, resp.PromptCacheWriteTokens)
+		u := cost.Bill(model, resp.InputTokens, resp.OutputTokens, resp.PromptCacheHitTokens, resp.PromptCacheMissTokens, resp.PromptCacheWriteTokens)
+		u.Provider, u.Source, u.Session = prov.DisplayName(), "dream", "dream-worker"
+		cost.RecordUsage(u)
 	})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

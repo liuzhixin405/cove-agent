@@ -68,7 +68,7 @@ func (c *diagnoseCmd) showRuntimeErrors() (Output, error) {
 	// Both the persisted log (earlier runs) and this session's buffer, once
 	// each: the start-up hint points here for the log's problems, so the
 	// log must be shown even when this session already recorded something.
-	events := diagnostic.MergeEvents(diagnostic.LoadRuntimeLog(), diagnostic.RecentRuntime())
+	events := diagnostic.WithoutAcks(diagnostic.MergeEvents(diagnostic.LoadRuntimeLog(), diagnostic.RecentRuntime()))
 	if len(events) == 0 {
 		return Output{Message: "\x1b[32m✓ 没有记录到运行时错误或卡顿。\x1b[0m\n"}, nil
 	}
@@ -113,6 +113,8 @@ func (c *diagnoseCmd) showRuntimeErrors() (Output, error) {
 		}
 	}
 	sb.WriteString("\n\x1b[2m日志文件: ~/.cove/errors.log · 处理完可用 /diagnose archive 归档\x1b[0m\n")
+	// Seen: the start-up hint now only reports problems recorded after this.
+	diagnostic.AckRuntimeLog()
 	return Output{Message: sb.String()}, nil
 }
 

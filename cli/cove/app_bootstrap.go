@@ -224,10 +224,35 @@ func startupDiagnosticsText(cfg *config.Config, debugMode bool) string {
 	}
 	// Coded problems from earlier runs that no remedy resolved: the person
 	// may not have seen the hint when the turn failed.
-	if n := diagnostic.UnresolvedFromLog(); n > 0 {
-		return fmt.Sprintf("\n  \x1b[90m⚠️  错误日志里有 %d 类未处理的问题，输入 \x1b[36m/diagnose errors\x1b[90m 查看建议，处理完可用 /diagnose archive 归档。\x1b[0m\n", n)
+	if open := diagnostic.UnresolvedFromLog(); len(open) > 0 {
+		return startupUnresolvedHint(open)
 	}
 	return ""
+}
+
+// startupUnresolvedHint names the most recent open problem and what to do
+// about it, so the line is actionable on its own. "错误日志里有 N 类未处理的
+// 问题" made the person run a command to learn anything, and a person with
+// only the binary could not act on most of what it then listed.
+func startupUnresolvedHint(open []diagnostic.OpenProblem) string {
+	p := open[0]
+	var sb strings.Builder
+	sb.WriteString("\n  \x1b[90m⚠️  上次运行时 " + p.Message + "（" + string(p.Code))
+	if p.Model != "" {
+		sb.WriteString("，模型 " + p.Model)
+	}
+	if p.Count > 1 {
+		fmt.Fprintf(&sb, "，%d 次", p.Count)
+	}
+	if !p.Last.IsZero() {
+		sb.WriteString("，最近 " + p.Last.Format("01-02 15:04"))
+	}
+	sb.WriteString("）：" + strings.TrimRight(p.Recovery, "。") + "。")
+	if n := len(open) - 1; n > 0 {
+		fmt.Fprintf(&sb, " 另有 %d 类。", n)
+	}
+	sb.WriteString(" 详情 \x1b[36m/diagnose errors\x1b[90m，已处理可 /diagnose archive 归档。\x1b[0m\n")
+	return sb.String()
 }
 
 // loadUserHooks reads hooks.json from the config directory policies.json and

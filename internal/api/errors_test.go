@@ -157,3 +157,17 @@ func TestIsContextLengthError(t *testing.T) {
 		}
 	}
 }
+
+// Anthropic (first-party and through Bedrock) refuses requests whose egress
+// IP is in an unsupported country with a 400 whose text says so. The hint
+// names the proxy, which is where the fix is; the raw body reads like a
+// request error and sent one user through the model config twice.
+func TestStatusErrorHintsAtProxyForUnsupportedRegion(t *testing.T) {
+	err := &StatusError{Status: 400, Msg: `{"type":"error","error":{"type":"invalid_request_error","message":"Access to Anthropic models is not allowed from unsupported countries, regions, or territories."}}`}
+	if !strings.Contains(err.Error(), "代理") || !strings.Contains(err.Error(), "地区") {
+		t.Fatalf("Error() = %q, want a hint about the egress region / proxy", err.Error())
+	}
+	if other := (&StatusError{Status: 400, Msg: "max_tokens: must be positive"}).Error(); strings.Contains(other, "代理") {
+		t.Fatalf("unrelated 400 got the region hint: %q", other)
+	}
+}

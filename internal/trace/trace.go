@@ -133,6 +133,31 @@ func Tail(n int) ([]Event, error) {
 	return events, nil
 }
 
+// LastModelSuccess returns, per model, when the trace (current file and
+// its rotated predecessor) last saw a model call complete: a "model" event
+// without an "error" field. The start-up hint uses it to drop problems the
+// same model has got past since.
+func LastModelSuccess() map[string]time.Time {
+	p := Path()
+	if p == "" {
+		return nil
+	}
+	out := map[string]time.Time{}
+	for _, ev := range append(readEvents(p+".1"), readEvents(p)...) {
+		if ev.Kind != "model" || ev.Time.IsZero() {
+			continue
+		}
+		if _, failed := ev.Fields["error"]; failed {
+			continue
+		}
+		model, _ := ev.Fields["model"].(string)
+		if model != "" && ev.Time.After(out[model]) {
+			out[model] = ev.Time
+		}
+	}
+	return out
+}
+
 func readEvents(p string) []Event {
 	data, err := os.ReadFile(p)
 	if err != nil {

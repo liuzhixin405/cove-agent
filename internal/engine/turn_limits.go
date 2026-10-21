@@ -270,6 +270,14 @@ func (e *Engine) wrapUpSummary(ctx context.Context, routedModel, reason string) 
 	}
 	act := e.beginActivity("生成收尾总结 " + model)
 	resp, err := e.llm.Chat(ctx, req)
+	if err != nil && rejectsThinkingSetting(err) {
+		// Opus 5.5 (and Haiku 5.5 above effort "high") always think and
+		// answer thinking:{type:"disabled"} with a 400. The model default is
+		// the only setting they take, so ask once more without the field;
+		// the summary used to be lost silently on those models.
+		req.Thinking = ""
+		resp, err = e.llm.Chat(ctx, req)
+	}
 	e.endActivity(act)
 	if err != nil {
 		log.Debugf("wrap-up summary failed: %v", err)
@@ -397,4 +405,10 @@ func interruptMarkerReason(reason string) string {
 		return "stagnation"
 	}
 	return "stopped"
+}
+
+// rejectsThinkingSetting reports a 400 about the request's thinking field:
+// the model does not take the thinking mode it was sent.
+func rejectsThinkingSetting(err error) bool {
+	return api.Classify(err) == api.KindBadRequest && strings.Contains(strings.ToLower(err.Error()), "thinking")
 }

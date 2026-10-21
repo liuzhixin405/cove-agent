@@ -1,10 +1,14 @@
 ﻿## [Unreleased]
 
+## [12.3.3] - 2026-10-21
+
 ### Added
+- `/cost` 支持按时间范围查看用量：`/cost`（本月）、`/cost 2026-09`、`/cost 30d` / `24h` / `today`、`/cost all`，按供应商 × 模型汇总调用次数、输入/输出 token、缓存命中与费用，末行合计；`/cost [范围] export` 把逐次调用导出为 CSV。每次模型调用（主循环、子智能体、记忆提取、压缩、dream worker）都记入 `~/.cove/usage/YYYY-MM.jsonl`，带供应商、模型、会话与 token 明细，按月一个文件，保留 13 个月；同一模型经不同供应商（如 Bedrock 与直连）分开统计。`cost_history.json` 仍在退出时写会话级合计；账本开始之前的这些记录以供应商 `legacy` 显示，之后不再重复计入。
 - 新增 `bedrock` provider（别名 `aws`、`amazon-bedrock`）：直连 Claude in Amazon Bedrock 的原生 Messages API 端点 `https://bedrock-mantle.{region}.api.aws/anthropic/v1/messages`，不再需要 AI 网关中转。认证用 Bedrock API key（`AWS_BEARER_TOKEN_BEDROCK`，放 `x-api-key` 头），区域读 `AWS_REGION` / `AWS_DEFAULT_REGION`，默认 `us-east-1`；`base_url` / `LLM_BASE_URL` 仍可覆盖。模型 ID 带 `anthropic.` 前缀，默认 `anthropic.claude-sonnet-5`。复用 anthropic provider 的请求体、SSE、提示缓存与 thinking；不向 Bedrock 发送 `anthropic-beta` 头。
 - `bedrock` provider 支持 AWS IAM 凭证：没有 `api_key` / `AWS_BEARER_TOKEN_BEDROCK` 时，按 AWS SDK 顺序读取 `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`、`~/.aws/credentials` 与 `~/.aws/config` 的静态 profile（`AWS_PROFILE`），用标准库实现的 SigV4（服务名 `bedrock-mantle`）逐请求签名；profile 的 `region` 作为区域回退。不支持 `credential_process`、SSO、assume role、IMDS，遇到时提示 `aws configure export-credentials`。`/setup` 选 Bedrock 后直接回车可用检测到的 AWS 凭证；`/config` 新增 `aws_credentials` 来源字段；启动、REPL、headless 与 `-p` 的"未配置 API key"判断改为同时认 AWS 凭证，启动诊断与 `/diagnose` 不再把这种配置报为"API Key 未设置"，`/doctor` 显示"认证: AWS SigV4"及凭证来源；凭证读不到时提示附带具体原因（如只设了一半环境变量、profile 使用 SSO）。签名方式在 provider 构建时决定：配置了 key 池的 bedrock 在所有 key 冷却时不会改用 IAM 凭证。bedrock 不读通用的 `LLM_API_KEY`，以免盖过 IAM 凭证。凭证文件兼容 CRLF 与 UTF-8 BOM（PowerShell 5.1 写出的文件）。Bedrock 403 附带排查提示。
 
 ### Changed
+- 启动时的「错误日志里有 N 类未处理的问题」提示改为直接写明最近一个问题、模型、次数与处理建议（如「上次运行时 API 服务不可达（E2001，模型 x，3 次，最近 10-21 15:07）：检查网络连接和代理设置」），并且只报仍然成立的问题：最近 7 天内、在上次运行 `/diagnose errors` 之后（查看过即视为已知）、同一模型此后没有成功调用过（以 `trace.jsonl` 为准）。此前每次启动都重复报已过去多日、模型早已恢复的历史错误，而只有二进制的用户也无从处理。项目技能覆盖同名用户技能的提示由 Warn 降为 Info，不再写入 `errors.log`（原每次启动写入数条）。
 - 发布包内可执行文件统一命名为 `cove`（macOS / Linux）和 `cove.exe`（Windows），不再带版本和平台后缀，解压即可运行；版本号仍由 ldflags 写入，`cove --version` 不变。
 
 ### Docs
