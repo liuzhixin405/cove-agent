@@ -309,6 +309,15 @@ type Engine struct {
 	// turnCheckpointed records that this turn created a checkpoint, for the
 	// "/undo" hint of the summary line. Guarded by fileMu.
 	turnCheckpointed bool
+	// turnChangeBase is the first checkpoint checkpointBefore took (or
+	// reused) this turn: the "before" of what the agent changed this turn.
+	// Cleared at turn start, on a new session, after a rollback and when the
+	// checkpoint manager is replaced. Guarded by fileMu.
+	turnChangeBase string
+	// turnChangeBaseTree is turnChangeBase's tree, the fallback once a
+	// background trim has re-created the commit under a new hash. Empty when
+	// it could not be read. Cleared with turnChangeBase; guarded by fileMu.
+	turnChangeBaseTree string
 
 	// injectedSkills are the file-type skills already shown this session.
 	skillMu        sync.Mutex
@@ -551,6 +560,8 @@ func (e *Engine) SetWorkingDir(dir string) {
 		e.cpMgr = nil
 		log.Debugf("[checkpoint] init failed for %s: %v", dir, err)
 	}
+	// The base is a commit of the old directory's checkpoint chain.
+	e.clearTurnChangeBase()
 	e.verifyAnnounced = false
 	e.verifyTrustNoticed = false
 	e.verifyGate = e.newVerifyGate(dir)
@@ -868,6 +879,9 @@ func (e *Engine) RestoreCheckpoint(commitHash string) (string, error) {
 	backup, err := e.cpMgr.Restore(commitHash)
 	if backup != "" {
 		e.invalidateSavedAcceptance()
+		// The tree was rewritten: a diff from the turn's base would no
+		// longer be what the agent changed.
+		e.clearTurnChangeBase()
 	}
 	return backup, err
 }
@@ -888,8 +902,51 @@ func (e *Engine) ApplyCheckpointFiles(plan *checkpoint.FileRestorePlan, token st
 	backup, err := e.cpMgr.ApplyFiles(plan, token)
 	if backup != "" {
 		e.invalidateSavedAcceptance()
+		e.clearTurnChangeBase()
 	}
 	return backup, err
+}
+
+// TurnChangeBase is the first checkpoint this turn created; false when the
+// turn wrote nothing yet, after /undo, or after a new session.
+func (e *Engine) TurnChangeBase() (hash string, ok bool) {
+	if e == nil || e.cpMgr == nil {
+		return "", false
+	}
+	e.fileMu.Lock()
+	defer e.fileMu.Unlock()
+	return e.turnChangeBase, e.turnChangeBase != ""
+}
+
+// DiffSinceCheckpoint is the binary git diff from checkpoint hash to the
+// current working tree (see checkpoint.Manager.DiffToWorkTree).
+func (e *Engine) DiffSinceCheckpoint(ctx context.Context, hash string) ([]byte, error) {
+	if e == nil || e.cpMgr == nil {
+		return nil, fmt.Errorf("checkpoint manager unavailable")
+	}
+	diff, err := e.cpMgr.DiffToWorkTree(ctx, hash)
+	if err == nil || ctx.Err() != nil {
+		return diff, err
+	}
+	// A retention trim re-creates the kept commits, so the recorded base can
+	// stop being a checkpoint of this project; its tree still names the same
+	// snapshot.
+	e.fileMu.Lock()
+	tree := ""
+	if hash == e.turnChangeBase {
+		tree = e.turnChangeBaseTree
+	}
+	e.fileMu.Unlock()
+	if tree == "" {
+		return nil, err
+	}
+	return e.cpMgr.DiffToWorkTree(ctx, tree)
+}
+
+func (e *Engine) clearTurnChangeBase() {
+	e.fileMu.Lock()
+	e.turnChangeBase, e.turnChangeBaseTree = "", ""
+	e.fileMu.Unlock()
 }
 func (e *Engine) RateLimitInfo() api.RateLimitInfo {
 	if e == nil || e.rateLimits == nil {
@@ -2216,7 +2273,22 @@ func (e *Engine) checkpointBefore(calls []api.ToolCall) {
 				}
 				e.fileMu.Lock()
 				e.turnCheckpointed = true
+				record := e.turnChangeBase == ""
+				if record {
+					e.turnChangeBase, e.turnChangeBaseTree = hash, ""
+				}
 				e.fileMu.Unlock()
+				if record {
+					// Read outside fileMu (it is a git call); only the turn
+					// goroutine records a base, so it is still this hash.
+					if tree, err := e.cpMgr.TreeOf(hash); err == nil {
+						e.fileMu.Lock()
+						if e.turnChangeBase == hash {
+							e.turnChangeBaseTree = tree
+						}
+						e.fileMu.Unlock()
+					}
+				}
 			}
 			return
 		}

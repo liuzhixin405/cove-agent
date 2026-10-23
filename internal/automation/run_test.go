@@ -7,9 +7,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/liuzhixin405/cove-agent/internal/workspace"
 )
 
 func init() {
@@ -51,6 +54,9 @@ type fixtureRunner struct {
 	fail    int
 	budgets []float64
 	cancel  context.CancelFunc
+	// edit, when set, runs in the worktree after the fixture's own write so a
+	// test can leave extra content (non-UTF-8 bytes, symlinks, nested repos).
+	edit func(dir string) error
 }
 
 func (r *fixtureRunner) Run(ctx context.Context, dir string, spec Spec, budget float64) (Check, error) {
@@ -65,6 +71,11 @@ func (r *fixtureRunner) Run(ctx context.Context, dir string, spec Spec, budget f
 	}
 	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("maintenance patch\n"), 0600); err != nil {
 		return Check{ExitCode: -1}, err
+	}
+	if r.edit != nil {
+		if err := r.edit(dir); err != nil {
+			return Check{ExitCode: -1}, err
+		}
 	}
 	if r.calls <= r.fail {
 		return Check{Command: []string{"fixture"}, ExitCode: 7, Output: "fixture failed"}, errors.New("fixture failure")
@@ -105,6 +116,19 @@ func TestIsolatedRunRetryBudgetPatchAndReview(t *testing.T) {
 	}
 	if result.State != "succeeded" || result.Attempts != 2 || len(result.Checks) != 3 || result.Checks[0].ExitCode != 7 || result.Checks[2].ExitCode != 0 || !strings.Contains(result.Patch, "+maintenance patch") || !strings.Contains(result.Input, "committed HEAD only") {
 		t.Fatalf("result = %+v", result)
+	}
+	if result.Checks[0].Attempt != 1 || result.Checks[1].Attempt != 2 || result.Checks[2].Attempt != 2 {
+		t.Fatalf("check attempts = %d %d %d", result.Checks[0].Attempt, result.Checks[1].Attempt, result.Checks[2].Attempt)
+	}
+	if result.Baseline.Commit == "" || result.Baseline.Branch == "" || result.Base != result.Baseline.Commit {
+		t.Fatalf("baseline = %+v base=%s", result.Baseline, result.Base)
+	}
+	fileBytes, err := store.ReadPatch(result.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.PatchHash != workspace.Hash(fileBytes) || result.PatchBytes != len(fileBytes) || string(fileBytes) != result.Patch {
+		t.Fatalf("patch hash=%s bytes=%d file=%d", result.PatchHash, result.PatchBytes, len(fileBytes))
 	}
 	if runner.budgets[0] != .5 || runner.budgets[1] != .5 {
 		t.Fatalf("budgets = %v", runner.budgets)
@@ -431,5 +455,179 @@ func TestRemoveConvertsExpiredClaimToUncertain(t *testing.T) {
 	}
 	if err := store.Remove(spec.ID); err == nil {
 		t.Fatal("removed an automation with a live running claim")
+	}
+}
+
+// The patch file keeps the exact bytes git produced; state.json is JSON and
+// replaces invalid UTF-8 with U+FFFD, so Result.Patch cannot be applied.
+func TestPatchFileIsSourceOfTruthForNonUTF8(t *testing.T) {
+	project := gitProject(t)
+	store, err := Open(t.TempDir(), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := testSpec()
+	if err := store.Add(spec, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	runner := &fixtureRunner{edit: func(dir string) error {
+		return os.WriteFile(filepath.Join(dir, "gbk.txt"), []byte{0xB2, 0xE2, 0xCA, 0xD4, '\n'}, 0600)
+	}}
+	result, err := (&Executor{Store: store, Runner: runner}).Run(context.Background(), spec.ID, "")
+	if err != nil || result.State != "succeeded" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	fileBytes, err := store.ReadPatch(result.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(fileBytes), "\xB2\xE2") {
+		t.Fatalf("patch file lost raw GBK bytes: %q", fileBytes)
+	}
+	if result.PatchHash != workspace.Hash(fileBytes) || result.PatchBytes != len(fileBytes) {
+		t.Fatalf("hash=%s bytes=%d want %s %d", result.PatchHash, result.PatchBytes, workspace.Hash(fileBytes), len(fileBytes))
+	}
+	state, err := store.Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(state.Results[0].Patch, "�") {
+		t.Fatalf("state.json patch kept invalid UTF-8: %q", state.Results[0].Patch)
+	}
+	if state.Results[0].PatchHash != result.PatchHash {
+		t.Fatalf("persisted hash=%s want %s", state.Results[0].PatchHash, result.PatchHash)
+	}
+}
+
+func TestPatchCaptureRefusesSymlinkAndNestedRepo(t *testing.T) {
+	cases := map[string]func(dir string) error{
+		"nested-repo": func(dir string) error {
+			sub := filepath.Join(dir, "sub")
+			if check, err := runCommand(context.Background(), dir, nil, []string{"git", "init", sub}); err != nil || check.ExitCode != 0 {
+				return errors.Join(err, errors.New(check.Output))
+			}
+			if err := os.WriteFile(filepath.Join(sub, "inner.txt"), []byte("inner\n"), 0600); err != nil {
+				return err
+			}
+			for _, argv := range [][]string{{"git", "-C", sub, "add", "inner.txt"}, {"git", "-C", sub, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "inner"}} {
+				if check, err := runCommand(context.Background(), dir, nil, argv); err != nil || check.ExitCode != 0 {
+					return errors.Join(err, errors.New(check.Output))
+				}
+			}
+			return nil
+		},
+		"symlink": func(dir string) error {
+			return os.Symlink("new.txt", filepath.Join(dir, "link.txt"))
+		},
+	}
+	for name, edit := range cases {
+		t.Run(name, func(t *testing.T) {
+			if name == "symlink" && runtime.GOOS == "windows" {
+				t.Skip("symlinks need developer mode or elevation on Windows")
+			}
+			project := gitProject(t)
+			store, err := Open(t.TempDir(), project)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec := testSpec()
+			if err := store.Add(spec, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			result, err := (&Executor{Store: store, Runner: &fixtureRunner{edit: edit}}).Run(context.Background(), spec.ID, "")
+			if err == nil || result.State != "failed" || !strings.Contains(result.Error, "unsafe candidate path or mode") {
+				t.Fatalf("result=%+v err=%v", result, err)
+			}
+			if result.PatchHash != "" || result.PatchBytes != 0 {
+				t.Fatalf("refused capture recorded a patch: %+v", result)
+			}
+			if _, err := store.ReadPatch(result.ID); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("ReadPatch err = %v, want os.ErrNotExist", err)
+			}
+		})
+	}
+}
+
+func TestDescribeRootMatchesCaptureRoot(t *testing.T) {
+	project := gitProject(t)
+	store, err := Open(t.TempDir(), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := testSpec()
+	if err := store.Add(spec, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (&Executor{Store: store, Runner: &fixtureRunner{}}).Run(context.Background(), spec.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := workspace.Capture(context.Background(), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Baseline != want {
+		t.Fatalf("baseline=%+v capture=%+v", result.Baseline, want)
+	}
+}
+
+// A detached HEAD (CI checkout, a tag) used to run; Describe refuses it, so
+// the result records only the base commit and stays export-only.
+func TestDetachedHeadProjectStillRuns(t *testing.T) {
+	project := gitProject(t)
+	if check, err := runCommand(context.Background(), project, nil, []string{"git", "checkout", "--detach"}); err != nil || check.ExitCode != 0 {
+		t.Fatalf("detach: %s %v", check.Output, err)
+	}
+	store, err := Open(t.TempDir(), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := testSpec()
+	if err := store.Add(spec, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (&Executor{Store: store, Runner: &fixtureRunner{}}).Run(context.Background(), spec.ID, "")
+	if err != nil || result.State != "succeeded" || result.Error != "" {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+	if result.Base == "" || result.Baseline.Commit != result.Base || result.Baseline.Branch != "" || result.Baseline.Root != "" {
+		t.Fatalf("baseline=%+v base=%s", result.Baseline, result.Base)
+	}
+	fileBytes, err := store.ReadPatch(result.ID)
+	if err != nil || len(fileBytes) == 0 || result.PatchHash != workspace.Hash(fileBytes) {
+		t.Fatalf("patch file=%d err=%v hash=%s", len(fileBytes), err, result.PatchHash)
+	}
+}
+
+// HEAD read by isolatedWorktree and HEAD read by Describe must agree;
+// otherwise the patch would be relative to a commit the worktree is not on.
+func TestHeadMovedBeforeBaselineFailsAttempt(t *testing.T) {
+	project := gitProject(t)
+	store, err := Open(t.TempDir(), project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := testSpec()
+	if err := store.Add(spec, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	original := describeProject
+	t.Cleanup(func() { describeProject = original })
+	describeProject = func(ctx context.Context, dir string) (workspace.Baseline, error) {
+		baseline, err := original(ctx, dir)
+		baseline.Commit = strings.Repeat("0", 40)
+		return baseline, err
+	}
+	runner := &fixtureRunner{}
+	result, err := (&Executor{Store: store, Runner: runner}).Run(context.Background(), spec.ID, "")
+	if err == nil || result.State != "failed" || !strings.Contains(result.Error, "project HEAD moved while preparing the worktree") || runner.calls != 0 {
+		t.Fatalf("result=%+v calls=%d err=%v", result, runner.calls, err)
+	}
+	if _, err := store.ReadPatch(result.ID); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("ReadPatch err = %v", err)
+	}
+	check, err := runCommand(context.Background(), project, nil, []string{"git", "worktree", "list", "--porcelain"})
+	if err != nil || strings.Count(check.Output, "worktree ") != 1 {
+		t.Fatalf("worktree not cleaned up: %s %v", check.Output, err)
 	}
 }

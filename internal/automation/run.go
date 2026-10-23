@@ -12,9 +12,15 @@ import (
 	"unicode/utf8"
 
 	"github.com/liuzhixin405/cove-agent/internal/filelock"
+	"github.com/liuzhixin405/cove-agent/internal/fsatomic"
+	"github.com/liuzhixin405/cove-agent/internal/workspace"
 )
 
 const jobLease = 2 * time.Hour
+
+// describeProject is workspace.Describe; tests replace it to simulate HEAD
+// moving between the worktree's HEAD read and the baseline read.
+var describeProject = workspace.Describe
 
 var ErrBusy = errors.New("automation already running or uncertain; inspect and review its inbox result before another run")
 
@@ -199,11 +205,25 @@ func (e *Executor) run(ctx context.Context, id, trigger, eventKey, sessionID str
 			runErr = err
 			break
 		}
-		result.Base = base
+		// Describe, not Capture: the maintenance project may be dirty, and
+		// jobs start from its committed HEAD regardless. A detached HEAD (CI
+		// checkout, a tag) or a repository Describe cannot read still runs;
+		// the result then records only the base commit (export-only).
+		baseline, describeErr := describeProject(jobCtx, e.Store.project)
+		if describeErr != nil {
+			baseline = workspace.Baseline{Commit: base}
+		} else if baseline.Commit != base {
+			// The worktree was built from base; a baseline from a later HEAD
+			// would misreport Base and make the patch revert the new commits.
+			runErr = errors.Join(fmt.Errorf("project HEAD moved while preparing the worktree (worktree %s, HEAD now %s)", base, baseline.Commit), cleanup())
+			break
+		}
+		result.Baseline, result.Base = baseline, base
 		check, err := e.Runner.Run(jobCtx, work, spec, spec.BudgetUSD/float64(spec.Retries+1))
 		// The runner's output is in its Check (with its command and exit
 		// code); copying it into result.Output stored every up-to-4 MiB
 		// log twice in state.json.
+		check.Attempt = result.Attempts
 		result.Checks = append(result.Checks, check)
 		if err == nil && check.ExitCode != 0 {
 			err = fmt.Errorf("runner exited %d", check.ExitCode)
@@ -211,6 +231,7 @@ func (e *Executor) run(ctx context.Context, id, trigger, eventKey, sessionID str
 		if err == nil {
 			for _, argv := range spec.Verify {
 				verification, verifyErr := runCommand(jobCtx, work, nil, argv)
+				verification.Attempt = result.Attempts
 				result.Checks = append(result.Checks, verification)
 				if verifyErr != nil || verification.ExitCode != 0 {
 					err = errors.Join(verifyErr, fmt.Errorf("verification %v exited %d", argv, verification.ExitCode))
@@ -219,9 +240,29 @@ func (e *Executor) run(ctx context.Context, id, trigger, eventKey, sessionID str
 			}
 		}
 		captureCtx, stopCapture := context.WithTimeout(context.Background(), 15*time.Second)
-		patch, patchErr := capturePatch(captureCtx, work, base)
+		// Same capture as /race: ignored files are cleaned, and symlinks,
+		// nested repositories or unsafe paths fail the attempt.
+		patch, patchErr := workspace.Patch(captureCtx, work, base)
 		stopCapture()
-		result.Patch = patch
+		if patchErr == nil && len(patch) > maxOutput {
+			// The patch is stored twice (file and state.json) and shown in
+			// the inbox; keep the documented 4 MiB bound.
+			patch, patchErr = nil, errors.New("patch exceeded 4 MiB; not stored")
+		}
+		// Each attempt replaces the previous attempt's patch, file included.
+		result.PatchHash, result.PatchBytes = "", 0
+		if patchErr == nil && len(patch) > 0 {
+			// The file is the exact patch; result.Patch is a JSON copy for
+			// display, where invalid UTF-8 would become U+FFFD.
+			if writeErr := fsatomic.WriteFile(e.Store.PatchPath(result.ID), patch, 0600); writeErr != nil {
+				patchErr = fmt.Errorf("cannot store patch file: %w", writeErr)
+			} else {
+				result.PatchHash, result.PatchBytes = workspace.Hash(patch), len(patch)
+			}
+		} else if removeErr := os.Remove(e.Store.PatchPath(result.ID)); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			patchErr = errors.Join(patchErr, removeErr)
+		}
+		result.Patch = string(patch)
 		cleanupErr := cleanup()
 		runErr = errors.Join(err, patchErr, cleanupErr)
 		if jobCtx.Err() != nil {
@@ -287,22 +328,6 @@ func isolatedWorktree(ctx context.Context, project string) (string, string, func
 		return "", "", nil, fmt.Errorf("git worktree add failed: %s: %w", outputTail(check.Output), err)
 	}
 	return work, base, cleanup, nil
-}
-
-func capturePatch(ctx context.Context, work, base string) (string, error) {
-	check, err := runCommand(ctx, work, nil, []string{"git", "add", "--all", "--", "."})
-	if err != nil || check.ExitCode != 0 {
-		return "", fmt.Errorf("cannot collect changed and untracked files: %s: %w", outputTail(check.Output), err)
-	}
-	// --no-textconv: a user-level textconv driver (e.g. pdftotext for *.pdf)
-	// would turn a binary change into a text diff that git apply rejects.
-	check, err = runCommand(ctx, work, nil, []string{"git", "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", base, "--"})
-	if err != nil || check.ExitCode != 0 {
-		// Never embed the (up to 4 MiB) output itself in the error: it ends
-		// up in result.Error, state.json and the REPL/CLI error line.
-		return "", fmt.Errorf("cannot capture patch: %s: %w", outputTail(check.Output), err)
-	}
-	return check.Output, nil
 }
 
 // outputTail keeps the last few KiB of a command's output for an error

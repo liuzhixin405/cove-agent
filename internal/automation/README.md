@@ -4,7 +4,10 @@ Version 1 persists project-keyed specifications and inbox results outside the
 original project, under `COVE_CONFIG_DIR/automations` (normally
 `~/.cove/automations`). State replacement uses fsatomic and transactions use
 filelock. Add/import never starts a worker. There is no cloud scheduler,
-implicit background daemon, lifecycle hook, apply, merge or push operation.
+implicit background daemon, lifecycle hook, automatic apply, merge or push
+operation. A result is applied only by an explicit `/changes apply
+inbox:<result-id>`, which runs `changeset.Verify` (applicable, clean tree and
+no baseline drift, last attempt's checks passed, patch size and hash) first.
 
 ## CLI Integration
 
@@ -98,7 +101,14 @@ No events are monitored implicitly.
 - Jobs start from committed HEAD, not the user's dirty or untracked files.
   Each attempt uses a fresh detached temporary worktree. Patch capture includes
   binary changes and nonignored untracked files, relative to the recorded HEAD,
-  even if the model creates a local commit. No result is automatically applied.
+  even if the model creates a local commit, and is captured with the same
+  path/mode checks as /race: ignored files are cleaned first and a candidate
+  that leaves symlinks or nested repositories fails. No result is automatically
+  applied. If HEAD moves between building the worktree and recording the
+  baseline, the attempt fails instead of producing a patch against the wrong base.
+- On a detached HEAD, or in a repository the baseline check cannot read, the
+  job still runs, but the result records only the base commit (no root or
+  branch) and can be exported but not applied.
 - The timeout is shared across attempts and verification (maximum one hour).
   Patch capture and worktree cleanup each have an additional 15-second bound
   per attempt; the two-hour claim lease exceeds the whole execution bound.
@@ -124,7 +134,14 @@ No events are monitored implicitly.
   processes, not a security sandbox. Run only trusted projects and commands;
   do not assume filesystem/network/process escape prevention.
 - A result's runner output is in `checks[0].output` (with the command and
-  exit code); `output` is no longer duplicated.
+  exit code); `output` is no longer duplicated. Each check records the 1-based
+  `attempt` that produced it.
+- `baseline` records the project root, HEAD commit and branch of the last
+  attempt (`base` still repeats the commit). A non-empty patch is stored as
+  `patches/<result-id>.patch` in the state directory with `patch_sha256` and
+  `patch_bytes` of exactly those bytes; that file is the patch of record.
+  `patch` in state.json is a display copy, in which non-UTF-8 bytes become
+  U+FFFD. `reviewed_at` is the time of the review decision.
 - Results contain outputs and patches that may contain secrets; state uses
   owner-only file permissions where supported. Private worker configs contain
   the provider credentials during execution and are deleted on normal return;

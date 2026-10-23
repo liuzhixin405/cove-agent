@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"github.com/liuzhixin405/cove-agent/internal/changeset"
 	"github.com/liuzhixin405/cove-agent/internal/command"
 	"github.com/liuzhixin405/cove-agent/internal/config"
 	"github.com/liuzhixin405/cove-agent/internal/race"
@@ -74,7 +75,8 @@ run 立即返回 ID；show 报告状态；只有 select 会在校验补丁哈希
 验证器是显式的 argv 命令（不经 shell），只看退出码，不看模型自评。
 worktree 只隔离 Git 改动，不是安全沙箱；prompt 与验证命令必须可信。
 cancel 只对本进程发起的竞跑有效；退出时必须调用 Close，清理有 20 秒宽限。
-select 前会重新校验，但不是针对外部编辑器的原子操作。`
+select 前会重新校验，但不是针对外部编辑器的原子操作。
+/changes 可统一查看与应用竞跑候选、维护结果与本轮改动。`
 }
 
 func (c *RaceCommand) initialize() (*race.Service, error) {
@@ -166,7 +168,18 @@ func (c *RaceCommand) Execute(ctx context.Context, input command.Input) (command
 	case "show":
 		data, err = service.Load(args[1])
 	case "select":
-		data, err = service.Select(ctx, project, args[1], args[2])
+		var configDir string
+		if configDir, err = config.ConfigDir(); err != nil {
+			return command.Output{}, err
+		}
+		err = changeset.WithProjectLock(configDir, project, func() error {
+			var selectErr error
+			data, selectErr = service.Select(ctx, project, args[1], args[2])
+			return selectErr
+		})
+		if errors.Is(err, changeset.ErrLocked) {
+			err = fmt.Errorf("另一个 apply 正在进行，稍后再试: %w", err)
+		}
 	case "cancel":
 		if err := service.Cancel(args[1]); err != nil {
 			return command.Output{}, err

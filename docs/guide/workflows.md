@@ -31,7 +31,7 @@ cove --automation event D:\project tests-failed build-42
 cove --automation-inbox list D:\project
 ```
 
-独立入口开关必须位于第一个参数。事件按项目、任务与 occurrence key 去重，失败或崩溃也不能自动重放该 key。过期租约记为 uncertain，审阅前阻止继续运行。收件箱保留基线、命令 argv、退出码、输出、补丁和审阅状态；accepted 只记录决定，不应用、合并或推送。补丁导出只能创建项目外的新文件。
+独立入口开关必须位于第一个参数。事件按项目、任务与 occurrence key 去重，失败或崩溃也不能自动重放该 key。过期租约记为 uncertain，审阅前阻止继续运行。收件箱保留基线、命令 argv、退出码、输出、补丁和审阅状态；accepted 只记录决定。`/changes apply inbox:<结果ID>` 可以把维护结果应用到工作区，前提是基线未漂移、工作区完全干净、补丁哈希一致、全部验证通过；仍不合并、不提交、不推送。worktree 不是沙箱，只应对可信 spec 的结果执行 apply；没有独立验证命令的结果也可应用，`/changes show` 会标出。补丁捕获与 /race 相同（`workspace.Patch`）：候选留下 ignored 文件时先清理，符号链接与嵌套仓库使该次尝试失败、不进入补丁；补丁原样存为独立文件。补丁导出只能创建项目外的新文件。
 
 ## 浏览器实操验收
 

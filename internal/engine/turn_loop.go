@@ -269,12 +269,7 @@ func (e *Engine) beginTurn(ctx context.Context, userMessage api.Message, onDelta
 		}
 	} else {
 		e.messages = append(e.messages, userMessage)
-		e.fileMu.Lock()
-		e.turnFilesChanged = false
-		e.turnRanGit = false
-		e.turnChangedFiles = nil
-		e.turnCheckpointed = false
-		e.fileMu.Unlock()
+		e.resetTurnFileState()
 		// The tool-failure breaker counts within one request. It was never
 		// reset, so after a bad previous turn the first failed batch of a
 		// new request tripped "3+ tool calls failed" and escalated at once.
@@ -1192,4 +1187,16 @@ func (e *Engine) afterIteration(t *turn, iter int, results []toolResult) flow {
 func isModelNotFound(err error) bool {
 	var se *api.StatusError
 	return errors.As(err, &se) && se.Status == http.StatusNotFound
+}
+
+// resetTurnFileState clears what the previous request recorded about files it
+// changed, at the start of a new one (a resumed turn keeps it).
+func (e *Engine) resetTurnFileState() {
+	e.fileMu.Lock()
+	e.turnFilesChanged = false
+	e.turnRanGit = false
+	e.turnChangedFiles = nil
+	e.turnCheckpointed = false
+	e.turnChangeBase, e.turnChangeBaseTree = "", ""
+	e.fileMu.Unlock()
 }

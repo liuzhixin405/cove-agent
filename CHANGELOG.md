@@ -1,5 +1,13 @@
 ﻿## [Unreleased]
 
+## [12.3.4] - 2026-10-23
+
+### Added
+- 新增 `/changes`：统一列出、查看、导出与应用竞跑候选（`race:<运行ID>/<a|b>`）、维护结果（`inbox:<结果ID>`）和本轮改动（`turn`，只读，回退用 `/undo`）。子命令 `list`、`show`、`diff`、`export`、`apply`、`review`；交互模式 apply 先确认，headless 需 `apply <ID> confirm`。`/race select`、`/inbox patch|review` 保留为快捷方式，`/checkpoints` 末尾提示 `/changes diff turn`。
+
+### Changed
+- 维护结果可以应用：`/changes apply inbox:<结果ID>` 在可应用、基线未漂移且工作区干净、最后一次尝试验证全部通过、补丁大小与哈希一致四项校验后应用，与 `/race select` 共用同一校验和项目锁；`/inbox review` 仍只记录结论，`/inbox show` 首行写明能否应用，`/inbox patch` 导出补丁文件的原始字节。维护任务的补丁捕获改用与 /race 相同的规则（清理 ignored 文件，符号链接与嵌套仓库使尝试失败），补丁另存为配置目录下的独立文件并记录 sha256 与字节数；此前的结果没有补丁文件，只能导出。
+
 ## [12.3.3] - 2026-10-21
 
 ### Added

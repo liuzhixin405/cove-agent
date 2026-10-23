@@ -24,6 +24,7 @@ var (
 		"agentActivity",
 		"messages", "sessionView", "systemPrompt", "totalTokens", "lastInputTokens", "usageMsgCount",
 		"session", "usageSession", "costBase", "fileHistory", "turnFilesChanged", "turnRanGit", "turnChangedFiles", "turnCheckpointed",
+		"turnChangeBase", "turnChangeBaseTree",
 		"pendingSteer", "pendingSteerN", "loopDetector", "guardrails", "acceptance",
 		"lastReviewMsgCount", "turnsSinceReview", "turnUsedWork", "conversationGen",
 		"newMemories", "shownMemories", "repoMapExcerpts", "injectedSkills",

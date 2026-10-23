@@ -29,8 +29,8 @@ Spec JSON：{"version":1,"spec":{"id":"maintenance","prompt":"修一个小的测
 const inboxHelp = `/inbox list                              列出维护结果
 /inbox show <结果ID>                     查看命令、退出码、输出、基准版本、补丁与评审状态
 /inbox patch <结果ID> [目标.patch]        打印补丁，或导出到项目目录之外的文件
-/inbox review <结果ID> accepted|rejected 记录评审结论（accepted 也不会应用或合并）
-请把补丁导出到项目根目录之外，再自行检查与应用。过期的 worker 在评审前保持“不确定”状态。`
+/inbox review <结果ID> accepted|rejected 记录评审结论；应用请用 /changes apply inbox:<结果ID>
+也可把补丁导出到项目根目录之外自行检查与应用。过期的 worker 在评审前保持“不确定”状态。`
 
 type automationSpecFile struct {
 	Version int             `json:"version"`
@@ -274,48 +274,25 @@ func executeInbox(store *automation.Store, state automation.Snapshot, args []str
 			if len(args) != 2 {
 				return "", errors.New(inboxHelp)
 			}
-			return automationJSON(result)
+			cs := store.Changeset(result)
+			line := "可应用: 是；/changes apply " + cs.ID + " 应用"
+			if !cs.Applicable {
+				line = "可应用: 否（" + cs.NotApplicable + "）"
+			}
+			body, err := automationJSON(result)
+			return line + "\n" + body, err
 		case "patch":
 			if len(args) < 2 || len(args) > 3 {
 				return "", errors.New(inboxHelp)
 			}
+			patch, err := inboxPatchBytes(store, result.ID, result.Patch)
+			if err != nil {
+				return "", err
+			}
 			if len(args) == 2 {
-				return result.Patch, nil
+				return string(patch), nil
 			}
-			destination := args[2]
-			if !filepath.IsAbs(destination) {
-				destination = filepath.Join(state.Project, destination)
-			}
-			path, err := filepath.Abs(destination)
-			if err != nil {
-				return "", err
-			}
-			parent, err := filepath.EvalSymlinks(filepath.Dir(path))
-			if err != nil {
-				return "", err
-			}
-			path = filepath.Join(parent, filepath.Base(path))
-			if _, err := automation.ExternalPath(state.Project, path); err != nil {
-				return "", fmt.Errorf("补丁请导出到原项目之外，不自动写入项目根目录: %w", err)
-			}
-			configDir, err := config.ConfigDir()
-			if err != nil {
-				return "", err
-			}
-			if _, err := automation.ExternalPath(configDir, path); err != nil {
-				return "", fmt.Errorf("补丁请导出到配置目录之外: %w", err)
-			}
-			file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-			if err != nil {
-				return "", err
-			}
-			_, writeErr := file.WriteString(result.Patch)
-			syncErr := file.Sync()
-			closeErr := file.Close()
-			if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
-				return "", err
-			}
-			return "补丁已导出到 " + path + "；未应用", nil
+			return exportPatchFile(state.Project, args[2], patch)
 		case "review":
 			if len(args) != 3 {
 				return "", errors.New(inboxHelp)
@@ -329,6 +306,45 @@ func executeInbox(store *automation.Store, state automation.Snapshot, args []str
 		}
 	}
 	return "", fmt.Errorf("未知的 inbox 结果 %q", args[1])
+}
+
+// exportPatchFile writes patch to destination (relative to project), which
+// must be outside both the project and the configuration directory and must
+// not exist yet.
+func exportPatchFile(project, destination string, patch []byte) (string, error) {
+	if !filepath.IsAbs(destination) {
+		destination = filepath.Join(project, destination)
+	}
+	path, err := filepath.Abs(destination)
+	if err != nil {
+		return "", err
+	}
+	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
+	if err != nil {
+		return "", err
+	}
+	path = filepath.Join(parent, filepath.Base(path))
+	if _, err := automation.ExternalPath(project, path); err != nil {
+		return "", fmt.Errorf("补丁请导出到原项目之外，不自动写入项目根目录: %w", err)
+	}
+	configDir, err := config.ConfigDir()
+	if err != nil {
+		return "", err
+	}
+	if _, err := automation.ExternalPath(configDir, path); err != nil {
+		return "", fmt.Errorf("补丁请导出到配置目录之外: %w", err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return "", err
+	}
+	_, writeErr := file.Write(patch)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if err := errors.Join(writeErr, syncErr, closeErr); err != nil {
+		return "", err
+	}
+	return "补丁已导出到 " + path + "；未应用", nil
 }
 
 // automationResultIDs names the persisted results of a run/tick/event so an

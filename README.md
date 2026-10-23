@@ -126,9 +126,10 @@ cove -p "添加一个新的 API 接口并更新 README"   # 或直接运行 cove
 | `/acceptance`       | 查看最新任务的通过、失败、未验证项与命令执行证据               |
 | `/workflow [direct\|review\|once]` | 独立的开发流程开关：默认 `direct` 直接执行；`review` 先确认涉及文件、关键决策和验收标准，再实现；`once` 仅下一项任务启用。当前会话保存设置，不改变工具权限模式 |
 | `/automations`      | 显式维护任务：定时扫描、去重事件、Git worktree 隔离执行 |
-| `/inbox`            | 查看维护结果、验证输出和补丁；接受只记录决定，不自动合并 |
+| `/inbox`            | 查看维护结果、验证输出和补丁；接受只记录决定，应用用 `/changes apply` |
 | `/browser-verify`   | Chrome 实操断言、桌面/移动截图与验收证据；未启用 Chrome 时记为未验证 |
 | `/race`             | 两个 worktree 竞跑、同一验证器比较；显式 select 应用通过方案 |
+| `/changes`          | 统一查看、导出与应用变更集：竞跑候选、维护结果、本轮改动；apply 前校验基线、干净工作区、验证与补丁哈希 |
 | `/remote [start\|status\|stop]` | 显式启动认证远程监督；远程端可暂停队列、取消任务、一次性审批工具 |
 | `/stop`             | 取消当前任务（别名 `/cancel`）                                |
 | `/x [编号] [all]`   | 展开工具块折叠的输出（别名 `/expand`）                        |

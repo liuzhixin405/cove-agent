@@ -183,7 +183,7 @@ var helpCategories = []string{catModel, catSession, catTasks, catSystem}
 // reg the registry fe dispatches through.
 func (fe *frontend) install(reg *command.Registry) *command.Registry {
 	fe.reg = reg
-	for _, commands := range [][]command.Command{fe.automationCommands(), fe.browserVerificationCommands(), fe.raceCommands(), fe.remoteCommands(), fe.agentMapCommands()} {
+	for _, commands := range [][]command.Command{fe.automationCommands(), fe.browserVerificationCommands(), fe.raceCommands(), fe.changesCommands(), fe.remoteCommands(), fe.agentMapCommands()} {
 		for _, entry := range commands {
 			reg.Register(entry)
 		}

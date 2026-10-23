@@ -149,7 +149,8 @@ func (c *CheckpointsCmd) Execute(ctx context.Context, in Input) (Output, error) 
 	for i, it := range items {
 		fmt.Fprintf(&sb, "%2d. %s\n", i+1, it)
 	}
-	return Output{Message: strings.TrimRight(sb.String(), "\n")}, nil
+	sb.WriteString("/changes diff turn 查看本轮改动")
+	return Output{Message: sb.String()}, nil
 }
 
 func (c *RateLimitCmd) Name() string        { return "ratelimit" }

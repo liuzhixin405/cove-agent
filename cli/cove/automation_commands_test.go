@@ -24,7 +24,7 @@ func TestAutomationCommandsLazyMetadataAndOperatorFlow(t *testing.T) {
 	fe := &frontend{print: func(message string) { output = message }}
 	var nilFrontend *frontend
 	commands := nilFrontend.automationCommands()
-	if len(commands) != 2 || commands[0].Name() != "automations" || !strings.Contains(commands[1].Help(), "accepted 也不会应用或合并") {
+	if len(commands) != 2 || commands[0].Name() != "automations" || !strings.Contains(commands[1].Help(), "应用请用 /changes apply inbox:<结果ID>") {
 		t.Fatalf("metadata=%v", commands)
 	}
 	commands = fe.automationCommands()

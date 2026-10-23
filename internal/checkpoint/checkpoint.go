@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -114,7 +115,12 @@ func writeStoreExcludes(storeDir string) error {
 // stores or what /undo writes back. Before this, attributes (and the user's
 // config, see storeConfig) applied: /undo rewrote LF files as CRLF under Git for
 // Windows' default core.autocrlf=true.
-const storeAttributes = "# Managed by cove — regenerated on startup.\n* -text -filter -diff -merge -ident -working-tree-encoding\n"
+//
+// diff is reset to unspecified (!diff) rather than unset (-diff): it never
+// touches stored bytes, and unset made every file a "GIT binary patch" in
+// DiffToWorkTree. Unspecified still overrides the project's own diff=<driver>
+// or binary, so git falls back to its content check (a NUL byte means binary).
+const storeAttributes = "# Managed by cove — regenerated on startup.\n* -text -filter !diff -merge -ident -working-tree-encoding\n"
 
 func writeStoreAttributes(storeDir string) error {
 	if err := os.WriteFile(filepath.Join(storeDir, "info", "attributes"), []byte(storeAttributes), 0600); err != nil {
@@ -180,7 +186,7 @@ func (m *Manager) snapshot(ref, label string) (string, bool, error) {
 	env := m.env()
 	// The exclusions live in the store's info/exclude (written by
 	// writeStoreExcludes), and git also honors the project's own .gitignore.
-	if err := m.addAll(env); err != nil {
+	if err := m.addAll(context.Background(), env); err != nil {
 		return "", false, fmt.Errorf("git add failed: %w", err)
 	}
 	tree, err := m.gitOutput(env, "write-tree")
@@ -364,6 +370,114 @@ func pruneEmptyParents(root, dir string) {
 	}
 }
 
+// DiffToWorkTree is the `git diff --binary` from checkpoint hash to the current
+// working tree, under the store's exclude rules and byte-exact attributes.
+//
+// The working tree is staged into this project's index exactly as a snapshot
+// stages it (addAll), and the diff is taken between hash and that index, so
+// what it reports is what the next checkpoint would record. The index is left
+// holding the current tree, the state snapshot leaves it in; the next Create
+// re-stages it anyway. hash must be a checkpoint of this project (or one of its
+// undo backups), as Restore requires.
+func (m *Manager) DiffToWorkTree(ctx context.Context, hash string) ([]byte, error) {
+	if strings.TrimSpace(hash) == "" {
+		return nil, fmt.Errorf("检查点为空")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	env := m.env()
+	target, err := m.diffTargetLocked(ctx, env, hash)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	// Staging is not bounded by the caller's ctx: killing `git add` while it
+	// writes leaves index-<ref>.lock behind, and every later Create, Restore
+	// and checkpoint of this project then fails with "File exists" until the
+	// lock is deleted by hand. A fixed timeout only guards against a hang.
+	addCtx, cancel := context.WithTimeout(context.Background(), stageTimeout)
+	defer cancel()
+	if err := m.addAll(addCtx, env); err != nil {
+		return nil, fmt.Errorf("git add failed: %w", err)
+	}
+	// The output is parsed (changeset.Summarize), so nothing from the user's
+	// git config may reshape it: prefixes, colour, rename detection and
+	// relative paths are pinned here.
+	args := append(append([]string(nil), diffConfig...),
+		"diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--full-index",
+		"--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--no-renames",
+		target, "--", ".")
+	out, err := m.gitOutputCtx(ctx, env, args...)
+	if err != nil {
+		return nil, fmt.Errorf("git diff failed: %w", err)
+	}
+	return []byte(out), nil
+}
+
+// stageTimeout bounds the `git add` of DiffToWorkTree, which deliberately
+// ignores the caller's ctx.
+const stageTimeout = 60 * time.Second
+
+// diffConfig is added to DiffToWorkTree's diff call only, on top of
+// storeConfig; Restore's `diff --raw -z` output is unaffected by any of it.
+var diffConfig = []string{
+	"-c", "color.ui=false",
+	"-c", "color.diff=false",
+	"-c", "diff.noprefix=false",
+	"-c", "diff.mnemonicPrefix=false",
+	"-c", "diff.relative=false",
+	"-c", "diff.renames=false",
+}
+
+// diffTargetLocked resolves what DiffToWorkTree diffs against.
+//
+// A commit must be a checkpoint of this project (or one of its undo backups),
+// as Restore requires. A bare tree object is accepted without that check: the
+// background trim (retention.go) re-creates the kept commits with new hashes,
+// so a commit recorded earlier stops being an ancestor of the ref while its
+// tree (content-addressed, and kept by gc for its grace period) still names
+// the same snapshot. The only caller passing a tree is the engine, with the
+// TreeOf it recorded itself.
+func (m *Manager) diffTargetLocked(ctx context.Context, env []string, hash string) (string, error) {
+	ctxErr := func(err error) error {
+		if e := ctx.Err(); e != nil {
+			return e
+		}
+		return err
+	}
+	if full, err := m.gitOutputCtx(ctx, env, "rev-parse", "--verify", "--quiet", hash+"^{commit}"); err == nil {
+		target := strings.TrimSpace(full)
+		if !m.isAncestorCtx(ctx, target, m.refName) && !m.isAncestorCtx(ctx, target, m.refName+"-undo") {
+			return "", ctxErr(fmt.Errorf("检查点 %s 不属于当前项目", hash))
+		}
+		return target, nil
+	} else if e := ctx.Err(); e != nil {
+		return "", e
+	}
+	if tree, err := m.gitOutputCtx(ctx, env, "rev-parse", "--verify", "--quiet", hash+"^{tree}"); err == nil {
+		return strings.TrimSpace(tree), nil
+	}
+	return "", ctxErr(fmt.Errorf("检查点 %s 不存在", hash))
+}
+
+// TreeOf returns the tree object of checkpoint hash, which DiffToWorkTree
+// accepts in place of the commit once a trim has rewritten it.
+func (m *Manager) TreeOf(hash string) (string, error) {
+	if strings.TrimSpace(hash) == "" {
+		return "", fmt.Errorf("检查点为空")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tree := m.treeOf(hash)
+	if tree == "" {
+		return "", fmt.Errorf("检查点 %s 不存在", hash)
+	}
+	return tree, nil
+}
+
 // List returns available checkpoints (most recent first).
 func (m *Manager) List() []string {
 	out, err := m.gitOutput(m.env(), "log", m.refName, "--oneline", "-20")
@@ -417,10 +531,15 @@ func (m *Manager) treeOf(commit string) string {
 }
 
 func (m *Manager) isAncestor(commit, ref string) bool {
-	if m.getRef(m.env(), ref) == "" {
+	return m.isAncestorCtx(context.Background(), commit, ref)
+}
+
+func (m *Manager) isAncestorCtx(ctx context.Context, commit, ref string) bool {
+	if _, err := m.gitOutputCtx(ctx, m.env(), "rev-parse", "--verify", "--quiet", ref); err != nil {
 		return false
 	}
-	return m.gitCmd(m.env(), "merge-base", "--is-ancestor", commit, ref) == nil
+	_, err := m.gitOutputCtx(ctx, m.env(), "merge-base", "--is-ancestor", commit, ref)
+	return err == nil
 }
 
 // noCommitRepoRe finds the nested repositories git refuses to add because
@@ -437,11 +556,11 @@ const maxNestedExcludes = 8
 // run for want of its backup. Such a repository is left out of the snapshot,
 // as nested repositories with commits already are in effect (they are stored
 // as a bare gitlink, their content never captured).
-func (m *Manager) addAll(env []string) error {
+func (m *Manager) addAll(ctx context.Context, env []string) error {
 	args := []string{"add", "--all"}
 	var excluded []string
 	for i := 0; ; i++ {
-		err := m.gitCmd(env, args...)
+		_, err := m.gitOutputCtx(ctx, env, args...)
 		if err == nil {
 			return nil
 		}
@@ -465,7 +584,16 @@ func (m *Manager) gitCmd(env []string, args ...string) error {
 // only. stderr used to be mixed in, so a warning git printed (a CRLF notice,
 // an embedded-repo hint) became part of the output parsed as paths or hashes.
 func (m *Manager) gitOutput(env []string, args ...string) (string, error) {
-	cmd := exec.Command("git", append(append([]string(nil), storeConfig...), args...)...)
+	return m.gitOutputCtx(context.Background(), env, args...)
+}
+
+// gitOutputCtx is gitOutput bounded by ctx: the git process is killed when ctx
+// ends.
+func (m *Manager) gitOutputCtx(ctx context.Context, env []string, args ...string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	cmd := exec.CommandContext(ctx, "git", append(append([]string(nil), storeConfig...), args...)...)
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Dir = m.workDir
 	var stdout, stderr bytes.Buffer

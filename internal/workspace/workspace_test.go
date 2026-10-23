@@ -184,3 +184,102 @@ func TestPatchRejectsIgnoredCandidateAndIncludesUntracked(t *testing.T) {
 		t.Fatalf("untracked candidate omitted from patch: %q %v", data, err)
 	}
 }
+
+func TestDescribeIgnoresDirtyTreeButMatchesCapture(t *testing.T) {
+	ctx := context.Background()
+	root := cleanWorkspace(t)
+	clean, err := Capture(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "dirty.txt"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Capture(ctx, root); err == nil {
+		t.Fatal("Capture must refuse a dirty tree")
+	}
+	described, err := Describe(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if described != clean {
+		t.Fatalf("Describe = %+v, Capture = %+v", described, clean)
+	}
+}
+
+func TestDescribeRefusesSubdirectoryAndDetachedHead(t *testing.T) {
+	ctx := context.Background()
+	root := cleanWorkspace(t)
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Describe(ctx, sub); err == nil {
+		t.Fatal("subdirectory accepted")
+	}
+	if _, err := Git(ctx, root, nil, "checkout", "--detach"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Describe(ctx, root); err == nil {
+		t.Fatal("detached HEAD accepted")
+	}
+}
+
+// TestPatchIgnoresUserDiffConfig pins the patch format against the user's
+// global git config. workspace.Git drops every GIT_* variable (so
+// GIT_CONFIG_GLOBAL cannot be used here); the global file is redirected
+// through HOME/USERPROFILE/XDG_CONFIG_HOME instead.
+func TestPatchIgnoresUserDiffConfig(t *testing.T) {
+	home := t.TempDir()
+	config := "[color]\n\tui = always\n\tdiff = always\n[diff]\n\tnoprefix = true\n\tmnemonicPrefix = true\n"
+	if err := os.WriteFile(filepath.Join(home, ".gitconfig"), []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, ".gitconfig"))
+
+	ctx := context.Background()
+	root := cleanWorkspace(t)
+	// The redirect must really be in effect, or the test proves nothing.
+	if got, err := Git(ctx, root, nil, "config", "--get", "color.ui"); err != nil || strings.TrimSpace(string(got)) != "always" {
+		t.Fatalf("global config not picked up: %q %v", got, err)
+	}
+	baseline, err := Capture(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(t.TempDir(), "candidate")
+	if err := baseline.Add(ctx, work); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := baseline.Remove(ctx, work); err != nil {
+			t.Error(err)
+		}
+	}()
+	if err := os.WriteFile(filepath.Join(work, "value.txt"), []byte("changed\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, "new.txt"), []byte("new candidate file\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	patch, err := Patch(ctx, work, baseline.Commit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(patch)
+	if strings.Contains(text, "\x1b[") {
+		t.Fatalf("patch carries ANSI colour codes: %q", text)
+	}
+	if !strings.Contains(text, "diff --git a/value.txt b/value.txt") || !strings.Contains(text, "+++ b/new.txt") {
+		t.Fatalf("patch prefixes not pinned to a/ b/: %s", text)
+	}
+	if err := baseline.Apply(ctx, patch, Hash(patch)); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "value.txt")); err != nil || string(data) != "changed\n" {
+		t.Fatalf("patch not applied: %q %v", data, err)
+	}
+}

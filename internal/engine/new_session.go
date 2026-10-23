@@ -139,6 +139,7 @@ func (e *Engine) resetConversationState() {
 	e.fileHistory = map[string]bool{}
 	e.turnFilesChanged, e.turnCheckpointed, e.turnRanGit = false, false, false
 	e.turnChangedFiles = nil
+	e.turnChangeBase, e.turnChangeBaseTree = "", ""
 	e.fileMu.Unlock()
 
 	// The skill review is throttled by the message count it last saw; kept

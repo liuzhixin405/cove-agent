@@ -12,11 +12,11 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/liuzhixin405/cove-agent/internal/changeset"
 	"github.com/liuzhixin405/cove-agent/internal/fsatomic"
 	"github.com/liuzhixin405/cove-agent/internal/workspace"
 )
@@ -546,25 +546,9 @@ func (s *Service) Select(ctx context.Context, project, id, name string) (*Report
 	if report.Status == "running" || report.Selected != "" || (report.Status != "completed" && report.Status != "timeout" && report.Status != "cancelled") {
 		return nil, errors.New("run is incomplete or already selected")
 	}
-	baseline, err := workspace.Capture(ctx, project)
-	if err != nil {
-		return nil, err
-	}
-	if baseline != report.Baseline {
-		return nil, errors.New("project scope, branch, or base commit drift")
-	}
 	index := 0
 	if name == "b" {
 		index = 1
-	}
-	candidate := report.Candidates[index]
-	if !candidate.Correct || candidate.Error != "" || candidate.CleanupError != "" || candidate.Generation.Status != "passed" || len(candidate.Verification) != len(report.Spec.Verify) {
-		return nil, errors.New("candidate did not pass shared verification")
-	}
-	for index, verify := range candidate.Verification {
-		if verify.Execution.Status != "passed" || verify.Execution.ExitCode != 0 || !slices.Equal(verify.Argv, report.Spec.Verify[index]) {
-			return nil, errors.New("failed or mismatched shared verification")
-		}
 	}
 	root, err := s.storage()
 	if err != nil {
@@ -575,10 +559,7 @@ func (s *Service) Select(ctx context.Context, project, id, name string) (*Report
 	if err != nil {
 		return nil, err
 	}
-	if len(patch) != candidate.PatchBytes {
-		return nil, errors.New("patch size mismatch")
-	}
-	if err := report.Baseline.Apply(ctx, patch, candidate.PatchHash); err != nil {
+	if err := changeset.Verify(ctx, project, Changesets(report)[index], patch); err != nil {
 		return nil, err
 	}
 	if s.OnSelect != nil {

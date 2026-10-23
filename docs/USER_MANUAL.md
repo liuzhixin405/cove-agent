@@ -402,7 +402,8 @@ DeepSeek Flash 原生支持图片，`deepseek-v4-pro` 不支持。只要当前�
 | `/acceptance` | 查看当前会话最新任务的构建/测试、回归、浏览器及独立 Git 操作证据；交互式与 headless 均可查看 |
 | `/workflow [direct\|review\|once]` | 默认直接执行；可选当前会话持续先确认方案，或仅下一项任务先确认。不改变 `/mode` 工具权限 |
 | `/automations [list\|add\|run\|tick\|event\|remove]` | 添加、手动运行或扫描维护任务；事件显式触发并按 key 去重 |
-| `/inbox [list\|show\|patch\|review]` | 查看维护结果、验证日志和补丁；accepted/rejected 只记录审阅决定 |
+| `/inbox [list\|show\|patch\|review]` | 查看维护结果、验证日志和补丁；accepted/rejected 只记录审阅决定，应用用 `/changes apply` |
+| `/changes [list\|show\|diff\|export\|apply\|review]` | 统一查看、导出与应用变更集（竞跑候选、维护结果、本轮改动），见[变更集](#变更集changes) |
 | `/browser-verify` | 执行 DOM 场景，保存桌面/移动截图、哈希并接入会话验收 |
 | `/race` | 双 worktree 竞跑，共用验证器；明确 select 后才应用补丁 |
 | `/remote [start\|status\|stop]` | 在活跃交互 REPL 中启动认证远程监督与一次性审批 |
@@ -1167,6 +1168,27 @@ Esc 清空输入后状态行提示“已清空，Ctrl+Z 恢复”，在空输入
 
 ---
 
+## 变更集（/changes）
+
+竞跑候选、维护结果和本轮改动都是“对某个基线的一份补丁加验证证据”，`/changes` 是它们的统一入口；`/race select`、`/inbox patch|review` 仍可用，是对应子命令的快捷方式。
+
+```text
+/changes [list] [race|inbox|turn]      # 列出；本轮改动排第一，其余按创建时间倒序
+/changes show <ID>                     # 来源、标题、基线 分支@提交、补丁字节与哈希、文件列表与 +/-、每条验证、评审状态、能否应用及原因
+/changes diff <ID> [文件...]           # 打印补丁，可只看指定文件
+/changes export <ID> <目标.patch>      # 只能导出到项目目录和配置目录之外，且目标文件不能已存在
+/changes apply <ID> [confirm]          # 校验通过后应用到工作区
+/changes review <ID> accepted|rejected # 记录评审结论（仅维护结果），不应用
+```
+
+ID 有三种：`race:<运行ID>/<a|b>`、`inbox:<结果ID>`、`turn`。`show` 不打印补丁正文，正文只用 `diff` 看；维护结果只有任务本身的退出码、没有配置验证命令时，`show` 会注明“无独立验证命令”。
+
+`apply` 依次做四项校验，任何一项不过都不碰工作区：变更集可应用（任务成功、未被拒绝或已应用、补丁文件存在）；工作区完全干净（包括 untracked/ignored 文件）且项目、分支、基线提交未漂移；最后一次尝试的验证全部通过；补丁大小与哈希和记录一致。交互模式先弹确认框，按 `y` 时重新校验后应用；headless 与 `-p` 没有确认框，必须写成 `/changes apply <ID> confirm`，不带 `confirm` 只显示将应用的内容。同一项目同时只能有一个 apply（`/race select` 也算），另一个会提示“另一个 apply 正在进行”。应用后 `/acceptance` 里的旧证据标为未验证；`apply` 不提交、不合并、不推送。
+
+`turn` 是本轮第一个检查点到当前工作区的 diff，只读：它已经在工作区里，不能 apply 也不记录评审，回退用 `/undo`。
+
+维护任务的 worktree 不是沙箱，apply 会把它的产出带进工作区，只应对可信 spec 产生的结果执行 apply。
+
 ## 维护任务、竞跑、远程监督与浏览器验收
 
 四个工作流默认都不启动任何守护进程、浏览器或监听端口，只在你显式输入命令时运行；JSON 示例、调度方式与安全边界见 [工作流指南](guide/workflows.md)。
@@ -1175,11 +1197,11 @@ Esc 清空输入后状态行提示“已清空，Ctrl+Z 恢复”，在空输入
 
 `/automations add <spec.json>` 登记一个维护任务（prompt、周期或事件、预算、验证命令），`run <id>` 立即跑一次，`tick` 跑所有到期任务一次，`event <名称> <唯一键>` 显式触发并按键去重，`remove` 删除任务但保留结果。每次运行在临时 Git worktree 里基于已提交的 HEAD 进行，用隔离的 profile 与预算，结果（命令、退出码、输出、补丁）写入配置目录下该项目的 `automations/state.json`。没有 Git 仓库会拒绝；worktree 只隔离 Git 改动，不是系统或网络沙箱。定时运行请用系统计划任务调用 `cove --automation tick <项目目录>`。
 
-`/inbox list|show|patch|review` 查看结果与补丁：`patch <结果ID> <目标.patch>` 只能导出到项目目录和配置目录之外，`review accepted|rejected` 只记录结论，不会应用或合并。交互 REPL 每 5 秒检查一次该项目的状态文件，别的进程写入新结果时在输入行上方提示“维护任务有 N 条新结果，/inbox 查看”，`/cd` 到别的项目后跟着切换。
+`/inbox list|show|patch|review` 查看结果与补丁：`patch <结果ID> <目标.patch>` 只能导出到项目目录和配置目录之外，`review accepted|rejected` 只记录结论，不会应用或合并；`/changes apply inbox:<结果ID>` 可在四项校验通过后把结果应用到工作区（见[变更集](#变更集changes)），`show` 第一行写明能否应用。维护任务的补丁按与 /race 相同的规则捕获：先清理 ignored 文件，留下符号链接或嵌套仓库的尝试判为失败；补丁原样存为配置目录下的独立文件。交互 REPL 每 5 秒检查一次该项目的状态文件，别的进程写入新结果时在输入行上方提示“维护任务有 N 条新结果，/inbox 查看”，`/cd` 到别的项目后跟着切换。
 
 ### 竞跑（/race）
 
-`/race run <spec.json>` 用两个 worktree 分别按两条 prompt 实现，再用同一组验证器（显式 argv，不经 shell，只看退出码）比较；立即返回运行 ID，结束时在输入行上方提示“竞跑 <id> 完成：N/2 个候选通过验证”（超时与取消也会提示）。`/race list`、`/race show <id>` 查看状态、耗时、费用与补丁摘要；只有 `/race select <id> <a|b>` 会把通过的候选补丁应用到工作区，应用前重新校验补丁哈希、项目、分支、提交与工作区干净。要求干净的本地 Git 项目根目录；报告存放在配置目录下。
+`/race run <spec.json>` 用两个 worktree 分别按两条 prompt 实现，再用同一组验证器（显式 argv，不经 shell，只看退出码）比较；立即返回运行 ID，结束时在输入行上方提示“竞跑 <id> 完成：N/2 个候选通过验证”（超时与取消也会提示）。`/race list`、`/race show <id>` 查看状态、耗时、费用与补丁摘要；只有 `/race select <id> <a|b>` 会把通过的候选补丁应用到工作区，应用前重新校验补丁哈希、项目、分支、提交与工作区干净。要求干净的本地 Git 项目根目录；报告存放在配置目录下。`/race select <id> <a|b>` 等价于 `/changes apply race:<id>/<a|b>`，两者共用同一把项目锁；候选也可用 `/changes show|diff|export` 查看。
 
 ### 远程监督（/remote）
 
@@ -1715,7 +1737,7 @@ API 请求失败重试时，退避时间为 `基准 × 2^n × [0.5, 1.5)` 的随
 
 `bash`/`powershell` 命令执行前也会创建检查点，所以 `rm`、`sed -i`、代码生成器造成的改动同样可以回退；明确只读的命令（`ls`、`cat`、`git status`、`git diff` 等）不创建。
 
-本轮改了文件且检查点创建成功时，[回合结束摘要行](#回合结束摘要行)显示“已建检查点，/undo 可回退”。
+本轮改了文件且检查点创建成功时，[回合结束摘要行](#回合结束摘要行)显示“已建检查点，/undo 可回退”。`/changes diff turn` 查看本轮第一个检查点到当前工作区的全部改动，`/changes show turn` 看文件列表与最近的验收结果（见[变更集](#变更集changes)）；`/checkpoints` 末尾也会提示这条命令。
 
 ### 选择性文件回滚
 

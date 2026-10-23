@@ -16,6 +16,7 @@ import (
 
 	"github.com/liuzhixin405/cove-agent/internal/filelock"
 	"github.com/liuzhixin405/cove-agent/internal/fsatomic"
+	"github.com/liuzhixin405/cove-agent/internal/workspace"
 )
 
 const Version = 1
@@ -39,6 +40,8 @@ type Check struct {
 	Command  []string `json:"command"`
 	ExitCode int      `json:"exit_code"`
 	Output   string   `json:"output"`
+	// Attempt is the 1-based attempt that produced this check.
+	Attempt int `json:"attempt,omitempty"`
 }
 
 type Result struct {
@@ -59,6 +62,14 @@ type Result struct {
 	Output     string    `json:"output,omitempty"`
 	Error      string    `json:"error,omitempty"`
 	Checks     []Check   `json:"checks,omitempty"`
+	// Baseline is the maintenance project's root, HEAD commit and branch at
+	// the last attempt; Base repeats Baseline.Commit for older readers.
+	Baseline workspace.Baseline `json:"baseline,omitempty"`
+	// PatchHash/PatchBytes describe the bytes in PatchPath(ID); Patch is a
+	// display copy that JSON may have altered (invalid UTF-8 becomes U+FFFD).
+	PatchHash  string    `json:"patch_sha256,omitempty"`
+	PatchBytes int       `json:"patch_bytes,omitempty"`
+	ReviewedAt time.Time `json:"reviewed_at,omitempty"`
 }
 
 type Snapshot struct {
@@ -75,15 +86,34 @@ type Store struct {
 
 var validID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,79}$`)
 
+// validResultID keeps a user-supplied result id (e.g. /inbox patch <id>)
+// from naming a file outside the patches directory.
+var validResultID = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$`)
+
 func Open(stateRoot, project string) (*Store, error) {
 	dir, abs, err := storeDir(stateRoot, project)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(filepath.Join(dir, "patches"), 0700); err != nil {
 		return nil, err
 	}
 	return &Store{dir: dir, project: abs}, nil
+}
+
+// PatchPath is <state-dir>/patches/<result-id>.patch.
+func (s *Store) PatchPath(resultID string) string {
+	return filepath.Join(s.dir, "patches", resultID+".patch")
+}
+
+// ReadPatch returns the patch file bytes; the error wraps os.ErrNotExist when
+// the result has no patch file (no change, a refused capture, or a result
+// that predates patch files), and callers then fall back to Result.Patch.
+func (s *Store) ReadPatch(resultID string) ([]byte, error) {
+	if !validResultID.MatchString(resultID) {
+		return nil, fmt.Errorf("invalid result id %q: %w", resultID, os.ErrNotExist)
+	}
+	return os.ReadFile(s.PatchPath(resultID))
 }
 
 // StatePath is where Open(stateRoot, project) keeps its state.json, without
@@ -298,6 +328,11 @@ func (s *Store) Review(id, decision string) error {
 	return s.update(func(state *Snapshot) error {
 		for index := range state.Results {
 			if state.Results[index].ID == id {
+				if state.Results[index].Review == "applied" {
+					// The patch is in the project; a later accept/reject
+					// would misdescribe it.
+					return fmt.Errorf("result %q already applied; review cannot change it", id)
+				}
 				if state.Results[index].State == "running" {
 					if time.Now().UTC().Before(state.Results[index].LeaseUntil) {
 						return errors.New("cannot review a running result")
@@ -306,6 +341,7 @@ func (s *Store) Review(id, decision string) error {
 					state.Results[index].Error = "worker lease expired; outcome unknown, not retried"
 				}
 				state.Results[index].Review = decision
+				state.Results[index].ReviewedAt = time.Now().UTC()
 				return nil
 			}
 		}

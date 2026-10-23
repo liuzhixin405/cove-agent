@@ -67,7 +67,19 @@ func ResolvePath(path string) (string, error) {
 	}
 }
 
+// Capture describes the project baseline and additionally requires a clean
+// working tree, including untracked and ignored files.
 func Capture(ctx context.Context, dir string) (Baseline, error) {
+	return describe(ctx, dir, true)
+}
+
+// Describe returns the same baseline as Capture (project root, HEAD commit,
+// branch) but does not require the working tree to be clean.
+func Describe(ctx context.Context, dir string) (Baseline, error) {
+	return describe(ctx, dir, false)
+}
+
+func describe(ctx context.Context, dir string, requireClean bool) (Baseline, error) {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return Baseline{}, err
@@ -77,7 +89,7 @@ func Capture(ctx context.Context, dir string) (Baseline, error) {
 		return Baseline{}, err
 	}
 	if _, err := os.Lstat(filepath.Join(abs, ".git")); err != nil {
-		return Baseline{}, errors.New("race requires a local Git project root with .git; isolation cannot be simulated")
+		return Baseline{}, errors.New("workspace requires a local Git project root with .git; isolation cannot be simulated")
 	}
 	root, err := Git(ctx, abs, nil, "rev-parse", "--show-toplevel")
 	if err != nil {
@@ -85,14 +97,16 @@ func Capture(ctx context.Context, dir string) (Baseline, error) {
 	}
 	actual, err := filepath.EvalSymlinks(filepath.FromSlash(strings.TrimSpace(string(root))))
 	if err != nil || !strings.EqualFold(actual, abs) {
-		return Baseline{}, errors.New("race requires the Git project root (not a subdirectory)")
+		return Baseline{}, errors.New("workspace requires the Git project root (not a subdirectory)")
 	}
-	status, err := Git(ctx, abs, nil, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching")
-	if err != nil {
-		return Baseline{}, err
-	}
-	if len(status) != 0 {
-		return Baseline{}, errors.New("race requires a clean repository, including untracked/ignored files; user changes are not omitted or overwritten")
+	if requireClean {
+		status, err := Git(ctx, abs, nil, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching")
+		if err != nil {
+			return Baseline{}, err
+		}
+		if len(status) != 0 {
+			return Baseline{}, errors.New("workspace requires a clean repository, including untracked/ignored files; user changes are not omitted or overwritten")
+		}
 	}
 	commit, err := Git(ctx, abs, nil, "rev-parse", "HEAD")
 	if err != nil {
@@ -105,7 +119,7 @@ func Capture(ctx context.Context, dir string) (Baseline, error) {
 			// the context error so callers (and the timeout report) see it.
 			return Baseline{}, err
 		}
-		return Baseline{}, errors.New("race requires a target branch, not detached HEAD")
+		return Baseline{}, errors.New("workspace requires a target branch, not detached HEAD")
 	}
 	return Baseline{abs, strings.TrimSpace(string(commit)), strings.TrimSpace(string(branch))}, nil
 }
@@ -175,7 +189,25 @@ func Patch(ctx context.Context, dir, commit string) ([]byte, error) {
 			return nil, fmt.Errorf("unsafe candidate path or mode: %q", path)
 		}
 	}
-	return Git(ctx, dir, nil, "diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--full-index", commit, "--", ".")
+	// The patch is hashed, applied and parsed (changeset.Summarize), so the
+	// user's git config must not reshape it: colour, prefixes, rename
+	// detection and relative paths are pinned, as in checkpoint.DiffToWorkTree.
+	args := append(append([]string(nil), patchDiffConfig...),
+		"diff", "--cached", "--binary", "--no-ext-diff", "--no-textconv", "--full-index",
+		"--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--no-renames",
+		commit, "--", ".")
+	return Git(ctx, dir, nil, args...)
+}
+
+// patchDiffConfig mirrors checkpoint's diffConfig so both changeset producers
+// emit the same patch format regardless of ~/.gitconfig.
+var patchDiffConfig = []string{
+	"-c", "color.ui=false",
+	"-c", "color.diff=false",
+	"-c", "diff.noprefix=false",
+	"-c", "diff.mnemonicPrefix=false",
+	"-c", "diff.relative=false",
+	"-c", "diff.renames=false",
 }
 
 func Hash(data []byte) string {
