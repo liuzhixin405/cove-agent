@@ -597,6 +597,7 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 | `plan` | 只读工具；整行只读的 `bash`/`powershell` 命令；只影响会话本身的工具（`todowrite`、`question`、`skill`，以及 `agent`/`execute_plan`，子代理的每个调用照样受 plan 限制；开启 `experimental_tools` 后的 `task*`、`team_*`、`send_message`、`sleep` 同样放行） | 不询问：其余工具一律拒绝，不管工具自己怎么回答（之前选过的“总是允许”在此模式下不生效）。模型用 `plan_mode` 自行进入的计划模式同样按此执行；它可以用 `exit_plan_mode` 退出（需你确认），但你用 `/mode plan` 设置的计划模式只能由你切换 |
 
 - 没有任何规则命中时，任何模式下都是“询问”（旧版本 `auto` 模式在无规则命中时直接放行，等于放行一切，已修正）。
+- 受信任项目减少常规授权提示：输入 `/trust` 后，项目内 `write`/`edit` 和已识别的只读、构建/测试命令不再逐项询问；网络访问、安装/发布、未知命令等仍需授权。`deny`/`ask` 规则和计划模式仍生效，项目外写入也不会因此放行。
 - 用户在 `policies.json` 或本次会话中配置的 `deny` / `ask` 规则优先于上述自动放行，也优先于 `allow` 规则（判定顺序与匹配方式见[规则判定顺序与匹配](#规则判定顺序与匹配)）。
 - Windows 上 `bash` 工具回退到 cmd.exe 时，`default` 与 `auto` 模式都不自动放行任何命令（见[命令运行在哪个 shell](#命令运行在哪个-shell)）。
 - `auto` 模式的“项目内写入”按真实路径判断：会解析符号链接与 Windows junction（`mklink /J`），项目内指向项目外的链接及其下的新文件视为项目外；链接超过 40 跳或成环也视为项目外。
@@ -819,7 +820,7 @@ Agent（AI）在对话中可以调用以下工具。每个工具有其权限要�
 
 **自动校验也需要信任**：回合结束时自动推断并运行的构建/测试校验（`go build`、`cargo check`、`npx --no-install tsc`、`dotnet build`、`npm run build --if-present`、`python -m compileall`，以及自动运行的 `go test`/`pytest`/`dotnet test`）会执行仓库里的代码（`package.json` 脚本、`build.rs`、MSBuild 目标、`conftest.py`）。它们只在**受信任的项目目录**里、或 `auto`/`bypass` 模式下（这两种模式下构建/测试命令本来就免询问）自动运行；否则跳过并暗色提示一次“未信任的项目不自动运行构建/测试校验（npm run build 等会执行仓库里的脚本）；确认可信后输入 /trust”。跳过不算通过也不算失败。你在用户级 `config.json` 里明确写的 `done_verify_commands` 不受影响。
 
-对没有 `.cove.json` 的项目，`/trust` 信任的是项目目录（git 根目录，没有则为当前目录），只对这个目录生效，不包括其他目录；信任 `.cove.json` 时也同时信任它所在的目录。
+对没有 `.cove.json` 的项目，`/trust` 信任的是项目目录（git 根目录，没有则为当前目录），只对这个目录生效，不包括其他目录；信任 `.cove.json` 时也同时信任它所在的目录。该项目授权只覆盖已识别的常规开发操作；需要网络外发、安装/发布、未知命令或项目外写入的操作仍单独询问。
 
 ### config.json 示例
 

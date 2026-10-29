@@ -1358,6 +1358,18 @@ func (e *Engine) executeToolWithParts(ctx context.Context, tc api.ToolCall, part
 		OnProgress:       func(chunk string) { onProgress(chunk, false) },
 		OnStderrProgress: func(chunk string) { onProgress(chunk, true) },
 	}
+	// Trusting a project is a one-time approval for routine work in that
+	// project. Keep writes scoped to the project root; special shell commands
+	// (network, installs, git publishing, unknown commands) still go through
+	// the normal approval path below.
+	projectRoot := permission.ProjectRoot(cwd)
+	projectTrusted := dirTrusted(cwd) || (projectRoot != cwd && dirTrusted(projectRoot))
+	if projectTrusted && e.effectiveMode() != permission.Plan && e.effectiveMode() != permission.Bypass {
+		switch strings.ToLower(tc.Name) {
+		case "write", "edit":
+			tctx.PermissionMode = toolPermissionMode(permission.Auto, tc.Name, tc.Input, projectRoot)
+		}
+	}
 
 	if e.classifier != nil && permission.IsShellTool(tc.Name) {
 		cmd, _ := tc.Input["command"].(string)
@@ -1384,6 +1396,10 @@ func (e *Engine) executeToolWithParts(ctx context.Context, tc api.ToolCall, part
 				tctx.PermissionMode = "auto"
 				log.Debugf("[permission] %s auto-allowed: read-only or build command", tc.Name)
 			}
+		}
+		if projectTrusted && e.effectiveMode() != permission.Plan && e.effectiveMode() != permission.Bypass && e.classifier.AutoApproveLineFor(cmd, kind) {
+			tctx.PermissionMode = "auto"
+			log.Debugf("[permission] %s auto-allowed: trusted project routine command", tc.Name)
 		}
 	}
 
