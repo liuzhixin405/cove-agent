@@ -56,7 +56,7 @@ type chatRunner interface {
 }
 
 var (
-	Version = "12.3.4"
+	Version = "12.3.5"
 
 	BuildTime = "pro"
 
